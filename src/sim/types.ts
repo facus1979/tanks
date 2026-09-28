@@ -131,11 +131,72 @@ export const WEAPON_ORDER: WeaponId[] = ['normal', 'heavy', 'dirt', 'cluster', '
 
 export type PlayerKind = 'human' | 'ai'
 export type Difficulty = 'easy' | 'normal' | 'hard'
-export type Phase = 'aiming' | 'gameover'
+// aiming: se juega la ronda. roundover: terminó la ronda, se muestra la tabla.
+// shop: tienda entre rondas. gameover: terminó la partida (todas las rondas).
+export type Phase = 'aiming' | 'roundover' | 'shop' | 'gameover'
 
 // Tripulantes con cara propia. El renderer mapea crew -> sprite y retrato.
 export type CrewId = 'bandana' | 'sarge' | 'rookie' | 'desert'
 export const CREWS: CrewId[] = ['bandana', 'sarge', 'rookie', 'desert']
+
+// ---------- tienda e ítems ----------
+
+// shield: absorbe SHIELD_HP de daño hasta agotarse (se activa con useItem).
+// parachute: pasivo; anula el próximo daño de caída y se consume.
+// fuel: suma FUEL_PER_TURN al combustible del turno (useItem).
+// repair: cura REPAIR_HP (useItem, no gasta el turno).
+// tracer: el próximo tiro muestra la trayectoria completa al apuntar (useItem).
+export type ItemId = 'shield' | 'parachute' | 'fuel' | 'repair' | 'tracer'
+export const ITEM_ORDER: ItemId[] = ['shield', 'parachute', 'fuel', 'repair', 'tracer']
+export const SHIELD_HP = 30
+export const REPAIR_HP = 25
+
+export type ShopId = WeaponId | ItemId
+
+export interface ShopEntry {
+  id: ShopId
+  kind: 'weapon' | 'item'
+  name: string
+  price: number // por paquete
+  qty: number // unidades por paquete
+  max: number // tope de unidades en inventario
+}
+
+// Los precios y cantidades los balancea sim; los demás solo leen esta tabla.
+export const SHOP: ShopEntry[] = [
+  { id: 'heavy', kind: 'weapon', name: 'Pesada', price: 250, qty: 2, max: 9 },
+  { id: 'dirt', kind: 'weapon', name: 'Tierra', price: 120, qty: 3, max: 9 },
+  { id: 'cluster', kind: 'weapon', name: 'Racimo', price: 300, qty: 2, max: 9 },
+  { id: 'napalm', kind: 'weapon', name: 'Napalm', price: 280, qty: 2, max: 9 },
+  { id: 'digger', kind: 'weapon', name: 'Excavadora', price: 150, qty: 2, max: 9 },
+  { id: 'roller', kind: 'weapon', name: 'Rodadora', price: 220, qty: 2, max: 9 },
+  { id: 'nuke', kind: 'weapon', name: 'Nuke', price: 900, qty: 1, max: 2 },
+  { id: 'shield', kind: 'item', name: 'Escudo', price: 350, qty: 1, max: 3 },
+  { id: 'parachute', kind: 'item', name: 'Paracaídas', price: 120, qty: 1, max: 3 },
+  { id: 'fuel', kind: 'item', name: 'Combustible', price: 80, qty: 1, max: 5 },
+  { id: 'repair', kind: 'item', name: 'Reparación', price: 250, qty: 1, max: 3 },
+  { id: 'tracer', kind: 'item', name: 'Trazador', price: 150, qty: 1, max: 5 },
+]
+
+// Plata que se gana en la ronda. La reparte sim al cerrar la ronda.
+export const START_MONEY = 600
+export const EARN = { perDamage: 4, kill: 300, survive: 150, roundWin: 400, selfDamage: -4 }
+
+// ---------- partida ----------
+
+export interface SlotConfig {
+  kind: PlayerKind
+  name?: string // si falta, sim usa el nombre del tripulante
+  crew?: CrewId // si falta, sim asigna por índice
+}
+
+export interface MatchConfig {
+  slots: SlotConfig[] // 2 a 4 casilleros ocupados; hot-seat = varios 'human'
+  rounds: number // 1, 3, 5 o 10
+  difficulty: Difficulty
+  biome?: Biome | 'random' | 'rotate' // fijo, al azar por ronda, o rotando forest→jungle→industrial
+  seed?: number
+}
 
 export interface Player {
   id: number
@@ -150,8 +211,15 @@ export interface Player {
   power: number
   fuel: number
   weapon: WeaponId
-  ammo: Record<WeaponId, number>
+  ammo: Record<WeaponId, number> // se conserva entre rondas (lo comprado)
   alive: boolean
+  money: number
+  items: Record<ItemId, number> // inventario, se conserva entre rondas
+  shield: number // HP de escudo activo; 0 = sin escudo. Se pierde al terminar la ronda
+  tracer: boolean // el próximo tiro muestra la trayectoria completa
+  roundsWon: number
+  kills: number // en toda la partida
+  ready: boolean // en la tienda: terminó de comprar
 }
 
 export interface GameState {
@@ -166,8 +234,14 @@ export interface GameState {
   players: Player[]
   current: number
   phase: Phase
-  winnerId: number | null
+  winnerId: number | null // ganador de la PARTIDA (en gameover)
+  roundWinnerId: number | null // ganador de la última ronda (en roundover/shop)
   turn: number
+  round: number // 1..rounds
+  rounds: number
+  difficulty: Difficulty
+  biomeMode: Biome | 'random' | 'rotate'
+  earnings: Record<number, number> // plata ganada en la última ronda, por id de jugador
 }
 
 export type Command =
@@ -175,6 +249,12 @@ export type Command =
   | { type: 'selectWeapon'; playerId: number; weapon: WeaponId }
   | { type: 'move'; playerId: number; dir: -1 | 1 } // F6: un paso de ~1 px gastando combustible
   | { type: 'fire'; playerId: number }
+  | { type: 'useItem'; playerId: number; item: ItemId } // shield, fuel, repair, tracer; en su turno
+  | { type: 'nextRound' } // roundover → shop (o gameover si era la última)
+  | { type: 'buy'; playerId: number; id: ShopId } // shop: compra un paquete
+  | { type: 'sell'; playerId: number; id: ShopId } // shop: devuelve un paquete al 50%
+  | { type: 'ready'; playerId: number } // shop: listo. Con todos los humanos listos arranca la ronda
+// Las IA compran solas al entrar a la tienda (determinista, con el rng del estado).
 
 export interface Vec2 {
   x: number
@@ -214,11 +294,16 @@ export type GameEvent =
   // t opcional: momento de playback. Sin t, el evento va con el impacto anterior de la lista.
   | { type: 'damage'; playerId: number; amount: number; hp: number; t?: number }
   | { type: 'death'; playerId: number; t?: number }
-  | { type: 'fall'; playerId: number; from: number; to: number; t?: number }
+  | { type: 'fall'; playerId: number; from: number; to: number; parachute?: boolean; t?: number }
   | { type: 'prop'; propId: number; kind: PropKind; x: number; y: number; destroyed: boolean; t?: number }
   | { type: 'burn'; x: number; y: number; w: number; t?: number } // napalm quemando una franja
+  | { type: 'shield'; playerId: number; absorbed: number; left: number; t?: number } // el escudo paró daño
+  | { type: 'item'; playerId: number; item: ItemId } // useItem aplicado
   | { type: 'turn'; playerId: number }
   | { type: 'wind'; value: number }
+  | { type: 'roundover'; winnerId: number | null; earnings: Record<number, number>; last: boolean }
+  | { type: 'round'; round: number; biome: Biome } // arrancó una ronda nueva (mapa nuevo)
+  | { type: 'shop' }
   | { type: 'gameover'; winnerId: number | null }
   | { type: 'empty'; playerId: number }
 
@@ -226,13 +311,6 @@ export interface StepResult {
   state: GameState
   events: GameEvent[]
   flights?: Flight[]
-}
-
-export interface MatchConfig {
-  bots: number
-  difficulty: Difficulty
-  biome?: Biome
-  seed?: number
 }
 
 export const TANK_COLORS = [0x3d8cf0, 0xe23d3d, 0xe2c13d, 0x3dbe5a]

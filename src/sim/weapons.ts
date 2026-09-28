@@ -174,7 +174,7 @@ function napalm(state: GameState, ix: number, iy: number, t0: number, seconds: n
     hurt(p, NAPALM_DPS * seconds, events)
     for (let i = mark; i < events.length; i++) {
       const e = events[i]
-      if (e.type === 'damage' || e.type === 'death') e.t = t0 + 0.4
+      if (e.type === 'damage' || e.type === 'death' || e.type === 'shield') e.t = t0 + 0.4
     }
   }
   for (const prop of state.props) {

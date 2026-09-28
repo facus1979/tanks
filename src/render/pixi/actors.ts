@@ -8,6 +8,8 @@ import { mul } from './raster'
 
 export const RECOIL_TIME = 0.28
 export const BUBBLE_TIME = 1.2
+export const CHUTE_SPEED = 42 // px/s de bajada colgado del paracaídas
+const CHUTE_FOLD = 0.3
 export const BUBBLE_HOLD = 3 // máximo que un globo espera oculto a que se despeje el fuego
 // Lugares candidatos para el globo, de más cerca a más lejos: primero arriba, después al costado.
 const BUBBLE_SPOTS: [number, number][] = (() => {
@@ -78,10 +80,41 @@ export class TankView {
   private lastX: number | null = null
   private treadPos = 0
   private tilt = 0
+  private chute = new Sprite()
+  private chuteLines = new Graphics()
+  dropOff = 0 // px que el tanque está por encima de su lugar final (paracaídas)
+  landed = false // aterrizó este frame: el renderer levanta el polvo
+  private chuteAge = 0
+  private fold = 0
 
   constructor() {
     this.root.addChild(this.antenna, this.barrel, this.body, this.tread, this.crew)
-    this.overlay.addChild(this.tag, this.bubble)
+    this.chute.anchor.set(0.5, 1)
+    this.chute.visible = false
+    this.overlay.addChild(this.chuteLines, this.chute, this.tag, this.bubble)
+  }
+
+  startChute(height: number): void {
+    if (height < 3) return
+    this.dropOff = height
+    this.chuteAge = 0
+    this.fold = 0
+  }
+
+  stepChute(dt: number, alive: boolean): void {
+    if (!alive) {
+      this.dropOff = 0
+      this.fold = 0
+      return
+    }
+    if (this.dropOff > 0) {
+      this.chuteAge += dt
+      this.dropOff = Math.max(0, this.dropOff - CHUTE_SPEED * dt)
+      if (this.dropOff === 0) {
+        this.fold = CHUTE_FOLD
+        this.landed = true
+      }
+    } else if (this.fold > 0) this.fold = Math.max(0, this.fold - dt)
   }
 
   destroy(): void {
@@ -92,7 +125,8 @@ export class TankView {
   update(art: Art, p: Player, current: boolean, time: number, wind: number, blocked?: Blocked, terrain?: Terrain): void {
     const facing = p.angle > 90 ? -1 : 1
     const x0 = Math.round(p.x) - TANK_W / 2
-    const top = Math.round(p.y) - TANK_H
+    const swing = this.dropOff > 0 ? Math.sin(time * 3.2) : 0
+    const top = Math.round(p.y) - TANK_H - Math.round(this.dropOff)
     const root = this.root
     root.visible = true
     root.scale.x = facing
@@ -105,7 +139,7 @@ export class TankView {
     root.pivot.set(facing > 0 ? px - x0 : x0 + TANK_W - px, TANK_H)
     root.x = px
     root.y = top + TANK_H
-    root.rotation = this.tilt
+    root.rotation = this.tilt + swing * 0.05
 
     const alive = p.alive
     const dx = this.lastX === null ? 0 : p.x - this.lastX
@@ -149,6 +183,7 @@ export class TankView {
     }
 
     const cx = Math.round(p.x)
+    this.drawChute(art, cx, top, swing, alive)
     let y = top - 26
     this.tag.visible = alive && current
     if (this.tag.visible) {
@@ -184,6 +219,29 @@ export class TankView {
         this.held = true
       }
     }
+  }
+
+  private drawChute(art: Art, cx: number, top: number, swing: number, alive: boolean): void {
+    const g = this.chuteLines
+    g.clear()
+    const open = this.dropOff > 0
+    const folding = this.fold > 0
+    this.chute.visible = alive && (open || folding)
+    if (!this.chute.visible) return
+    const k = folding ? this.fold / CHUTE_FOLD : 1
+    const opened = Math.min(1, this.chuteAge / 0.18)
+    const sx = (0.4 + 0.6 * opened) * (folding ? 1 + (1 - k) * 0.3 : 1)
+    const sy = (0.3 + 0.7 * opened) * (folding ? 0.2 + 0.8 * k : 1)
+    const c = this.chute
+    c.texture = art.props.parachute
+    c.scale.set(sx, sy)
+    c.alpha = folding ? k : 1
+    c.x = cx + Math.round(swing * 2)
+    c.y = top - 6 + (folding ? Math.round((1 - k) * 6) : 0)
+    if (!open) return
+    const hw = (c.texture.width / 2) * sx * 0.9
+    g.moveTo(c.x - hw, c.y).lineTo(cx - 4, top + 3).stroke({ width: 1, color: 0x2a2a24 })
+    g.moveTo(c.x + hw, c.y).lineTo(cx + 4, top + 3).stroke({ width: 1, color: 0x2a2a24 })
   }
 
   private drawAntenna(art: Art, color: number, time: number, wind: number, recoil: number): void {

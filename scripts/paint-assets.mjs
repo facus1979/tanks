@@ -9,6 +9,7 @@ import { tankBody, tankWreck, barrelGeometry, barrelStrip, treadStrip, crewSprit
 import * as TX from './lookdev/textures.mjs'
 import { BIOME_PAINTERS, BIOME_BG, BIOME_PALETTE, BG_W, BG_H } from './lookdev/biomes.mjs'
 import * as UI from './lookdev/ui.mjs'
+import * as F10 from './lookdev/f10.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const outDir = path.join(root, 'public', 'assets')
@@ -141,6 +142,7 @@ const props = {
   lamp: save('props/lamp.png', UI.lampProp()),
   flag: strip('props/flag.png', UI.flagStrip(), UI.FLAG_CELL, UI.FLAG_FRAMES),
   windsock: strip('props/windsock.png', UI.windsockStrip(), UI.SOCK_CELL, UI.SOCK_FRAMES),
+  parachute: save('props/parachute.png', F10.parachuteProp()),
 }
 
 const fontCv = UI.fontStrip()
@@ -152,6 +154,8 @@ const ui = {
   arrow: save('ui/arrow.png', UI.arrowUp()),
   pip: strip('ui/pip.png', UI.pipStrip(), { w: 4, h: 5 }, 2),
   weaponIcons: strip('ui/weapons.png', UI.weaponIconStrip(), { w: 12, h: 12 }, 8),
+  itemIcons: strip('ui/items.png', F10.itemIconStrip(), { w: 12, h: 12 }, 5),
+  logo: save('ui/logo.png', F10.logo()),
 }
 
 // ---------- manifiesto ----------
@@ -327,6 +331,19 @@ function sheetUi() {
   fs.writeFileSync(path.join(previewDir, 'sheet-ui.png'), cv.scaledPng(5))
 }
 
+function sheetF10() {
+  const cv = new Canvas(330, 150)
+  cv.rect(0, 0, cv.w, cv.h, 0x6a7a8a)
+  for (let y = 0; y < 50; y++) for (let x = 0; x < 330; x++) cv.put(x, 100 + y, ((x >> 3) + (y >> 3)) & 1 ? 0x8ab0d0 : 0x94b8d8)
+  cv.blit(F10.logo(), 5, 2)
+  label(cv, 'ITEMS', 4, 102)
+  const it = F10.itemIconStrip()
+  for (let f = 0; f < 5; f++) cv.blit(cellOf(it, ui.itemIcons, f), 4 + f * 14, 111)
+  cv.blit(F10.parachuteProp(), 90, 106)
+  cv.blit(UI.crateProp(), 100, 122)
+  fs.writeFileSync(path.join(previewDir, 'sheet-f10.png'), cv.scaledPng(3))
+}
+
 function hudPanel(cv, x, y, color, name, crew, pips) {
   cv.rect(x, y, 36, 36, OUT)
   cv.rect(x + 1, y + 1, 34, 34, color)
@@ -346,5 +363,6 @@ sheetTanks()
 sheetMaterials()
 for (const b of BIOMES) sheetBiome(b)
 sheetUi()
+sheetF10()
 
 console.log(`assets: ${written.length} archivos en public/assets, manifest v2; cañón ${geo.cell.w}×${geo.cell.h} pivote ${geo.pivot.x},${geo.pivot.y}`)

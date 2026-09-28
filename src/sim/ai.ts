@@ -3,7 +3,18 @@ import { applyCommand, cloneState } from './game'
 import { blastDamage } from './physics'
 import { Rng, hashSeed } from './rng'
 import { NAPALM_DPS, NAPALM_SPREAD, resolveShot } from './weapons'
-import { TANK_H, WEAPONS, WEAPON_ORDER, type Difficulty, type GameState, type Player, type WeaponId } from './types'
+import {
+  PLAYER_HP,
+  REPAIR_HP,
+  TANK_H,
+  WEAPONS,
+  WEAPON_ORDER,
+  type Difficulty,
+  type GameState,
+  type ItemId,
+  type Player,
+  type WeaponId,
+} from './types'
 
 const ERROR: Record<Difficulty, { angle: number; power: number }> = {
   easy: { angle: 9, power: 12 },
@@ -25,11 +36,33 @@ const COST: Record<WeaponId, number> = {
 
 // move: pixels a mover antes de apuntar (signo = dirección). Angle y power ya son para la
 // posición nueva. La sesión manda |move| comandos 'move' y después apunta.
+// items: ítems a usar antes de todo (un 'useItem' por cada uno, en orden).
 export interface ShotPlan {
   angle: number
   power: number
   weapon: WeaponId
   move?: number
+  items?: ItemId[]
+}
+
+// Umbrales de vida para reparar y para activar el escudo.
+const ITEM_HP: Record<Difficulty, { repair: number; shield: number }> = {
+  easy: { repair: 40, shield: 55 },
+  normal: { repair: 60, shield: 80 },
+  hard: { repair: PLAYER_HP - REPAIR_HP, shield: PLAYER_HP },
+}
+
+// Ítems que la IA usa este turno: reparación si está golpeada, escudo si conviene.
+export function chooseItems(state: GameState, difficulty: Difficulty): ItemId[] {
+  const actor = state.players[state.current]
+  const th = ITEM_HP[difficulty]
+  const items: ItemId[] = []
+  if (actor.items.repair > 0 && actor.hp <= th.repair) items.push('repair')
+  const rivals = state.players.filter((p) => p.alive && p.id !== actor.id).length
+  // la difícil lo prende de entrada si hay más de un rival
+  const threat = difficulty === 'hard' ? rivals >= 2 || actor.hp < PLAYER_HP : actor.hp <= th.shield
+  if (actor.items.shield > 0 && actor.shield <= 0 && threat) items.push('shield')
+  return items
 }
 
 interface Candidate {
@@ -52,8 +85,10 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
   const weapons = WEAPON_ORDER.filter((id) => actor.ammo[id] > 0 && WEAPONS[id].terrain !== 'build')
   const fallback = weapons[0] ?? WEAPON_ORDER.find((id) => actor.ammo[id] > 0) ?? 'normal'
   const targets = state.players.filter((p) => p.alive && p.id !== actor.id)
+  const items = chooseItems(state, difficulty)
+  const extra = items.length > 0 ? { items } : {}
   if (targets.length === 0 || weapons.length === 0) {
-    return { angle: actor.angle, power: Math.max(30, actor.power), weapon: fallback }
+    return { angle: actor.angle, power: Math.max(30, actor.power), weapon: fallback, ...extra }
   }
 
   const here = search(state, weapons, true)
@@ -78,7 +113,7 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
   // tapado y sin tiro: excavadora hacia el rival más cercano
   if (best.score < 1000 && move === 0 && here.blocked > 0.5 && actor.ammo.digger > 0) {
     const t = nearest(actor, targets)
-    return { angle: t.x > actor.x ? 30 : 150, power: 45, weapon: 'digger' }
+    return { angle: t.x > actor.x ? 30 : 150, power: 45, weapon: 'digger', ...extra }
   }
 
   const err = ERROR[difficulty]
@@ -88,6 +123,7 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
     weapon: best.weapon,
   }
   if (move !== 0) plan.move = move
+  if (items.length > 0) plan.items = items
   return plan
 }
 
@@ -173,7 +209,7 @@ function estimate(
     for (const t of targets) {
       let d = t.id === flight.impact.tankId ? w.damage : blastDamage(t, blast)
       if (w.burn && Math.abs(t.x - x) < NAPALM_SPREAD && Math.abs(t.y - y) < 30) d += NAPALM_DPS * w.burn
-      dmg += Math.min(t.hp, d)
+      dmg += Math.min(t.hp + t.shield, d)
     }
     const self = blastDamage(actor, blast)
     const score = dmg > 0 ? 1000 + dmg * 10 - self * 18 - COST[id] : -near - self * 18 - COST[id] * 0.01

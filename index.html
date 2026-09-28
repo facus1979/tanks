@@ -10,9 +10,10 @@
     <div id="app">
       <div id="stage" hidden></div>
       <div id="hud" hidden></div>
-      <div id="menu" class="screen" hidden></div>
-      <div id="overlay" class="screen result" hidden></div>
     </div>
     <script type="module" src="/src/main.ts"></script>
+    <script type="module">
+      if (location.search.includes('uitest=')) import('/src/ui/uitest.ts')
+    </script>
   </body>
 </html>

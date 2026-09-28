@@ -1,8 +1,13 @@
 // HUD al estilo Broforce: un canvas de 800×450 sobre el del juego, escalado igual y pixelado.
-import { WEAPONS, WORLD_H, WORLD_W, type CrewId, type WeaponId } from '../sim/types'
+import { ITEM_ORDER, WEAPONS, WORLD_H, WORLD_W, type CrewId, type ItemId, type WeaponId } from '../sim/types'
 import type { Viewport } from '../render/types'
 import { uiAssets, type UiAssets } from './assets'
 import { OUT, css, drawText, measure } from './pixelfont'
+import type { HudExtras } from './types'
+
+// Tecla de cada ítem usable (el paracaídas es pasivo). La lee también el flujo de entrada.
+export const ITEM_KEYS: Partial<Record<ItemId, string>> = { shield: 'Q', fuel: 'F', repair: 'R', tracer: 'T' }
+const ITEM_NAMES: Record<ItemId, string> = { shield: 'ESCUDO', parachute: 'PARACAIDAS', fuel: 'COMBUSTIBLE', repair: 'REPARAR', tracer: 'TRAZADOR' }
 
 export interface HudSide {
   name: string
@@ -30,6 +35,7 @@ export interface HudModel {
   ammoAll: Record<WeaponId, number>
   fuel: number // 0..1 del combustible del turno
   showBar: boolean // selector y combustible: solo en el turno humano
+  extras?: HudExtras // ronda, plata, ítems (F10)
 }
 
 const PIPS = 6
@@ -95,6 +101,7 @@ export class Hud {
     const right = model.rival ? this.side(assets, model.rival, true) : WORLD_W - 2
     this.compacts(assets, model.others, right, model.showBar)
     this.top(assets, model)
+    if (model.extras) this.extras(assets, model.extras, model.showBar)
     this.barVisible = model.showBar
     if (model.showBar) this.weaponBar(assets, model)
   }
@@ -391,6 +398,73 @@ export class Hud {
       rect(ctx, sx - 4, sy - 2, w + 8, font.h + 4, DARK)
       drawText(ctx, font, text, sx, sy, GOLD)
     }
+  }
+
+  // Esquina superior izquierda: ronda y plata, y debajo los ítems con cantidad y tecla.
+  private extras(assets: UiAssets, ex: HudExtras, showItems: boolean): void {
+    const ctx = this.ctx
+    const font = assets.font
+    const round = `RONDA ${ex.round}/${ex.rounds}`
+    const money = `$${ex.money}`
+    const w = Math.max(measure(font, round), measure(font, money)) + 10
+    const h = font.h * 2 + 12
+    const x0 = 3
+    const y0 = 3
+    rect(ctx, x0, y0, w, h, OUT)
+    rect(ctx, x0 + 1, y0 + 1, w - 2, h - 2, BRONZE)
+    rect(ctx, x0 + 2, y0 + 2, w - 4, h - 4, DARK)
+    drawText(ctx, font, round, x0 + 5, y0 + 4, GREY)
+    drawText(ctx, font, money, x0 + 5, y0 + 6 + font.h, GOLD)
+    let y = y0 + h + 3
+    if (ex.shield > 0) {
+      const t = `ESCUDO ${Math.ceil(ex.shield)}`
+      const tw = measure(font, t) + 8
+      rect(ctx, x0, y, tw, font.h + 6, OUT)
+      rect(ctx, x0 + 1, y + 1, tw - 2, font.h + 4, 0x2a5aa0)
+      drawText(ctx, font, t, x0 + 4, y + 3, 0xffffff)
+      y += font.h + 9
+    }
+    if (ex.tracer) {
+      const t = 'TRAZADOR'
+      const tw = measure(font, t) + 8
+      rect(ctx, x0, y, tw, font.h + 6, OUT)
+      rect(ctx, x0 + 1, y + 1, tw - 2, font.h + 4, 0xa07a1a)
+      drawText(ctx, font, t, x0 + 4, y + 3, 0xffffff)
+      y += font.h + 9
+    }
+    if (!showItems) return
+    for (const id of ITEM_ORDER) {
+      const n = ex.items[id] ?? 0
+      const key = ITEM_KEYS[id]
+      const label = `x${n}`
+      const cw = 12 + 4 + measure(font, label) + (key ? 4 + measure(font, key) + 6 : 0) + 6
+      rect(ctx, x0, y, cw, 16, OUT)
+      rect(ctx, x0 + 1, y + 1, cw - 2, 14, n > 0 ? 0x2a2220 : 0x14100e)
+      ctx.save()
+      if (n <= 0) ctx.globalAlpha = 0.35
+      this.itemIcon(assets, id, x0 + 3, y + 2)
+      ctx.restore()
+      let tx = x0 + 3 + 12 + 4
+      tx += drawText(ctx, font, label, tx, y + 5, n > 0 ? 0xffffff : 0x6a625a) + 4
+      if (key) {
+        rect(ctx, tx, y + 3, measure(font, key) + 4, font.h + 4, n > 0 ? GOLD : 0x4a4440)
+        drawText(ctx, font, key, tx + 2, y + 5, DARK, null)
+      }
+      y += 17
+    }
+  }
+
+  private itemIcon(assets: UiAssets, id: ItemId, x: number, y: number): void {
+    const ctx = this.ctx
+    const icons = assets.itemIcons
+    const index = ITEM_ORDER.indexOf(id)
+    if (icons && index >= 0 && index < icons.frames) {
+      ctx.drawImage(icons.img, index * icons.w, 0, icons.w, icons.h, x, y, 12, 12)
+      return
+    }
+    rect(ctx, x, y, 12, 12, OUT)
+    rect(ctx, x + 1, y + 1, 10, 10, 0x3d8cf0)
+    drawText(ctx, assets.font, ITEM_NAMES[id][0], x + 4, y + 3, 0xffffff, null)
   }
 
   private icon(assets: UiAssets, weapon: WeaponId, x: number, y: number): void {

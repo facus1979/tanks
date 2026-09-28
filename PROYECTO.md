@@ -52,6 +52,31 @@ Valores finales de `WEAPONS` (F9). Balance medido con `npm run sim-check` (IA no
 
 La IA: error normal ±6° y ±7 de potencia. Si no tiene tiro, prueba moverse (`ShotPlan.move`, pixels con signo; la sesión manda esos comandos `move` antes de apuntar). Tapada y sin tiro, usa la excavadora. Elige el arma verificando con la simulación completa y con un costo por munición especial.
 
+### Rondas y tienda (F10)
+
+Valores de `SHOP`, `EARN`, `START_MONEY` (600), `SHIELD_HP` (30) y `REPAIR_HP` (25). Cada jugador arranca con el kit de `WEAPONS.ammo`; la munición y los ítems se conservan entre rondas (la normal vuelve a 99). Vender devuelve el 50%. La plata nunca queda negativa.
+
+| Artículo | Precio | Paquete | Máx |
+|---|---|---|---|
+| Pesada | 250 | 2 | 9 |
+| Tierra | 120 | 3 | 9 |
+| Racimo | 300 | 2 | 9 |
+| Napalm | 280 | 2 | 9 |
+| Excavadora | 150 | 2 | 9 |
+| Rodadora | 220 | 2 | 9 |
+| Nuke | 900 | 1 | 2 |
+| Escudo (absorbe 30) | 350 | 1 | 3 |
+| Paracaídas | 120 | 1 | 3 |
+| Combustible (+60) | 80 | 1 | 5 |
+| Reparación (+25) | 250 | 1 | 3 |
+| Trazador | 150 | 1 | 5 |
+
+Plata por ronda: 4 por punto de daño a otros (escudo incluido), 300 por kill, 150 por sobrevivir, 400 por ganar la ronda, −4 por punto de autodaño. Campeón: más rondas ganadas, después kills, después plata; empate total sin campeón. Mapa de cada ronda con `roundSeed(seed, ronda)` (la ronda 1 da el mismo mapa que antes); bioma `rotate` = bosque → jungla → industrial, `random` derivado de la seed.
+
+La IA compra al entrar a la tienda (`aiShop`, pesos por dificultad; la difícil junta para la nuke) y usa reparación y escudo con umbrales de vida por dificultad (`chooseItems`; `ShotPlan.items` se aplica con `useItem` antes de moverse).
+
+Balance medido con `npm run sim-check -- --balance` (30 partidas de 3 rondas, 3-4 IA normal): compran algo en 203/210 visitas, gasto medio 845 por visita, ganancia media 741 por ronda, 26.6 tiros por ronda (21.0 / 27.6 / 31.2 por ronda), el ganador de una ronda repite en 21/60 y el que entra con más plata gana 22/60 (sin bola de nieve).
+
 ### Controles
 
 | Tecla | Acción |
@@ -62,9 +87,13 @@ La IA: error normal ±6° y ±7 de potencia. Si no tiene tiro, prueba moverse (`
 | 1 a 8 o click en el selector | Elige arma (orden de `WeaponId`; sin munición queda gris) |
 | Espacio | Disparar |
 | M | Silencia / activa el sonido |
-| Esc | En la pantalla de victoria, vuelve al menú |
+| Q / F / R / T | Ítems: escudo, combustible, reparación, trazador (solo en tu turno; el paracaídas es pasivo) |
+| P | Pausa |
+| Esc | En la tabla, vuelve al menú |
 
-QA: `?play=<seed>` (con `&biome=` opcional) entra directo a una partida humana contra 2 IAs.
+Gamepad: stick o cruz = ángulo y potencia, gatillos o bumpers = mover, A dispara, X/Y arma anterior/siguiente, B primer ítem usable (escudo, reparación, combustible, trazador), Start pausa. En las pantallas: A elige/compra, B atrás/vende, Start LISTO/JUGAR.
+
+QA: `?play=<seed>&humans=N&bots=N&rounds=N` (con `&biome=` opcional) entra directo a una partida; `&aisync=1` corre la IA en el hilo principal en vez del worker. `?uitest=title|menu|banner|score|final|shop|hud` muestra cada vista con modelos falsos (`&s=2` fuerza la escala de UI).
 
 ## Arquitectura
 
@@ -98,7 +127,7 @@ Para no romper el online más adelante:
 
 ### Modo demo (QA visual)
 
-`?demo=<seed>` arranca sola una partida en el bosque con 3 IAs y hace que P1 dispare un tiro fijo. El render se congela en el pico de la explosión. `?demo=<seed>&biome=jungle` cambia el bioma y `&freeze=0` no congela. `&weapon=<WeaponId>` hace que el tiro fijo de P1 use esa arma (QA de racimo, napalm, excavadora, rodadora y nuke). `?fxtest=<WeaponId>` (solo render) dibuja explosiones y proyectiles con el estilo de esa arma sin cambiar el terreno. `node scripts/screenshot.mjs "demo=1" preview/game-demo.png` saca la captura a 1920×1080 para comparar contra `preview/look-test-1080.png`.
+`?demo=<seed>` arranca sola una partida de 1 ronda en el bosque con 4 IAs (P1 con la pestaña VOS, sin extras de ronda/plata en el HUD) y hace que P1 dispare un tiro fijo. El render se congela en el pico de la explosión. `?demo=<seed>&biome=jungle` cambia el bioma y `&freeze=0` no congela. `&weapon=<WeaponId>` hace que el tiro fijo de P1 use esa arma (QA de racimo, napalm, excavadora, rodadora y nuke). `?fxtest=<WeaponId>` (solo render) dibuja explosiones y proyectiles con el estilo de esa arma sin cambiar el terreno. `node scripts/screenshot.mjs "demo=1" preview/game-demo.png` saca la captura a 1920×1080 para comparar contra `preview/look-test-1080.png`.
 
 ### Dueños de archivos (trabajo en paralelo)
 
@@ -107,7 +136,11 @@ Para no romper el online más adelante:
 | sim | `src/sim/**` (salvo cambios de contrato), `scripts/sim-check.ts` |
 | arte | `scripts/paint-assets.mjs`, `scripts/lookdev/**`, `public/assets/**` |
 | render | `src/render/**` (salvo `manifest.ts`) |
-| juego y UI | `index.html`, `src/style.css`, `src/main.ts`, `src/game/**`, `src/ui/**`, `src/input/**`, `src/audio/**` |
+| vistas | `index.html`, `src/style.css`, `src/ui/**` (salvo `src/ui/types.ts`) |
+| flujo | `src/main.ts`, `src/game/**`, `src/input/**`, `src/audio/**` |
+| publicación | `.github/**`, `README.md`, `vite.config.ts` |
+
+Contratos extra: `src/ui/types.ts` (vistas ↔ flujo: título, menú, tienda, tabla, cartel de hot-seat, extras del HUD).
 
 ## Roadmap
 
@@ -132,6 +165,9 @@ Las fases F1 a F4 forman la primera muestra, que tiene que parecerse a la refere
 - **F9 Feel, audio y balance.** Sonido por arma y material, partidas de 8 a 15 tiros, IA ajustada.
   - Estado: hecha, con el ajuste fino pendiente de oído. Sonido por arma y por material dominante del debris; 11.1 tiros por partida con 2 tanques y 20.6 con 4.
   - Rendimiento (2026-09-28, Chrome headless, GPU Intel D3D11, build de producción, rAF 20 s en tiempo real): `?demo=5&freeze=0` frame medio 16.7–16.8 ms, p95 16.8 ms, picos sueltos de 50–67 ms (turno de IA / inicio de explosión); `?fxtest=nuke` frame medio 16.7 ms, p95 16.8 ms. Antes del arreglo el demo daba 17.4–17.5 ms de media: `Raster.light()` se comía ~29% del CPU y ahora usa la caída tabulada por radio y recorta cada fila a su cuerda.
+- **F10 Rondas, tienda y hot-seat.** Partida de 1/3/5/10 rondas con mapa nuevo, plata por daño/kills/supervivencia, tienda entre rondas (armas, escudo, paracaídas, combustible, reparación, trazador), IA que compra, 2-4 casilleros humano/IA (hot-seat con cartel de turno), tabla entre rondas.
+- **F11 Feel II.** Pantalla de título con logo, tripulante eyectado al morir, cámara lenta en el golpe que cierra la ronda, IA en un worker (sin tirones), gamepad.
+- **F12 Publicación.** Deploy a GitHub Pages con GitHub Actions, README.
 - **Online**, como antes: servidor autoritativo que corre el mismo `sim`, sin lockstep.
 
 ## Cómo se agrega algo

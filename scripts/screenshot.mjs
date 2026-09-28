@@ -61,7 +61,9 @@ try {
     `--screenshot=${shotFile}`,
     `http://localhost:${port}/?${query}`,
   ])
-  fs.rmSync(profile, { recursive: true, force: true })
+  try {
+    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 })
+  } catch {} // Chrome puede seguir cerrando; el perfil queda en node_modules/.shot-*
   if (!fs.existsSync(shotFile)) throw new Error('Chrome no generó la captura')
   if (crop) {
     const [x, y, w, h] = crop
@@ -97,7 +99,7 @@ function run(cmd, args) {
     const timer = setTimeout(() => {
       p.kill()
       reject(new Error('Chrome tardó demasiado'))
-    }, 60000)
+    }, 180000)
     p.on('exit', () => {
       clearTimeout(timer)
       resolve()

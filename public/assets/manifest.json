@@ -250,7 +250,8 @@
         "h": 30
       },
       "frames": 7
-    }
+    },
+    "parachute": "props/parachute.png"
   },
   "ui": {
     "bubbleAlert": "ui/bubble-alert.png",
@@ -278,6 +279,15 @@
         "h": 12
       },
       "frames": 8
-    }
+    },
+    "itemIcons": {
+      "file": "ui/items.png",
+      "cell": {
+        "w": 12,
+        "h": 12
+      },
+      "frames": 5
+    },
+    "logo": "ui/logo.png"
   }
 }

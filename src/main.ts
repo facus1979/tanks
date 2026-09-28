@@ -1,19 +1,35 @@
 import { PixiRenderer } from './render/pixi/PixiRenderer'
 import { Keyboard, weaponSlot } from './input/keyboard'
+import { Gamepad } from './input/gamepad'
 import { Sfx } from './audio/sfx'
 import { Session } from './game/session'
 import { Hud, WEAPON_SLOTS } from './ui/hud'
 import { loadUiAssets } from './ui/assets'
-import { Menu, ResultScreen, refreshLabels } from './ui/menu'
-import { ANGLE_SPEED, BIOMES, POWER_SPEED, WEAPON_ORDER, type Biome, type WeaponId, type GameEvent, type MatchConfig } from './sim/types'
+import { createMenuView, refreshLabels } from './ui/menu'
+import { createTitleView } from './ui/title'
+import { createBannerView } from './ui/banner'
+import { createScoreboardView } from './ui/scoreboard'
+import { createShopView } from './ui/shop'
+import { DEFAULT_CONFIG } from './ui/types'
+import {
+  ANGLE_SPEED,
+  BIOMES,
+  POWER_SPEED,
+  WEAPON_ORDER,
+  type Biome,
+  type GameEvent,
+  type ItemId,
+  type MatchConfig,
+  type SlotConfig,
+  type WeaponId,
+} from './sim/types'
 
 const stage = must(document.querySelector<HTMLElement>('#stage'))
 const hudRoot = must(document.querySelector<HTMLElement>('#hud'))
-const menuRoot = must(document.querySelector<HTMLElement>('#menu'))
-const overlayRoot = must(document.querySelector<HTMLElement>('#overlay'))
 
 const params = new URLSearchParams(location.search)
-const demoParam = params.get('demo')
+const uitest = params.get('uitest')
+const demoParam = uitest ? null : params.get('demo')
 const demo =
   demoParam == null
     ? null
@@ -27,21 +43,34 @@ const demo =
         weapon: (WEAPON_ORDER as string[]).includes(params.get('weapon') ?? '') ? (params.get('weapon') as WeaponId) : undefined,
       }
 
-// ?play=<seed>: QA, entra directo a una partida humana contra 2 IAs sin pasar por el menú.
-const playParam = demo ? null : params.get('play')
+// ?play=<seed>: QA, entra directo a una partida sin pasar por el título ni el menú.
+// &humans=N (hot-seat), &bots=N, &rounds=N.
+const playParam = demo || uitest ? null : params.get('play')
+// &aisync=1: QA, la IA calcula en el hilo principal (para comparar contra el worker)
+const aiSync = params.get('aisync') === '1'
+
+const ITEM_KEYS: Record<string, ItemId> = { KeyQ: 'shield', KeyF: 'fuel', KeyR: 'repair', KeyT: 'tracer' }
 
 const renderer = new PixiRenderer()
 const keys = new Keyboard()
+const pad = new Gamepad()
 const sfx = new Sfx()
 const session = new Session()
+session.syncAi = aiSync
 const hud = new Hud(hudRoot)
-const menu = new Menu(menuRoot, (config) => begin(config), () => sfx.click())
-const result = new ResultScreen(overlayRoot, () => begin(lastConfig), () => toMenu(), () => sfx.click())
+const title = createTitleView()
+const menu = createMenuView()
+const banner = createBannerView()
+const scoreboard = createScoreboardView()
+const shop = createShopView()
 
-let mode: 'menu' | 'play' = 'menu'
-let lastConfig: MatchConfig = { bots: 2, difficulty: 'normal', biome: 'forest' }
+let screen: 'title' | 'menu' | 'play' = 'title'
+// qué vista tapa la partida
+let overlay: 'none' | 'banner' | 'score' | 'final' | 'shop' = 'none'
+let shopFor: number | null = null
+let paused = false
+let lastConfig: MatchConfig = DEFAULT_CONFIG
 let lastWind: number | null = null
-let resultShown = false
 
 void loadUiAssets().then(() => {
   refreshLabels()
@@ -55,7 +84,7 @@ window.addEventListener('keydown', unlock)
 
 // Click en el selector de armas del HUD.
 window.addEventListener('pointerdown', (e) => {
-  if (mode !== 'play' || result.visible || !session.inputEnabled) return
+  if (screen !== 'play' || overlay !== 'none' || paused || !session.inputEnabled) return
   const weapon = hud.weaponAt(e.clientX, e.clientY)
   if (!weapon) return
   e.preventDefault()
@@ -65,30 +94,52 @@ window.addEventListener('pointerdown', (e) => {
 
 window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyM') sfx.toggleMute()
-  if (e.code === 'Escape' && result.visible) toMenu()
 })
 
-menu.enabled = false
-if (demo || playParam != null) menu.hide()
-else menu.show()
+if (uitest) {
+  // la página de prueba de vistas la monta index.html
+} else if (demo || playParam != null) {
+  // entra directo a la partida
+} else {
+  showTitle()
+}
 
 // Sin top-level await: Pixi importa sus renderers en chunks que dependen de este
 // módulo, y en el build eso deja el import dinámico esperando para siempre.
-void renderer.mount(stage).then(() => {
-  menu.enabled = true
-  renderer.setLoop(tick)
-  layout()
-  window.addEventListener('resize', layout)
-  if (demo) {
-    session.start({ bots: 3, difficulty: 'hard', biome: demo.biome, seed: demo.seed }, { freeze: demo.freeze, weapon: demo.weapon })
-    enterPlay()
-    if (demo.freeze) fastForward()
-    else if (demo.ff > 0) fastForwardFor(demo.ff)
-  } else if (playParam != null) {
-    const biome = (BIOMES as string[]).includes(params.get('biome') ?? '') ? (params.get('biome') as Biome) : 'forest'
-    begin({ bots: 2, difficulty: 'normal', biome, seed: (Number(playParam) >>> 0) || 1 })
-  }
-})
+if (!uitest) {
+  void renderer.mount(stage).then(() => {
+    renderer.setLoop(tick)
+    layout()
+    window.addEventListener('resize', layout)
+    if (demo) {
+      const slots: SlotConfig[] = [{ kind: 'ai' }, { kind: 'ai' }, { kind: 'ai' }, { kind: 'ai' }]
+      session.start({ slots, rounds: 1, difficulty: 'hard', biome: demo.biome, seed: demo.seed }, { freeze: demo.freeze, weapon: demo.weapon })
+      enterPlay()
+      if (demo.freeze) fastForward()
+      else if (demo.ff > 0) fastForwardFor(demo.ff)
+    } else if (playParam != null) {
+      const biome = (BIOMES as string[]).includes(params.get('biome') ?? '') ? (params.get('biome') as Biome) : 'forest'
+      const humans = clampInt(params.get('humans'), 1, 1, 4)
+      const bots = clampInt(params.get('bots'), 2, humans > 1 ? 0 : 1, 4 - humans)
+      const slots: SlotConfig[] = []
+      for (let i = 0; i < humans; i++) slots.push({ kind: 'human' })
+      for (let i = 0; i < bots; i++) slots.push({ kind: 'ai' })
+      begin({ slots, rounds: clampInt(params.get('rounds'), 1, 1, 10), difficulty: 'normal', biome, seed: (Number(playParam) >>> 0) || 1 })
+    }
+  })
+}
+
+function showTitle(): void {
+  screen = 'title'
+  stage.hidden = true
+  hud.hide()
+  title.show(() => {
+    sfx.unlock()
+    sfx.click()
+    title.hide()
+    toMenu()
+  })
+}
 
 function begin(config: MatchConfig): void {
   lastConfig = config
@@ -98,28 +149,46 @@ function begin(config: MatchConfig): void {
 }
 
 function enterPlay(): void {
-  mode = 'play'
-  resultShown = false
+  screen = 'play'
   lastWind = null
+  paused = false
+  closeOverlay()
   menu.hide()
-  result.hide()
+  title.hide()
   stage.hidden = false
   hud.show()
   hud.invalidate()
   keys.capture = true
   if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
   keys.consumePressed()
+  pad.suppress()
   layout()
 }
 
 function toMenu(): void {
-  mode = 'menu'
+  screen = 'menu'
+  paused = false
   sfx.engine(false)
-  result.hide()
+  closeOverlay()
   hud.hide()
   stage.hidden = true
   keys.capture = false
-  menu.show()
+  menu.show(lastConfig, (config) => {
+    if (screen !== 'menu') return
+    sfx.click()
+    menu.hide()
+    begin(config)
+  })
+}
+
+function closeOverlay(): void {
+  banner.hide()
+  scoreboard.hide()
+  shop.hide()
+  overlay = 'none'
+  shopFor = null
+  keys.consumePressed()
+  pad.suppress()
 }
 
 function layout(): void {
@@ -132,13 +201,17 @@ function layout(): void {
 // En Chrome headless los frames llegan muy espaciados y la captura saldría antes del tiro.
 function fastForward(): void {
   const step = 1 / 60
+  session.syncAi = true
   for (let i = 0; i < 60 * 30 && !session.isFrozen; i++) step1(step, false)
+  session.syncAi = aiSync
 }
 
 // Demo sin congelar: el ticker de Pixi casi no avanza con --virtual-time-budget.
 function fastForwardFor(seconds: number): void {
   const step = 1 / 60
+  session.syncAi = true
   for (let i = 0; i < Math.round(seconds * 60); i++) step1(step, false)
+  session.syncAi = aiSync
 }
 
 function tick(rawDt: number): void {
@@ -146,8 +219,24 @@ function tick(rawDt: number): void {
 }
 
 function step1(dt: number, live: boolean): void {
-  if (mode !== 'play') return
-  if (live) handleInput(dt)
+  if (screen !== 'play') return
+  const padState = live ? pad.poll() : null
+  if (live && overlay === 'none') {
+    const pressed = keys.consumePressed()
+    if (pressed.has('KeyP') || padState?.pressed.has('pause')) {
+      paused = !paused
+      sfx.click()
+      sfx.engine(false)
+    }
+    if (!paused) handleInput(dt, pressed, padState)
+  }
+  if (paused) {
+    const frame = session.frame()
+    if (frame) renderer.render(frame, [], 0)
+    const model = session.hud()
+    if (model) hud.update({ ...model, status: 'Pausa' })
+    return
+  }
   session.update(dt)
 
   for (const shot of session.pullShots()) sfx.fire(shot.weapon)
@@ -160,24 +249,27 @@ function step1(dt: number, live: boolean): void {
     lastWind = frame.wind
     sfx.setWind(frame.wind)
   }
-  renderer.render(frame, events, dt)
+  renderer.render(frame, events, dt * session.timeScale)
   const model = session.hud()
   if (model) hud.update(model)
-  checkEnd()
+  flow()
 }
 
-function handleInput(dt: number): void {
-  const pressed = keys.consumePressed()
-  if (!session.inputEnabled || result.visible) return
+function handleInput(dt: number, pressed: Set<string>, padState: ReturnType<Gamepad['poll']> | null): void {
+  if (!session.inputEnabled) return
   let dAngle = 0
   let dPower = 0
   if (keys.isDown('ArrowLeft')) dAngle += ANGLE_SPEED * dt
   if (keys.isDown('ArrowRight')) dAngle -= ANGLE_SPEED * dt
   if (keys.isDown('ArrowUp')) dPower += POWER_SPEED * dt
   if (keys.isDown('ArrowDown')) dPower -= POWER_SPEED * dt
+  if (padState) {
+    dAngle += padState.angle * ANGLE_SPEED * dt
+    dPower += padState.power * POWER_SPEED * dt
+  }
   session.nudge(dAngle, dPower)
-  const left = keys.isDown('KeyA')
-  const right = keys.isDown('KeyD')
+  const left = keys.isDown('KeyA') || padState?.move === -1
+  const right = keys.isDown('KeyD') || padState?.move === 1
   if (left !== right) session.move(left ? -1 : 1, dt)
   else session.stopMove()
   const slot = weaponSlot(pressed)
@@ -185,7 +277,19 @@ function handleInput(dt: number): void {
     sfx.click()
     session.select(WEAPON_SLOTS[slot])
   }
-  if (pressed.has('Space')) session.fire()
+  if (padState?.pressed.has('prevWeapon') || padState?.pressed.has('nextWeapon')) {
+    sfx.click()
+    session.cycleWeapon(padState.pressed.has('prevWeapon') ? -1 : 1, WEAPON_SLOTS)
+  }
+  for (const code of pressed) {
+    const item = ITEM_KEYS[code]
+    if (item && !session.useItem(item)) sfx.empty()
+  }
+  if (padState?.pressed.has('item')) {
+    const item = session.firstUsableItem()
+    if (!item || !session.useItem(item)) sfx.empty()
+  }
+  if (pressed.has('Space') || padState?.pressed.has('fire')) session.fire()
 }
 
 function playSounds(events: GameEvent[]): void {
@@ -203,7 +307,8 @@ function playSounds(events: GameEvent[]): void {
         if (e.destroyed && e.kind === 'barrel') sfx.barrel()
         break
       case 'fall':
-        sfx.fall(Math.abs(e.to - e.from))
+        if (e.parachute) sfx.parachute()
+        else sfx.fall(Math.abs(e.to - e.from))
         break
       case 'death':
         sfx.death()
@@ -211,29 +316,139 @@ function playSounds(events: GameEvent[]): void {
       case 'empty':
         sfx.empty()
         break
+      case 'shield':
+        sfx.shieldHit(e.left)
+        break
+      case 'item':
+        if (e.item === 'shield') sfx.shieldOn()
+        else sfx.click()
+        break
+      case 'roundover':
+        sfx.roundEnd()
+        break
     }
   }
 }
 
-function checkEnd(): void {
+// Pantallas entre turnos y rondas, según la fase de la partida.
+function flow(): void {
   const s = session.state
-  if (!s || s.phase !== 'gameover' || session.busy) return
+  if (!s || overlay !== 'none' || session.busy) return
   if (session.isDemo) {
     // demo sin congelar: la partida entre IAs sigue con otra seed
-    if (!demo?.freeze && session.finishedFor > 3 && session.config) {
+    if (s.phase === 'gameover' && !demo?.freeze && session.finishedFor > 3 && session.config) {
       session.start({ ...session.config, seed: ((session.config.seed ?? 1) + 1) >>> 0 }, { freeze: false })
       lastWind = null
     }
     return
   }
-  if (resultShown || session.finishedFor < 1.4) return
-  resultShown = true
-  keys.capture = false
-  const winner = session.winner()
-  result.show({
-    title: session.resultText(),
-    winner: winner ? { crew: winner.crew, color: winner.color, name: winner.name } : null,
+  switch (s.phase) {
+    case 'aiming': {
+      const model = session.bannerModel()
+      if (!model) return
+      overlay = 'banner'
+      sfx.engine(false)
+      sfx.banner()
+      banner.show(model, () => {
+        if (overlay !== 'banner') return
+        session.ackBanner()
+        closeOverlay()
+      })
+      return
+    }
+    case 'roundover': {
+      if (session.finishedFor < 1.4) return
+      // la última ronda va directo a la tabla final
+      if (s.round >= s.rounds) {
+        session.nextRound()
+        return
+      }
+      const model = session.scoreModel()
+      if (!model) return
+      overlay = 'score'
+      sfx.engine(false)
+      scoreboard.show(
+        model,
+        () => {
+          if (overlay !== 'score') return
+          sfx.click()
+          closeOverlay()
+          session.nextRound()
+        },
+        () => {
+          if (overlay !== 'score') return
+          sfx.click()
+          toMenu()
+        },
+      )
+      return
+    }
+    case 'shop': {
+      const next = session.shopQueue()[0]
+      if (next) openShop(next.id)
+      return
+    }
+    case 'gameover': {
+      if (session.finishedFor < 1.4) return
+      const model = session.scoreModel()
+      if (!model) return
+      overlay = 'final'
+      sfx.engine(false)
+      if (model.winnerId != null) sfx.champion()
+      else sfx.roundEnd()
+      scoreboard.show(
+        { ...model, final: true },
+        () => {
+          if (overlay !== 'final') return
+          sfx.click()
+          begin(lastConfig)
+        },
+        () => {
+          if (overlay !== 'final') return
+          sfx.click()
+          toMenu()
+        },
+      )
+      return
+    }
+  }
+}
+
+function openShop(playerId: number): void {
+  const model = session.shopModel(playerId)
+  if (!model) return
+  overlay = 'shop'
+  shopFor = playerId
+  sfx.engine(false)
+  const refresh = () => {
+    const m = session.shopModel(playerId)
+    if (m && shopFor === playerId) shop.update(m)
+  }
+  shop.show(model, {
+    buy: (id) => {
+      if (shopFor !== playerId) return
+      if (session.buy(playerId, id)) sfx.buy()
+      else sfx.empty()
+      refresh()
+    },
+    sell: (id) => {
+      if (shopFor !== playerId) return
+      if (session.sell(playerId, id)) sfx.sell()
+      else sfx.empty()
+      refresh()
+    },
+    ready: () => {
+      if (shopFor !== playerId) return
+      sfx.click()
+      closeOverlay()
+      session.ready(playerId)
+    },
   })
+}
+
+function clampInt(raw: string | null, fallback: number, lo: number, hi: number): number {
+  const n = Math.round(Number(raw))
+  return Math.max(lo, Math.min(hi, raw != null && Number.isFinite(n) && n > 0 ? n : fallback))
 }
 
 function must<T>(value: T | null): T {

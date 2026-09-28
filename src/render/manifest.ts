@@ -48,6 +48,7 @@ export interface AssetManifest {
     ladderTile: string // 8×4, se repite en vertical
     lamp: string
     flag: Strip // bandera flameando
+    parachute: string // paracaídas abierto, ~20×16, el tanque cuelga del centro de abajo
     windsock: Strip // 7 frames: viento -10..10 en pasos, el del medio es sin viento
   }
 
@@ -59,5 +60,7 @@ export interface AssetManifest {
     arrow: string // flecha para proyectil fuera de pantalla
     pip: Strip // ícono de munición/vida: frame 0 lleno, 1 vacío
     weaponIcons: Strip // 8 frames de 12×12 en el orden de WeaponId de types.ts
+    itemIcons: Strip // 5 frames de 12×12 en el orden de ITEM_ORDER de types.ts
+    logo: string // logo del título en pixel art, ~320×96
   }
 }

@@ -54,9 +54,18 @@ function propDistance(p: Prop, x: number, y: number): number {
   return Math.hypot(dx, dy)
 }
 
+// El escudo absorbe primero.
 export function hurt(p: Player, raw: number, events: GameEvent[]): void {
-  const amount = Math.min(p.hp, Math.round(raw))
-  if (!p.alive || amount <= 0) return
+  let total = Math.round(raw)
+  if (!p.alive || total <= 0) return
+  if (p.shield > 0) {
+    const absorbed = Math.min(p.shield, total)
+    p.shield -= absorbed
+    total -= absorbed
+    events.push({ type: 'shield', playerId: p.id, absorbed, left: p.shield })
+  }
+  const amount = Math.min(p.hp, total)
+  if (amount <= 0) return
   p.hp -= amount
   events.push({ type: 'damage', playerId: p.id, amount, hp: p.hp })
   if (p.hp <= 0) {
@@ -114,7 +123,7 @@ export function resolveBlast(state: GameState, first: Blast, after?: (events: Ga
     }
     for (let i = mark; i < events.length; i++) {
       const e = events[i]
-      if (e.type === 'damage' || e.type === 'death' || e.type === 'prop') e.t = b.t
+      if (e.type === 'damage' || e.type === 'death' || e.type === 'prop' || e.type === 'shield') e.t = b.t
     }
   }
   after?.(events)
@@ -199,9 +208,15 @@ function settleTanks(state: GameState, coverBefore: number[], events: GameEvent[
     if (floor > p.y) {
       const from = p.y
       p.y = floor
-      events.push({ type: 'fall', playerId: p.id, from, to: floor })
       const drop = floor - from
-      if (p.alive && drop > 2) hurt(p, drop * FALL_DAMAGE, events)
+      const harmful = p.alive && drop > 2 && Math.round(drop * FALL_DAMAGE) > 0
+      if (harmful && p.items.parachute > 0) {
+        p.items.parachute -= 1
+        events.push({ type: 'fall', playerId: p.id, from, to: floor, parachute: true })
+        continue
+      }
+      events.push({ type: 'fall', playerId: p.id, from, to: floor })
+      if (harmful) hurt(p, drop * FALL_DAMAGE, events)
     }
   }
   state.players.forEach((p, i) => {

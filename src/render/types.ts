@@ -22,6 +22,7 @@ export interface RenderFrame {
   shooterId: number | null // quién disparó el tiro en curso (para el retroceso)
   weapon: WeaponId | null // arma del tiro en curso (del estado antes de disparar); null sin tiro
   freeze: boolean // modo demo: congela partículas y animaciones en el frame actual
+  aimPreview: Vec2[] | null // trazador activo: trayectoria completa del tiro que se está apuntando
 }
 
 export interface GameRenderer {

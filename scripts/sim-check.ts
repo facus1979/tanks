@@ -26,10 +26,25 @@ import {
   muzzle,
   WEAPONS,
   WEAPON_ORDER,
+  CREWS,
+  CREW_NAMES,
+  EARN,
+  FUEL_PER_TURN,
+  ITEM_ORDER,
+  REPAIR_HP,
+  SHIELD_HP,
+  SHOP,
+  START_MONEY,
+  biomeFor,
+  owned,
   type Biome,
   type Difficulty,
   type GameEvent,
   type GameState,
+  type ItemId,
+  type ShopId,
+  type MatchConfig,
+  type SlotConfig,
   type ShotPlan,
   type StepResult,
   type WeaponId,
@@ -37,6 +52,12 @@ import {
 import { propSupported, resolveBlast, blastFor } from '../src/sim/physics'
 import { padBounds } from '../src/sim/gen'
 import { columnGround, createTerrain, deform, fillRect } from '../src/sim/terrain'
+
+function mk(bots: number, difficulty: Difficulty, biome: MatchConfig['biome'], seed: number, rounds = 1, humans = 0): MatchConfig {
+  const slots: SlotConfig[] = []
+  for (let i = 0; i <= bots; i++) slots.push({ kind: i < humans ? 'human' : 'ai' })
+  return { slots, rounds, difficulty, biome, seed }
+}
 
 let failures = 0
 let checks = 0
@@ -74,6 +95,11 @@ function aiTurn(state: GameState, difficulty: Difficulty): StepResult & { ms: nu
   const plan = chooseShot(state, difficulty)
   const ms = performance.now() - t0
   const pre: GameEvent[] = []
+  for (const item of plan.items ?? []) {
+    const r = applyCommand(state, { type: 'useItem', playerId: p.id, item })
+    pre.push(...r.events)
+    state = r.state
+  }
   for (let i = 0; i < Math.abs(plan.move ?? 0); i++) {
     const r = applyCommand(state, { type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
     pre.push(...r.events)
@@ -100,19 +126,19 @@ function playTurns(s: GameState, turns: number, difficulty: Difficulty = 'normal
 // ---------- 1. determinismo ----------
 for (const biome of BIOMES) {
   for (const seed of [1, 7, 12345]) {
-    const a = createMatch({ bots: 3, difficulty: 'normal', biome, seed })
-    const b = createMatch({ bots: 3, difficulty: 'normal', biome, seed })
+    const a = createMatch(mk(3, 'normal', biome, seed))
+    const b = createMatch(mk(3, 'normal', biome, seed))
     check(hashState(a) === hashState(b), `createMatch no determinista ${biome}/${seed}`)
     const pa = playTurns(a, 5)
     const pb = playTurns(b, 5)
     check(hashState(pa.state) === hashState(pb.state), `partida no determinista ${biome}/${seed}`)
     check(JSON.stringify(pa.events) === JSON.stringify(pb.events), `eventos no deterministas ${biome}/${seed}`)
-    check(hashState(a) === hashState(createMatch({ bots: 3, difficulty: 'normal', biome, seed })), `applyCommand mutó el estado ${biome}/${seed}`)
+    check(hashState(a) === hashState(createMatch(mk(3, 'normal', biome, seed))), `applyCommand mutó el estado ${biome}/${seed}`)
   }
 }
 {
-  const a = createMatch({ bots: 1, difficulty: 'normal', biome: 'forest', seed: 3 })
-  const b = createMatch({ bots: 1, difficulty: 'normal', biome: 'forest', seed: 4 })
+  const a = createMatch(mk(1, 'normal', 'forest', 3))
+  const b = createMatch(mk(1, 'normal', 'forest', 4))
   check(hashState(a) !== hashState(b), 'seeds distintas dan el mismo mapa')
 }
 
@@ -123,7 +149,7 @@ for (const biome of BIOMES) {
   let mirrored = 0
   for (let seed = 1; seed <= 20; seed++) {
     for (const bots of [1, 2, 3]) {
-      const s = createMatch({ bots, difficulty: 'normal', biome, seed })
+      const s = createMatch(mk(bots, 'normal', biome, seed))
       const tag = `${biome}/seed ${seed}/bots ${bots}`
       const t = s.terrain
       check(t.w === WORLD_W && t.h === WORLD_H && t.front.length === WORLD_W * WORLD_H, `grilla mal dimensionada ${tag}`)
@@ -184,14 +210,16 @@ for (const biome of BIOMES) {
 }
 
 // ---------- 3. IA ----------
+// El tiempo depende de la máquina y de la carga: en CI (runners lentos) solo se controla que no se cuelgue.
+const AI_BUDGET_MS = process.env.CI ? 2000 : 250
 let worstMs = 0
 for (const biome of BIOMES) {
   for (const seed of [2, 5, 9, 14]) {
-    let s = createMatch({ bots: 3, difficulty: 'hard', biome, seed })
+    let s = createMatch(mk(3, 'hard', biome, seed))
     for (let turn = 0; turn < 4 && s.phase === 'aiming'; turn++) {
       const r = aiTurn(s, 'hard')
       worstMs = Math.max(worstMs, r.ms)
-      check(r.ms < 250, `la IA tardó ${r.ms.toFixed(0)} ms ${biome}/${seed}`)
+      check(r.ms < AI_BUDGET_MS, `la IA tardó ${r.ms.toFixed(0)} ms ${biome}/${seed}`)
       check(!!r.flights && r.flights.length >= 1 && r.flights[0].path.length > 2, `tiro sin trayectoria ${biome}/${seed}`)
       const impacts = r.events.filter((e) => e.type === 'impact')
       check(impacts.length >= 1, `el tiro de la IA (${r.plan.weapon}) no explotó ${biome}/${seed} turno ${turn}`)
@@ -202,7 +230,7 @@ for (const biome of BIOMES) {
 
 // El proyectil sale de la boca del cañón y puede pasar por arriba del mapa.
 {
-  const s = createMatch({ bots: 1, difficulty: 'normal', biome: 'forest', seed: 1 })
+  const s = createMatch(mk(1, 'normal', 'forest', 1))
   const p = s.players[0]
   const m = muzzle(p.x, p.y, 60)
   const f = fly({ terrain: s.terrain, players: s.players, props: s.props, ownerId: p.id, angle: 88, power: 100, wind: 0 })
@@ -233,7 +261,7 @@ for (const biome of BIOMES) {
 
 // ---------- 5. caída ----------
 {
-  const s = cloneState(createMatch({ bots: 1, difficulty: 'normal', biome: 'forest', seed: 4 }))
+  const s = cloneState(createMatch(mk(1, 'normal', 'forest', 4)))
   const p = s.players[0]
   const y0 = p.y
   fillRect(s.terrain, p.x - 20, y0, p.x + 20, y0 + 29, AIR)
@@ -245,7 +273,7 @@ for (const biome of BIOMES) {
 
 // ---------- 6. aplastamiento ----------
 {
-  const s = cloneState(createMatch({ bots: 1, difficulty: 'normal', biome: 'forest', seed: 4 }))
+  const s = cloneState(createMatch(mk(1, 'normal', 'forest', 4)))
   const p = s.players[1]
   const events = resolveBlast(s, blastFor('dirt', p.x, p.y - TANK_H - 4, 1))
   const dmg = events.filter((e) => e.type === 'damage' && e.playerId === p.id)
@@ -254,7 +282,7 @@ for (const biome of BIOMES) {
 
 // ---------- 7. barril en cadena ----------
 {
-  const s = cloneState(createMatch({ bots: 1, difficulty: 'normal', biome: 'forest', seed: 4 }))
+  const s = cloneState(createMatch(mk(1, 'normal', 'forest', 4)))
   const t = s.terrain
   fillRect(t, 300, 150, 380, 200, AIR, 'both')
   fillRect(t, 300, 200, 380, 205, STONE)
@@ -276,7 +304,7 @@ for (const biome of BIOMES) {
 
 // ---------- 8. partidas completas ----------
 for (const biome of BIOMES) {
-  let s = createMatch({ bots: 3, difficulty: 'easy', biome, seed: 99 })
+  let s = createMatch(mk(3, 'easy', biome, 99))
   const r = playTurns(s, 80)
   s = r.state
   check(s.players.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y) && p.hp >= 0), `estado inválido tras partida ${biome}`)
@@ -285,7 +313,7 @@ for (const biome of BIOMES) {
 
 // mover no rompe
 {
-  let s = createMatch({ bots: 1, difficulty: 'normal', biome: 'forest', seed: 1 })
+  let s = createMatch(mk(1, 'normal', 'forest', 1))
   const p = s.players[0]
   for (let i = 0; i < 80; i++) s = applyCommand(s, { type: 'move', playerId: p.id, dir: 1 }).state
   check(s.players[0].fuel >= 0 && s.players[0].x > p.x, 'move avanza y gasta combustible')
@@ -293,7 +321,7 @@ for (const biome of BIOMES) {
 
 // ---------- 9. arsenal (F7) ----------
 function flat(): GameState {
-  const s = cloneState(createMatch({ bots: 1, difficulty: 'normal', biome: 'forest', seed: 4 }))
+  const s = cloneState(createMatch(mk(1, 'normal', 'forest', 4)))
   s.terrain.front.fill(AIR)
   s.terrain.back.fill(AIR)
   fillRect(s.terrain, 0, 300, WORLD_W - 1, WORLD_H - 1, DIRT, 'both')
@@ -399,7 +427,7 @@ check(WEAPON_ORDER.length === 8, 'WEAPON_ORDER tiene las 8 armas')
 // ---------- 10. balance (F9): IA contra IA ----------
 function match(bots: number, seed: number): { shots: number; turns: number; winner: number | null; weapons: Record<string, number> } {
   const biome = BIOMES[seed % BIOMES.length]
-  let s = createMatch({ bots, difficulty: 'normal', biome, seed })
+  let s = createMatch(mk(bots, 'normal', biome, seed))
   let shots = 0
   const weapons: Record<string, number> = {}
   while (s.phase === 'aiming' && shots < 120) {
@@ -410,7 +438,7 @@ function match(bots: number, seed: number): { shots: number; turns: number; winn
     }
     s = r.state
   }
-  return { shots, turns: s.turn, winner: s.winnerId, weapons }
+  return { shots, turns: s.turn, winner: s.roundWinnerId, weapons }
 }
 {
   const t0 = performance.now()
@@ -428,6 +456,300 @@ function match(bots: number, seed: number): { shots: number; turns: number; winn
     if (bots === 1) check(avg >= 8 && avg <= 15, `balance 2 tanques fuera de 8-15 tiros (${avg.toFixed(1)})`)
   }
   console.log(`balance: ${((performance.now() - t0) / 1000).toFixed(1)} s`)
+}
+
+// ---------- 11. rondas, tienda e ítems (F10) ----------
+interface MatchRun {
+  state: GameState
+  events: GameEvent[]
+  shots: number
+  perRound: number[] // tiros de cada ronda
+  bought: ShopId[][][] // por visita a la tienda y por jugador, lo que compraron las IA
+  used: Record<string, number>
+  roundWinners: (number | null)[]
+  moneyIn: number[][] // plata de cada jugador al arrancar cada ronda
+}
+function playMatch(config: MatchConfig, maxShots = 150): MatchRun {
+  let s = createMatch(config)
+  const events: GameEvent[] = []
+  const bought: ShopId[][][] = []
+  const used: Record<string, number> = {}
+  const roundWinners: (number | null)[] = []
+  const moneyIn: number[][] = [s.players.map((p) => p.money)]
+  let shots = 0
+  let roundShots = 0
+  const perRound: number[] = []
+  while (s.phase !== 'gameover') {
+    if (s.phase === 'aiming') {
+      if (roundShots >= maxShots) break
+      const r = aiTurn(s, config.difficulty)
+      if (r.flights) {
+        shots++
+        roundShots++
+        used[r.plan.weapon] = (used[r.plan.weapon] ?? 0) + 1
+      }
+      for (const e of r.events) if (e.type === 'item') used[e.item] = (used[e.item] ?? 0) + 1
+      events.push(...r.events)
+      s = r.state
+    } else if (s.phase === 'roundover') {
+      roundWinners.push(s.roundWinnerId)
+      perRound.push(roundShots)
+      const before = s.players.map((p) => ({ ...p.ammo, ...p.items }) as Record<string, number>)
+      const r = applyCommand(s, { type: 'nextRound' })
+      events.push(...r.events)
+      s = r.state
+      if (s.phase === 'gameover') break
+      bought.push(
+        s.players.map((p, i) => {
+          const list: ShopId[] = []
+          for (const e of SHOP) {
+            const diff = owned(p, e.id) - (before[i][e.id] ?? 0)
+            for (let k = 0; k < diff; k += e.qty) list.push(e.id)
+          }
+          return list
+        }),
+      )
+      // humanos de prueba: listos sin comprar
+      for (const p of s.players) if (s.phase === 'shop' && !p.ready) s = applyCommand(s, { type: 'ready', playerId: p.id }).state
+      moneyIn.push(s.players.map((p) => p.money))
+      roundShots = 0
+    } else break
+  }
+  return { state: s, events, shots, perRound, bought, used, roundWinners, moneyIn }
+}
+
+{
+  // configuración: nombres por tripulante, crew por índice, plata inicial
+  const s = createMatch({ slots: [{ kind: 'human', name: 'Facu' }, { kind: 'ai' }, { kind: 'ai', crew: 'desert' }], rounds: 3, difficulty: 'hard', biome: 'jungle', seed: 5 })
+  check(s.players.length === 3 && s.players[0].name === 'Facu' && s.players[0].kind === 'human', 'slots: nombre y tipo')
+  check(s.players[1].crew === CREWS[1] && s.players[1].name === CREW_NAMES[CREWS[1]], 'slots: crew por índice y nombre del tripulante')
+  check(s.players[2].crew === 'desert' && s.players[2].name === CREW_NAMES.desert, 'slots: crew elegido')
+  check(
+    s.players.every((p) => p.money === START_MONEY && ITEM_ORDER.every((i) => p.items[i] === 0) && p.shield === 0 && !p.tracer && !p.ready),
+    'jugador inicial: plata, ítems, escudo',
+  )
+  check(s.round === 1 && s.rounds === 3 && s.difficulty === 'hard' && s.biome === 'jungle' && s.phase === 'aiming', 'estado inicial de rondas')
+  check(createMatch({ slots: [{ kind: 'ai' }], rounds: 1, difficulty: 'normal' }).players.length === 2, 'slots: mínimo 2')
+  const five = createMatch({ slots: Array(5).fill({ kind: 'ai' }), rounds: 1, difficulty: 'normal' })
+  check(five.players.length === 4, 'slots: máximo 4')
+}
+{
+  // determinismo con rondas, y partidas IA contra IA de 3 y 5 rondas
+  const cfg = mk(2, 'normal', 'rotate', 21, 3)
+  const a = playMatch(cfg)
+  const b = playMatch(cfg)
+  check(hashState(a.state) === hashState(b.state) && JSON.stringify(a.events) === JSON.stringify(b.events), 'partida de 3 rondas no determinista')
+  for (const [rounds, seed] of [
+    [3, 31],
+    [5, 32],
+  ]) {
+    const r = playMatch(mk(3, 'normal', 'random', seed, rounds))
+    const s = r.state
+    check(s.phase === 'gameover' && s.round === rounds, `partida de ${rounds} rondas no terminó (fase ${s.phase}, ronda ${s.round})`)
+    check(r.events.filter((e) => e.type === 'roundover').length === rounds, `${rounds} eventos roundover`)
+    check(
+      r.events.filter((e) => e.type === 'round').length === rounds - 1 && r.events.filter((e) => e.type === 'shop').length === rounds - 1,
+      `eventos round/shop en ${rounds} rondas`,
+    )
+    const last = r.events.filter((e): e is Extract<GameEvent, { type: 'roundover' }> => e.type === 'roundover').map((e) => e.last)
+    check(last.every((l, i) => l === (i === rounds - 1)), 'roundover.last solo en la última')
+    const won = s.players.reduce((a, p) => a + p.roundsWon, 0)
+    check(won === r.roundWinners.filter((w) => w !== null).length, 'roundsWon suma los ganadores de ronda')
+    if (s.winnerId !== null) check(s.players.every((p) => p.roundsWon <= s.players[s.winnerId!].roundsWon), 'el campeón tiene más rondas ganadas')
+    check(s.players.every((p) => p.money >= 0), 'plata negativa')
+    console.log(
+      `${rounds} rondas: ganador ${s.winnerId}, rondas ${s.players.map((p) => p.roundsWon).join('/')}, kills ${s.players.map((p) => p.kills).join('/')}, plata ${s.players.map((p) => p.money).join('/')}`,
+    )
+  }
+}
+{
+  // rotate y random
+  const biomes = [1, 2, 3, 4].map((r) => biomeFor('rotate', 9, r))
+  check(biomes.join() === 'forest,jungle,industrial,forest', `rotate: ${biomes.join()}`)
+  check(biomeFor('random', 9, 2) === biomeFor('random', 9, 2), 'random determinista')
+  check(new Set([1, 2, 3, 4, 5, 6, 7, 8].map((r) => biomeFor('random', 9, r))).size > 1, 'random varía por ronda')
+  check(biomeFor('industrial', 9, 3) === 'industrial', 'bioma fijo')
+  const r = playMatch(mk(1, 'normal', 'rotate', 44, 3))
+  const rounds = r.events.filter((e): e is Extract<GameEvent, { type: 'round' }> => e.type === 'round').map((e) => e.biome)
+  check(rounds.join() === 'jungle,industrial', `rotate en partida: ${rounds.join()}`)
+}
+// fin de ronda con un humano (lo juega la IA): termina en roundover
+function toRoundover(): GameState {
+  let s = cloneState(createMatch(mk(1, 'normal', 'forest', 8, 3, 1)))
+  s.players[1].hp = 5
+  for (let i = 0; i < 200 && s.phase === 'aiming'; i++) s = aiTurn(s, 'hard').state
+  return s
+}
+{
+  let s = toRoundover()
+  check(s.phase === 'roundover', 'la ronda termina con un solo tanque vivo')
+  const w = s.roundWinnerId
+  check(w !== null && s.players[w].roundsWon === 1, 'roundWinnerId y roundsWon')
+  if (w !== null) check(s.earnings[w] >= EARN.survive + EARN.roundWin - 100, `el ganador cobra sobrevivir + ganar (${s.earnings[w]})`)
+  check(applyCommand(s, { type: 'fire', playerId: s.players[s.current].id }).state === s, 'en roundover no se dispara')
+  const r = applyCommand(s, { type: 'nextRound' })
+  s = r.state
+  check(s.phase === 'shop' && r.events.some((e) => e.type === 'shop'), 'nextRound → shop')
+  check(s.players[1].ready && !s.players[0].ready, 'la IA queda lista; el humano no')
+  const heavy = SHOP.find((e) => e.id === 'heavy')!
+  const poor = cloneState(s)
+  poor.players[0].money = heavy.price - 1
+  check(applyCommand(poor, { type: 'buy', playerId: 0, id: 'heavy' }).state === poor, 'no se compra sin plata')
+  const rich = cloneState(s)
+  rich.players[0].money = 5000
+  const ammo0 = rich.players[0].ammo.heavy
+  const bought = applyCommand(rich, { type: 'buy', playerId: 0, id: 'heavy' }).state
+  check(bought.players[0].ammo.heavy === ammo0 + heavy.qty && bought.players[0].money === 5000 - heavy.price, 'compra: suma qty y cobra')
+  check(rich.players[0].money === 5000, 'buy no muta el estado anterior')
+  const full = cloneState(rich)
+  full.players[0].ammo.heavy = heavy.max - heavy.qty + 1
+  check(applyCommand(full, { type: 'buy', playerId: 0, id: 'heavy' }).state === full, 'compra: respeta max')
+  const sold = applyCommand(bought, { type: 'sell', playerId: 0, id: 'heavy' }).state
+  check(sold.players[0].money === 5000 - heavy.price + Math.floor(heavy.price / 2) && sold.players[0].ammo.heavy === ammo0, 'venta al 50%')
+  check(applyCommand(rich, { type: 'sell', playerId: 0, id: 'shield' }).state === rich, 'no se vende lo que no hay')
+  const withShield = applyCommand(bought, { type: 'buy', playerId: 0, id: 'shield' }).state
+  check(withShield.players[0].items.shield === 1, 'compra de ítem')
+  check(applyCommand(s, { type: 'buy', playerId: 1, id: 'heavy' }).state === s, 'la IA lista no compra más')
+  // listo → ronda nueva
+  const ready = applyCommand(withShield, { type: 'ready', playerId: 0 })
+  const n = ready.state
+  check(n.phase === 'aiming' && n.round === 2 && ready.events.some((e) => e.type === 'round'), 'ready → ronda 2')
+  check(n.players.every((p) => p.alive && p.hp === 100 && p.shield === 0 && !p.tracer && p.ammo.normal === 99), 'ronda nueva: vida llena, sin escudo')
+  check(n.players[0].items.shield === 1 && n.players[0].ammo.heavy === withShield.players[0].ammo.heavy, 'ronda nueva: conserva ítems y munición')
+  check(hashState({ ...n, players: [] }) !== hashState({ ...s, players: [] }), 'ronda nueva: mapa nuevo')
+  check(Object.values(n.earnings).every((e) => e === 0), 'ronda nueva: earnings en 0')
+}
+{
+  // ítems en el turno
+  let s = flat()
+  const p = s.players[0]
+  p.items = { shield: 1, parachute: 0, fuel: 1, repair: 1, tracer: 1 }
+  p.hp = 50
+  const use = (item: ItemId) => {
+    const r = applyCommand(s, { type: 'useItem', playerId: 0, item })
+    check(r.events.some((e) => e.type === 'item' && e.item === item) && r.state.current === 0, `useItem ${item}: evento y no gasta el turno`)
+    s = r.state
+  }
+  use('shield')
+  check(s.players[0].shield === SHIELD_HP && s.players[0].items.shield === 0, 'escudo activo')
+  check(applyCommand(s, { type: 'useItem', playerId: 0, item: 'shield' }).state === s, 'sin escudo en inventario no se activa')
+  use('repair')
+  check(s.players[0].hp === 50 + REPAIR_HP, 'reparación')
+  use('fuel')
+  check(s.players[0].fuel === FUEL_PER_TURN * 2, 'combustible extra')
+  use('tracer')
+  check(s.players[0].tracer, 'trazador activo')
+  check(applyCommand(s, { type: 'useItem', playerId: 1, item: 'shield' }).state === s, 'useItem fuera de turno')
+  const fired = shoot(s, 'normal', 60, 50).state
+  check(!fired.players[0].tracer, 'el trazador se apaga al disparar')
+  // el escudo absorbe primero
+  const t = flat()
+  t.players[1].shield = SHIELD_HP
+  t.players[1].x = 222
+  const r = shoot(t, 'heavy', 90, 1)
+  const sh = r.events.find((e): e is Extract<GameEvent, { type: 'shield' }> => e.type === 'shield' && e.playerId === 1)
+  check(!!sh && sh.absorbed > 0 && typeof sh.t === 'number', 'el escudo absorbe y trae t')
+  const lost = r.events.filter((e): e is Extract<GameEvent, { type: 'damage' }> => e.type === 'damage' && e.playerId === 1).reduce((a, e) => a + e.amount, 0)
+  if (sh) check(r.state.players[1].hp === 100 - lost && r.state.players[1].shield === sh.left && (sh.left === 0 || lost === 0), 'hp y escudo tras el golpe')
+}
+{
+  // paracaídas
+  const s = cloneState(createMatch(mk(1, 'normal', 'forest', 4)))
+  const p = s.players[0]
+  p.items.parachute = 1
+  const y0 = p.y
+  fillRect(s.terrain, p.x - 20, y0, p.x + 20, y0 + 29, AIR)
+  const events = resolveBlast(s, blastFor('normal', 5, 5, 1))
+  const fall = events.find((e): e is Extract<GameEvent, { type: 'fall' }> => e.type === 'fall' && e.playerId === p.id)
+  check(!!fall && fall.parachute === true, 'paracaídas: evento fall con parachute')
+  check(!events.some((e) => e.type === 'damage' && e.playerId === p.id) && p.items.parachute === 0 && p.hp === 100, 'paracaídas: sin daño y se consume')
+}
+{
+  // campeón: desempate por kills y plata; empate total null
+  const last = cloneState(toRoundover())
+  last.round = last.rounds
+  const champion = (a: number[], k: number[], m: number[]) => {
+    const s = cloneState(last)
+    s.players.forEach((p, i) => {
+      p.roundsWon = a[i]
+      p.kills = k[i]
+      p.money = m[i]
+    })
+    const r = applyCommand(s, { type: 'nextRound' })
+    return r.state.phase === 'gameover' && r.events.some((e) => e.type === 'gameover') ? r.state.winnerId : -1
+  }
+  check(champion([2, 1], [0, 5], [0, 0]) === 0, 'campeón por rondas')
+  check(champion([1, 1], [1, 2], [900, 0]) === 1, 'desempate por kills')
+  check(champion([1, 1], [2, 2], [100, 300]) === 1, 'desempate por plata')
+  check(champion([1, 1], [2, 2], [300, 300]) === null, 'empate total')
+}
+
+// ---------- 12. balance de la tienda (npm run sim-check -- --balance) ----------
+{
+  const full = process.argv.includes('--balance')
+  const games = full ? 30 : 4
+  const t0 = performance.now()
+  let visits = 0
+  let buyers = 0
+  let stuck = 0
+  const buys: Record<string, number> = {}
+  const used: Record<string, number> = {}
+  let richestWins = 0
+  let contested = 0
+  let repeat = 0
+  let repeatChances = 0
+  let shots = 0
+  let rounds = 0
+  let draws = 0
+  const byRound = [0, 0, 0]
+  const spent: number[] = []
+  const final: number[] = []
+  const earned: number[] = []
+  for (let g = 0; g < games; g++) {
+    const bots = 2 + (g % 2)
+    const r = playMatch(mk(bots, 'normal', 'random', 500 + g, 3))
+    if (r.state.phase !== 'gameover') stuck++
+    shots += r.shots
+    rounds += r.roundWinners.length
+    r.perRound.forEach((n, i) => (byRound[i] += n / games))
+    draws += r.roundWinners.filter((w) => w === null).length
+    for (const k in r.used) used[k] = (used[k] ?? 0) + r.used[k]
+    for (const visit of r.bought) {
+      for (const list of visit) {
+        visits++
+        if (list.length > 0) buyers++
+        let cost = 0
+        for (const id of list) {
+          buys[id] = (buys[id] ?? 0) + 1
+          cost += SHOP.find((e) => e.id === id)!.price
+        }
+        spent.push(cost)
+      }
+    }
+    for (const e of r.events) if (e.type === 'roundover') earned.push(...Object.values(e.earnings))
+    // ¿gana la ronda el que entró con más plata? ¿se repite el ganador?
+    r.roundWinners.forEach((w, i) => {
+      if (i === 0 || w === null) return
+      const m = r.moneyIn[i]
+      contested++
+      if (m[w] === Math.max(...m)) richestWins++
+      const prev = r.roundWinners[i - 1]
+      if (prev !== null) {
+        repeatChances++
+        if (prev === w) repeat++
+      }
+    })
+    final.push(...r.state.players.map((p) => p.money))
+  }
+  const avg = (a: number[]) => a.reduce((x, y) => x + y, 0) / Math.max(1, a.length)
+  console.log(`tienda: ${games} partidas de 3 rondas (3-4 IA normal), ${(shots / rounds).toFixed(1)} tiros/ronda (${byRound.map((n) => n.toFixed(1)).join(" / ")}), empates ${draws}/${rounds}, trabadas ${stuck}`)
+  console.log(`tienda: compran ${buyers}/${visits} visitas, gasto medio ${avg(spent).toFixed(0)}, ganancia media por ronda ${avg(earned).toFixed(0)}, plata final media ${avg(final).toFixed(0)}`)
+  console.log(`tienda: compras ${JSON.stringify(buys)}`)
+  console.log(`tienda: uso ${JSON.stringify(used)}`)
+  console.log(`tienda: repite ganador ${repeat}/${repeatChances}, gana el que entró más rico ${richestWins}/${contested}`)
+  console.log(`tienda: ${((performance.now() - t0) / 1000).toFixed(1)} s`)
+  check(stuck === 0, `${stuck} partidas de 3 rondas sin terminar`)
+  check(buyers >= visits * 0.8, `las IA casi siempre compran (${buyers}/${visits})`)
 }
 
 console.log(`IA peor caso: ${worstMs.toFixed(0)} ms`)

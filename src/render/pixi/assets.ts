@@ -42,6 +42,7 @@ export interface Art {
     lamp: Texture
     flag: Texture[]
     windsock: Texture[]
+    parachute: Texture
   }
   alert: Texture
   ask: Texture
@@ -172,13 +173,14 @@ export async function loadArt(): Promise<Art> {
     ),
     (async () => {
       const p = m.props
-      const [barrel, crate, ladderTile, lamp, flag, windsock] = await Promise.all([
+      const [barrel, crate, ladderTile, lamp, flag, windsock, parachute] = await Promise.all([
         loadTexture(p?.barrel),
         loadTexture(p?.crate),
         loadTexture(p?.ladderTile),
         loadTexture(p?.lamp),
         loadStrip(p?.flag),
         loadStrip(p?.windsock),
+        loadTexture(p?.parachute),
       ])
       return {
         barrel: barrel ?? tex(fb.solid(10, 12, 0xd0362c)),
@@ -187,6 +189,7 @@ export async function loadArt(): Promise<Art> {
         lamp: lamp ?? tex(fb.solid(3, 4, 0xfff6c8, 0x2a2a24)),
         flag: flag ?? [tex(fb.solid(18, 11, 0xc8302a))],
         windsock: windsock ?? [tex(fb.solid(14, 6, 0xf06a2a))],
+        parachute: parachute ?? tex(fb.parachute()),
       }
     })(),
     (async () => {

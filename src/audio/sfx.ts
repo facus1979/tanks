@@ -274,6 +274,83 @@ export class Sfx {
     this.tone({ freq: 180, to: 120, dur: 0.12, type: 'square', gain: 0.06 })
   }
 
+  // Caja registradora: dos campanitas y el cajón.
+  buy(): void {
+    if (!this.ready) return
+    this.tone({ freq: 1568, dur: 0.12, type: 'square', gain: 0.05 })
+    this.tone({ freq: 2093, dur: 0.22, type: 'square', gain: 0.05, delay: 0.07 })
+    this.noise({ dur: 0.08, type: 'bandpass', freq: 3200, q: 2, gain: 0.12, delay: 0.02 })
+  }
+
+  sell(): void {
+    if (!this.ready) return
+    this.tone({ freq: 1320, to: 880, dur: 0.1, type: 'square', gain: 0.045 })
+    this.tone({ freq: 990, to: 660, dur: 0.14, type: 'square', gain: 0.04, delay: 0.08 })
+  }
+
+  // Escudo encendiéndose: barrido ascendente con zumbido.
+  shieldOn(): void {
+    if (!this.ready) return
+    this.tone({ freq: 220, to: 880, dur: 0.45, type: 'sawtooth', gain: 0.05 })
+    this.tone({ freq: 440, to: 1760, dur: 0.4, type: 'sine', gain: 0.08, delay: 0.03 })
+    this.noise({ dur: 0.5, type: 'bandpass', freq: 1200, to: 3000, q: 3, gain: 0.08 })
+  }
+
+  // Golpe contra el escudo: chasquido eléctrico. left: cuánto escudo queda.
+  shieldHit(left: number): void {
+    if (!this.ready) return
+    const broke = left <= 0
+    this.noise({ dur: 0.05, type: 'highpass', freq: 4000, gain: 0.3 })
+    this.tone({ freq: broke ? 900 : 1400, to: broke ? 120 : 700, dur: broke ? 0.5 : 0.25, type: 'square', gain: 0.06 })
+    this.tone({ freq: 60, to: 40, dur: 0.18, type: 'sine', gain: 0.4 })
+    if (broke) this.noise({ dur: 0.4, type: 'bandpass', freq: 2500, to: 600, q: 1.5, gain: 0.2, delay: 0.05 })
+  }
+
+  // Paracaídas abriéndose: tela que se infla.
+  parachute(): void {
+    if (!this.ready) return
+    this.noise({ dur: 0.25, type: 'bandpass', freq: 500, to: 1400, q: 0.8, gain: 0.35, attack: 0.03 })
+    this.noise({ dur: 0.12, type: 'lowpass', freq: 300, gain: 0.3, delay: 0.2 })
+    this.tone({ freq: 120, to: 80, dur: 0.12, type: 'sine', gain: 0.3, delay: 0.2 })
+  }
+
+  // Cartel de turno en hot-seat: corneta corta.
+  banner(): void {
+    if (!this.ready) return
+    this.tone({ freq: 523, dur: 0.1, type: 'square', gain: 0.06 })
+    this.tone({ freq: 659, dur: 0.1, type: 'square', gain: 0.06, delay: 0.1 })
+    this.tone({ freq: 784, dur: 0.22, type: 'square', gain: 0.07, delay: 0.2 })
+  }
+
+  // Fin de ronda: redoble y golpe.
+  roundEnd(): void {
+    if (!this.ready) return
+    for (let i = 0; i < 8; i++) this.noise({ dur: 0.04, type: 'bandpass', freq: 1800, q: 1.2, gain: 0.12 + i * 0.02, delay: i * 0.06 })
+    this.tone({ freq: 98, to: 49, dur: 0.6, type: 'sine', gain: 0.7, delay: 0.5 })
+    this.tone({ freq: 392, dur: 0.5, type: 'square', gain: 0.05, delay: 0.5 })
+    this.tone({ freq: 523, dur: 0.5, type: 'square', gain: 0.04, delay: 0.5 })
+  }
+
+  // Fanfarria del campeón.
+  champion(): void {
+    if (!this.ready) return
+    const notes: [number, number, number][] = [
+      [523, 0, 0.14],
+      [523, 0.15, 0.14],
+      [523, 0.3, 0.14],
+      [659, 0.45, 0.4],
+      [587, 0.9, 0.14],
+      [659, 1.05, 0.14],
+      [784, 1.2, 0.8],
+    ]
+    for (const [f, d, dur] of notes) {
+      this.tone({ freq: f, dur, type: 'square', gain: 0.07, delay: d })
+      this.tone({ freq: f / 2, dur, type: 'triangle', gain: 0.1, delay: d })
+    }
+    this.tone({ freq: 1047, dur: 0.8, type: 'square', gain: 0.03, delay: 1.2 })
+    this.noise({ dur: 1.2, type: 'highpass', freq: 5000, gain: 0.05, attack: 0.3, delay: 1.2 })
+  }
+
   // Viento ambiente suave: ruido filtrado cuyo volumen sigue a |viento|.
   setWind(value: number): void {
     if (!this.ctx || !this.windGain || !this.windFilter) return

@@ -1,5 +1,5 @@
 // Sesión local: aplica comandos a la sim, reproduce los tiros en el tiempo y maneja a las IAs.
-import { PATH_DT, applyCommand, chooseShot, createMatch } from '../sim'
+import { PATH_DT, applyCommand, chooseShot, createMatch, fly } from '../sim'
 import type { ShotPlan } from '../sim'
 import type {
   Biome,
@@ -8,16 +8,20 @@ import type {
   Flight,
   GameEvent,
   GameState,
+  ItemId,
   MatchConfig,
   Player,
   Prop,
+  ShopId,
   Terrain,
   Vec2,
   WeaponId,
 } from '../sim/types'
-import { FUEL_PER_TURN, WEAPONS } from '../sim/types'
+import { FUEL_PER_TURN, ITEM_ORDER, SHOP, WEAPONS } from '../sim/types'
 import type { RenderFrame } from '../render/types'
 import type { HudModel, HudSide } from '../ui/hud'
+import type { BannerModel, ScoreModel, ShopModel } from '../ui/types'
+import { AiClient } from './ai-client'
 import { pickDemoShot, seededRandom } from './demo'
 
 export interface DemoOptions {
@@ -47,11 +51,13 @@ interface Playback {
   terrain: Terrain // grilla que se ve: arranca en before y suma los cambios de cada evento
   reveal: Map<GameEvent, Int32Array> // pixels que cambia cada impact/burn
   pending: number // pixels todavía sin mostrar
+  finisher: GameEvent | null // la muerte que cierra la ronda: arranca la cámara lenta
 }
 
 interface AiDrive {
   playerId: number
-  plan: ShotPlan
+  token: number
+  plan: ShotPlan | null // null mientras el worker piensa
   from: { angle: number; power: number }
   t: number
   think: number
@@ -63,14 +69,20 @@ interface AiDrive {
 
 const SETTLE = 0.9
 const MOVE_SPEED = 36
-const LATE = new Set<GameEvent['type']>(['turn', 'wind', 'gameover'])
+const SLOW_SCALE = 0.3
+const SLOW_TIME = 1.2
+const LATE = new Set<GameEvent['type']>(['turn', 'wind', 'gameover', 'roundover', 'round', 'shop'])
 
 export class Session {
   state: GameState | null = null
   config: MatchConfig | null = null
+  // true: la IA calcula en el hilo principal (avance rápido de QA, sin esperar al worker)
+  syncAi = false
   private playback: Playback | null = null
   private fx: GameEvent[] = []
   private ai: AiDrive | null = null
+  private aiClient: AiClient | null = null
+  private aiToken = 0
   private aim: { playerId: number; angle: number; power: number } | null = null
   private message = ''
   private messageT = 0
@@ -83,8 +95,12 @@ export class Session {
   private demo: (DemoOptions & { shotDone: boolean; seed: number }) | null = null
   private frozen = false
   private random: () => number = Math.random
-  private gameoverT = 0
+  private phaseT = 0
   private movedT = 0
+  private slow = 0
+  private scale = 1
+  private lastHumanId: number | null = null // último humano que tuvo el turno (hot-seat)
+  private tracerCache: { key: string; path: Vec2[] } | null = null
 
   get busy(): boolean {
     return this.playback !== null
@@ -103,25 +119,32 @@ export class Session {
     return this.demo !== null
   }
 
-  // Segundos desde que terminó la partida (0 si sigue).
+  // Segundos desde que la partida salió de 'aiming' (fin de ronda o de partida); 0 si se juega.
   get finishedFor(): number {
-    return this.gameoverT
+    return this.phaseT
+  }
+
+  // Factor de tiempo del último update (cámara lenta en el golpe que cierra la ronda).
+  get timeScale(): number {
+    return this.scale
   }
 
   get inputEnabled(): boolean {
     const s = this.state
     if (!s || s.phase !== 'aiming' || this.playback || this.frozen) return false
     const p = s.players[s.current]
-    return !!p && this.controlledByHuman(p)
+    return !!p && this.controlledByHuman(p) && !this.bannerFor()
   }
 
   start(config: MatchConfig, demo?: DemoOptions): void {
     const seed = config.seed ?? ((Math.random() * 0xffffffff) >>> 0)
-    this.config = { ...config, bots: Math.max(1, Math.min(3, config.bots)), seed }
+    const slots = config.slots.slice(0, 4)
+    this.config = { ...config, slots, rounds: Math.max(1, Math.round(config.rounds || 1)), seed }
     this.state = createMatch(this.config)
     this.playback = null
     this.fx = []
     this.ai = null
+    this.aiToken++
     this.aim = null
     this.message = ''
     this.messageT = 0
@@ -132,10 +155,15 @@ export class Session {
     this.lastShooter = null
     this.lastImpact = null
     this.frozen = false
-    this.gameoverT = 0
+    this.phaseT = 0
     this.movedT = 0
+    this.slow = 0
+    this.scale = 1
+    this.lastHumanId = null
+    this.tracerCache = null
     this.demo = demo ? { ...demo, shotDone: false, seed } : null
     this.random = demo ? seededRandom(seed ^ 0x5bd1e995) : Math.random
+    if (!demo?.freeze && !this.aiClient) this.aiClient = new AiClient()
   }
 
   // Ajuste continuo del ángulo y la potencia del humano. Se manda a la sim al disparar.
@@ -173,26 +201,181 @@ export class Session {
     this.dispatch({ type: 'selectWeapon', playerId: p.id, weapon })
   }
 
+  // Arma anterior/siguiente con munición (gamepad).
+  cycleWeapon(dir: -1 | 1, order: WeaponId[]): void {
+    if (!this.inputEnabled || !this.state) return
+    const p = this.state.players[this.state.current]
+    const at = Math.max(0, order.indexOf(p.weapon))
+    for (let i = 1; i <= order.length; i++) {
+      const w = order[(at + dir * i + order.length * 2) % order.length]
+      if ((p.ammo[w] ?? 0) > 0) {
+        if (w !== p.weapon) this.dispatch({ type: 'selectWeapon', playerId: p.id, weapon: w })
+        return
+      }
+    }
+  }
+
   fire(): void {
     if (!this.inputEnabled || !this.state) return
     this.commitAimAndFire(this.state.players[this.state.current].id)
   }
 
+  // Q/F/R/T: escudo, combustible, reparación, trazador. Devuelve true si se aplicó.
+  useItem(item: ItemId): boolean {
+    if (!this.inputEnabled || !this.state) return false
+    const p = this.state.players[this.state.current]
+    if ((p.items?.[item] ?? 0) <= 0) {
+      this.flash(`Sin ${ITEM_NAMES[item]}`)
+      return false
+    }
+    const ok = this.dispatch({ type: 'useItem', playerId: p.id, item })
+    if (!ok) this.flash('No se puede')
+    return ok
+  }
+
+  // Primer ítem usable del inventario (botón B del gamepad).
+  firstUsableItem(): ItemId | null {
+    const s = this.state
+    if (!s) return null
+    const p = s.players[s.current]
+    for (const id of USABLE) {
+      if ((p?.items?.[id] ?? 0) <= 0) continue
+      if (id === 'shield' && p.shield > 0) continue
+      if (id === 'tracer' && p.tracer) continue
+      return id
+    }
+    return null
+  }
+
+  // ---------- rondas, tienda, hot-seat ----------
+
+  nextRound(): void {
+    const s = this.state
+    if (!s || s.phase !== 'roundover') return
+    this.dispatch({ type: 'nextRound' })
+    this.skipEmptyShop()
+  }
+
+  // Humanos que todavía no terminaron de comprar, en orden de jugador.
+  shopQueue(): Player[] {
+    const s = this.state
+    if (!s || s.phase !== 'shop') return []
+    return s.players.filter((p) => p.kind === 'human' && !p.ready)
+  }
+
+  shopModel(playerId: number): ShopModel | null {
+    const s = this.state
+    const p = s?.players.find((q) => q.id === playerId)
+    if (!s || !p) return null
+    return {
+      playerId: p.id,
+      name: p.name,
+      color: p.color,
+      crew: p.crew,
+      money: p.money,
+      round: Math.min(s.rounds, s.round + 1),
+      rounds: s.rounds,
+      rows: SHOP.map((e) => {
+        const owned = ownedOf(p, e.id)
+        return {
+          id: e.id,
+          kind: e.kind,
+          name: e.name,
+          price: e.price,
+          qty: e.qty,
+          owned,
+          max: e.max,
+          canBuy: p.money >= e.price && owned + e.qty <= e.max,
+          canSell: owned > 0,
+        }
+      }),
+    }
+  }
+
+  buy(playerId: number, id: ShopId): boolean {
+    return this.dispatch({ type: 'buy', playerId, id })
+  }
+
+  sell(playerId: number, id: ShopId): boolean {
+    return this.dispatch({ type: 'sell', playerId, id })
+  }
+
+  ready(playerId: number): void {
+    this.dispatch({ type: 'ready', playerId })
+    this.skipEmptyShop()
+  }
+
+  scoreModel(): ScoreModel | null {
+    const s = this.state
+    if (!s) return null
+    return {
+      round: s.round,
+      rounds: s.rounds,
+      roundWinnerId: s.roundWinnerId ?? null,
+      final: s.phase === 'gameover',
+      winnerId: s.winnerId,
+      rows: s.players.map((p) => ({
+        id: p.id,
+        name: p.name,
+        color: p.color,
+        crew: p.crew,
+        alive: p.alive,
+        roundsWon: p.roundsWon ?? 0,
+        kills: p.kills ?? 0,
+        earned: s.earnings?.[p.id] ?? 0,
+        money: p.money ?? 0,
+      })),
+    }
+  }
+
+  // Hot-seat: el humano que tiene que ver el cartel antes de jugar, o null.
+  bannerFor(): Player | null {
+    const s = this.state
+    if (!s || s.phase !== 'aiming' || this.playback || this.demo) return null
+    const p = s.players[s.current]
+    if (!p || !p.alive || p.kind !== 'human' || p.id === this.lastHumanId) return null
+    if (s.players.filter((q) => q.kind === 'human' && q.alive).length < 2) {
+      this.lastHumanId = p.id
+      return null
+    }
+    return p
+  }
+
+  bannerModel(): BannerModel | null {
+    const p = this.bannerFor()
+    const s = this.state
+    if (!p || !s) return null
+    return { name: p.name, color: p.color, crew: p.crew, round: s.round, rounds: s.rounds }
+  }
+
+  ackBanner(): void {
+    const p = this.bannerFor()
+    if (p) this.lastHumanId = p.id
+  }
+
   update(dt: number): void {
+    this.scale = 1
     if (!this.state || this.frozen) return
     if (this.movedT > 0) this.movedT -= dt
     if (this.messageT > 0) {
       this.messageT -= dt
       if (this.messageT <= 0) this.message = ''
     }
+    if (this.slow > 0) {
+      this.scale = SLOW_SCALE
+      this.slow = Math.max(0, this.slow - dt)
+    }
     if (this.playback) {
-      this.advance(dt)
+      this.advance(dt * this.scale)
       return
     }
-    if (this.state.phase === 'gameover') {
-      this.gameoverT += dt
+    if (this.state.phase !== 'aiming') {
+      this.phaseT += dt
+      // demo: la partida entre IAs sigue sola (tienda de IAs incluida)
+      if (this.demo && this.state.phase === 'roundover' && this.phaseT > 1.5) this.nextRound()
       return
     }
+    this.phaseT = 0
     this.driveAi(dt)
   }
 
@@ -213,7 +396,7 @@ export class Session {
     const s = this.state
     if (!s) return null
     const pb = this.playback
-    const biome: Biome = s.biome ?? this.config?.biome ?? 'forest'
+    const biome: Biome = s.biome ?? 'forest'
     if (pb) {
       return {
         biome,
@@ -228,6 +411,7 @@ export class Session {
         shooterId: pb.shooterId,
         weapon: pb.weapon,
         freeze: this.frozen,
+        aimPreview: null,
       }
     }
     return {
@@ -243,6 +427,7 @@ export class Session {
       shooterId: null,
       weapon: null,
       freeze: this.frozen,
+      aimPreview: this.tracerPath(s),
     }
   }
 
@@ -253,7 +438,7 @@ export class Session {
     const players = pb ? pb.players : this.playersWithAim(s)
     const currentIndex = pb ? pb.before.current : s.current
     const current = players[currentIndex]
-    const human = players.find((p) => p.kind === 'human') ?? players[0] ?? null
+    const human = this.focusHuman(players, current) ?? players[0] ?? null
     let rival: Player | undefined
     if (current && human && current.id !== human.id) rival = current
     // en el tiro del humano, el rival más cerca del impacto
@@ -273,6 +458,7 @@ export class Session {
       rival = players.find((p) => p.id === this.lastShooter)
     }
     if (!rival) rival = players.find((p) => p.id !== human?.id && p.alive) ?? players.find((p) => p.id !== human?.id)
+    const demoP1 = this.demo ? players[0]?.id : null
     const side = (p: Player | undefined | null): HudSide | null =>
       p
         ? {
@@ -283,7 +469,7 @@ export class Session {
             hp: Math.round(p.hp),
             alive: p.alive,
             active: !!current && p.id === current.id,
-            you: !!human && p.id === human.id && human.kind === 'human',
+            you: !!human && p.id === human.id && (human.kind === 'human' || p.id === demoP1),
           }
         : null
     // el resto de los tanques, en orden de jugador, con placa compacta
@@ -298,6 +484,11 @@ export class Session {
     const weapon = current?.weapon ?? 'normal'
     const ammoAll = {} as Record<WeaponId, number>
     for (const id of Object.keys(WEAPONS) as WeaponId[]) ammoAll[id] = ammoOwner?.ammo?.[id] ?? 0
+    // extras: plata e inventario del humano en foco (el del estado, ya descontado)
+    const focus = (pb ? pb.after : s).players.find((p) => p.id === human?.id)
+    const items = {} as Record<ItemId, number>
+    for (const id of ITEM_ORDER) items[id] = focus?.items?.[id] ?? 0
+    const shieldOwner = pb ? pb.players.find((p) => p.id === current?.id) : current
     return {
       human: side(human),
       rival: side(rival),
@@ -312,6 +503,15 @@ export class Session {
       ammoAll,
       fuel: current ? Math.max(0, current.fuel ?? 0) / FUEL_PER_TURN : 0,
       showBar: !!current && this.controlledByHuman(current) && s.phase === 'aiming',
+      // el demo congelado se compara contra capturas previas: sin extras
+      extras: this.demo?.freeze ? undefined : {
+        round: s.round ?? 1,
+        rounds: s.rounds ?? 1,
+        money: focus?.money ?? 0,
+        items,
+        shield: Math.max(0, shieldOwner?.shield ?? 0),
+        tracer: !!ammoOwner?.tracer,
+      },
     }
   }
 
@@ -320,7 +520,8 @@ export class Session {
     if (!s || s.winnerId == null) return 'Empate'
     const winner = s.players.find((p) => p.id === s.winnerId)
     if (!winner) return 'Empate'
-    return this.controlledByHuman(winner) || winner.kind === 'human' ? 'Ganaste' : `Gano ${winner.name}`
+    const humans = s.players.filter((p) => p.kind === 'human').length
+    return this.controlledByHuman(winner) && humans === 1 ? 'Ganaste' : `Gano ${winner.name}`
   }
 
   winner(): Player | null {
@@ -334,9 +535,22 @@ export class Session {
   private status(s: GameState, current: Player | undefined): string {
     if (this.message) return this.message
     if (s.phase === 'gameover' && !this.playback) return this.resultText()
+    if (s.phase !== 'aiming' && !this.playback) return 'Fin de ronda'
     if (this.playback || !current) return ''
-    if (this.controlledByHuman(current)) return 'Tu turno'
+    if (this.controlledByHuman(current)) {
+      return s.players.filter((p) => p.kind === 'human').length > 1 ? `Turno de ${current.name}` : 'Tu turno'
+    }
     return `${current.name} apunta`
+  }
+
+  // Humano en foco para el HUD: el de turno, o el último que jugó, o el primero.
+  private focusHuman(players: Player[], current: Player | undefined): Player | undefined {
+    if (current && current.kind === 'human' && !this.demo) return current
+    if (this.lastHumanId != null) {
+      const p = players.find((q) => q.id === this.lastHumanId)
+      if (p) return p
+    }
+    return players.find((p) => p.kind === 'human')
   }
 
   private controlledByHuman(p: Player): boolean {
@@ -347,6 +561,33 @@ export class Session {
   private flash(text: string): void {
     this.message = text
     this.messageT = 1.1
+  }
+
+  private skipEmptyShop(): void {
+    // sin humanos en la tienda (todas IAs): la ronda arranca sola
+    const s = this.state
+    if (!s || s.phase !== 'shop' || s.players.some((p) => p.kind === 'human' && !p.ready)) return
+    const any = s.players[0]
+    if (any) this.dispatch({ type: 'ready', playerId: any.id })
+  }
+
+  private tracerPath(s: GameState): Vec2[] | null {
+    if (s.phase !== 'aiming') return null
+    const p = s.players[s.current]
+    if (!p || !p.tracer || !this.controlledByHuman(p) || this.bannerFor()) return null
+    const aim = this.aim && this.aim.playerId === p.id ? this.aim : p
+    const angle = Math.round(aim.angle)
+    const power = Math.round(aim.power)
+    const key = `${this.matchId}:${s.turn}:${p.x}:${p.y}:${angle}:${power}:${s.wind}:${this.terrainVersion}`
+    if (this.tracerCache?.key === key) return this.tracerCache.path
+    let path: Vec2[] = []
+    try {
+      path = fly({ terrain: s.terrain, players: s.players, props: s.props, ownerId: p.id, angle, power, wind: s.wind }).path
+    } catch (err) {
+      console.error(err)
+    }
+    this.tracerCache = { key, path }
+    return path
   }
 
   private currentAim(): { playerId: number; angle: number; power: number } | null {
@@ -403,7 +644,23 @@ export class Session {
     if (result.events.length) this.fx.push(...result.events)
     if (result.events.some((e) => e.type === 'empty')) this.flash('Sin municion')
     if (command.type === 'move' && changed && result.state.terrain !== s.terrain) this.terrainVersion++
+    if (result.events.some((e) => e.type === 'round') || (s.phase !== 'aiming' && result.state.phase === 'aiming')) this.newRound()
     return changed
+  }
+
+  // Mapa nuevo: el renderer limpia cráteres y restos con el matchId nuevo.
+  private newRound(): void {
+    this.terrainVersion++
+    this.matchId++
+    this.aim = null
+    this.ai = null
+    this.aiToken++
+    this.lastShooter = null
+    this.lastImpact = null
+    this.lastHumanId = null
+    this.phaseT = 0
+    this.slow = 0
+    this.tracerCache = null
   }
 
   private startPlayback(before: GameState, after: GameState, events: GameEvent[], flights: Flight[], shooterId: number): void {
@@ -434,6 +691,11 @@ export class Session {
     const settle = hasShot ? SETTLE + (bigBlast ? 0.5 : 0) : 0
     const weapon = before.players.find((p) => p.id === shooterId)?.weapon ?? 'normal'
     const { terrain, reveal, pending } = splitTerrain(before.terrain, after.terrain, timeline)
+    // la ronda termina con este tiro: la última muerte va en cámara lenta
+    let finisher: GameEvent | null = null
+    if (after.phase !== 'aiming' && !this.demo?.freeze) {
+      for (const e of timeline) if (e.event.type === 'death' && Number.isFinite(e.t)) finisher = e.event
+    }
     this.playback = {
       t: 0,
       end: Math.max(flightsEnd, eventsEnd) + settle,
@@ -450,6 +712,7 @@ export class Session {
       terrain,
       reveal,
       pending,
+      finisher,
     }
     if (hasShot) {
       this.shots.push({ playerId: shooterId, weapon })
@@ -478,10 +741,12 @@ export class Session {
     if (pb.pending > 0) this.terrainVersion++
     this.state = pb.after
     this.playback = null
+    this.phaseT = 0
   }
 
   private deliver(pb: Playback, event: GameEvent): void {
     this.fx.push(event)
+    if (event === pb.finisher) this.slow = SLOW_TIME
     const pixels = pb.reveal.get(event)
     if (pixels && pixels.length) {
       const { front, back } = pb.after.terrain
@@ -499,6 +764,11 @@ export class Session {
       case 'damage': {
         const p = pb.players.find((q) => q.id === event.playerId)
         if (p) p.hp = event.hp
+        break
+      }
+      case 'shield': {
+        const p = pb.players.find((q) => q.id === event.playerId)
+        if (p) p.shield = event.left
         break
       }
       case 'death': {
@@ -554,24 +824,51 @@ export class Session {
       return
     }
     if (!this.ai || this.ai.playerId !== actor.id) {
-      const plan = this.plan(s, actor)
-      if (!plan) return
-      const turn = Math.abs(plan.angle - actor.angle) / 180 + Math.abs(plan.power - actor.power) / 200
-      const scripted = this.demo && !this.demo.shotDone && actor.id === s.players[0]?.id
+      const scripted = !!this.demo && !this.demo.shotDone && actor.id === s.players[0]?.id
+      const token = ++this.aiToken
       this.ai = {
         playerId: actor.id,
-        plan,
+        token,
+        plan: null,
         from: { angle: actor.angle, power: actor.power },
         t: 0,
         think: scripted ? 0.15 : 0.45,
-        dur: clamp(0.45 + turn * 1.1, 0.45, 1.3),
+        dur: 0.45,
         hold: scripted ? 0.1 : 0.3,
-        move: Math.round(plan.move ?? 0),
+        move: 0,
         moveAcc: 0,
       }
-      if (plan.weapon !== actor.weapon) this.dispatch({ type: 'selectWeapon', playerId: actor.id, weapon: plan.weapon })
+      const client = this.aiClient
+      if (scripted || this.demo?.freeze || this.syncAi || !client || !client.available) {
+        this.setPlan(this.ai, this.plan(s, actor))
+      } else {
+        const seed = (this.random() * 0x100000000) >>> 0
+        const difficulty: Difficulty = this.config?.difficulty ?? 'normal'
+        client
+          .choose(s, difficulty, seed)
+          .catch((err) => {
+            console.error(err)
+            return fallbackPlan(actor)
+          })
+          .then((plan) => {
+            const ai = this.ai
+            if (!ai || ai.token !== token || this.state !== s) return
+            this.setPlan(ai, plan)
+          })
+      }
     }
     const ai = this.ai
+    if (!ai.plan) {
+      // pensando en el worker: el cañón tantea alrededor de donde estaba
+      ai.t += dt
+      const aim = this.currentAim()
+      if (aim) {
+        const k = Math.min(1, ai.t / 0.4)
+        aim.angle = clamp(ai.from.angle + Math.sin(ai.t * 2.3) * 5 * k, 0, 180)
+        aim.power = clamp(ai.from.power + Math.sin(ai.t * 1.7 + 1) * 4 * k, 0, 100)
+      }
+      return
+    }
     if (ai.move !== 0) {
       ai.moveAcc += MOVE_SPEED * dt
       let steps = Math.min(3, Math.floor(ai.moveAcc))
@@ -605,7 +902,25 @@ export class Session {
     }
   }
 
-  private plan(s: GameState, actor: Player): ShotPlan | null {
+  // Con el plan en la mano: arma, recorrido y duración del apuntado. Si el worker tardó más
+  // que el "pensar" de siempre, el apuntado arranca ya desde donde quedó el cañón.
+  private setPlan(ai: AiDrive, plan: ShotPlan): void {
+    const s = this.state
+    const actor = s?.players.find((p) => p.id === ai.playerId)
+    if (!s || !actor) return
+    const aim = this.currentAim()
+    ai.from = aim ? { angle: aim.angle, power: aim.power } : { angle: actor.angle, power: actor.power }
+    const turn = Math.abs(plan.angle - ai.from.angle) / 180 + Math.abs(plan.power - ai.from.power) / 200
+    ai.plan = plan
+    ai.dur = clamp(0.45 + turn * 1.1, 0.45, 1.3)
+    ai.think = Math.max(0, ai.think - ai.t)
+    ai.t = 0
+    ai.move = Math.round(plan.move ?? 0)
+    ai.moveAcc = 0
+    if (plan.weapon !== actor.weapon) this.dispatch({ type: 'selectWeapon', playerId: actor.id, weapon: plan.weapon })
+  }
+
+  private plan(s: GameState, actor: Player): ShotPlan {
     const difficulty: Difficulty = this.config?.difficulty ?? 'normal'
     try {
       if (this.demo && !this.demo.shotDone && actor.id === s.players[0]?.id) {
@@ -614,9 +929,27 @@ export class Session {
       return chooseShot(s, difficulty, this.random)
     } catch (err) {
       console.error(err)
-      return { angle: actor.angle, power: Math.max(40, actor.power), weapon: 'normal' } as ShotPlan
+      return fallbackPlan(actor)
     }
   }
+}
+
+const USABLE: ItemId[] = ['shield', 'repair', 'fuel', 'tracer']
+const ITEM_NAMES: Record<ItemId, string> = {
+  shield: 'escudo',
+  parachute: 'paracaidas',
+  fuel: 'combustible',
+  repair: 'reparacion',
+  tracer: 'trazador',
+}
+
+function ownedOf(p: Player, id: ShopId): number {
+  if (id in WEAPONS) return p.ammo?.[id as WeaponId] ?? 0
+  return p.items?.[id as ItemId] ?? 0
+}
+
+function fallbackPlan(actor: Player): ShotPlan {
+  return { angle: actor.angle, power: Math.max(40, actor.power), weapon: 'normal' }
 }
 
 const BURN_REACH = 8

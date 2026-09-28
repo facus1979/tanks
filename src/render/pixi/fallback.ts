@@ -251,3 +251,27 @@ export function treadFrames(): HTMLCanvasElement[] {
     ),
   )
 }
+
+// Paracaídas de reserva, 20×16: cúpula a rayas con el borde inferior en festón.
+export function parachute(): HTMLCanvasElement {
+  const w = 20
+  const h = 16
+  const c = document.createElement('canvas')
+  c.width = w
+  c.height = h
+  const ctx = c.getContext('2d')
+  if (!ctx) return c
+  const put = (x: number, y: number, col: number): void => {
+    ctx.fillStyle = `#${col.toString(16).padStart(6, '0')}`
+    ctx.fillRect(x, y, 1, 1)
+  }
+  for (let y = 0; y < 12; y++) {
+    const half = Math.round(Math.sqrt(Math.max(0, 1 - ((11 - y) / 12) ** 2)) * 10)
+    for (let x = 10 - half; x < 10 + half; x++) {
+      const edge = x === 10 - half || x === 10 + half - 1 || y === 0
+      put(x, y, edge ? OUT : Math.floor((x + 1) / 4) % 2 === 0 ? 0xd0362c : 0xf2ece2)
+    }
+  }
+  for (let x = 0; x < w; x++) if (x % 5 !== 2 && x % 5 !== 3) put(x, 12, OUT)
+  return c
+}

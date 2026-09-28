@@ -7,6 +7,7 @@ import type { Art } from './assets'
 import { loadArt } from './assets'
 import { DEBRIS_COLORS } from './fallback'
 import type { ShotView } from './fx'
+import { Extras } from './extras'
 import { Fx } from './fx'
 import { Raster, Rng } from './raster'
 import { TerrainPainter } from './terrain'
@@ -91,6 +92,7 @@ export class PixiRenderer implements GameRenderer {
   private frontTex: Texture | null = null
 
   private fx = new Fx(WORLD_W, WORLD_H)
+  private extras = new Extras(this.fx)
   private fxSprite = new Sprite()
   private lightSprite = new Sprite()
   private fxTex: Texture | null = null
@@ -174,9 +176,10 @@ export class PixiRenderer implements GameRenderer {
       this.tankLayer,
       this.lightSprite,
       this.fxSprite,
+      this.extras.layer,
       this.overlayLayer,
     )
-    this.app.stage.addChild(this.bg, this.world, this.glowG, this.arrowLayer, this.flashG)
+    this.app.stage.addChild(this.bg, this.world, this.glowG, this.arrowLayer, this.flashG, this.extras.curtain)
     this.fx.wreckPos = (id) => {
       const p = this.players.find((q) => q.id === id)
       return p && !p.alive ? { x: Math.round(p.x), y: Math.round(p.y) } : null
@@ -263,6 +266,7 @@ export class PixiRenderer implements GameRenderer {
     this.stats?.sample(this.fx.count, dt, performance.now() - t0, this.fx.trails)
 
     this.syncTanks(art, frame, step)
+    this.extras.update(art, frame, step, this.time, (id) => this.tanks.get(id)?.dropOff ?? 0)
     this.syncProps(art, frame.props, frame.wind)
     this.syncLamps(frame.props)
     this.upload()
@@ -295,6 +299,7 @@ export class PixiRenderer implements GameRenderer {
   private reset(): void {
     this.painter.reset()
     this.fx.reset()
+    this.extras.reset()
     for (const v of this.tanks.values()) v.destroy()
     this.tanks.clear()
     for (const v of this.props.values()) v.destroy()
@@ -305,6 +310,7 @@ export class PixiRenderer implements GameRenderer {
     this.hitThisShot.clear()
     this.impactSeen = false
     this.version = -1
+    this.extras.startTransition()
   }
 
   private setBiome(art: Art, biome: Biome): void {
@@ -318,6 +324,12 @@ export class PixiRenderer implements GameRenderer {
   }
 
   private onEvent(ev: GameEvent, frame: RenderFrame): void {
+    if (ev.type === 'round') {
+      // mapa nuevo: los restos y cráteres de la ronda anterior no pasan
+      this.reset()
+      return
+    }
+    if (this.art) this.extras.onEvent(ev, frame, this.art)
     if (FX_TEST && ev.type === 'impact' && ev.source !== 'barrel') {
       const w = WEAPONS[FX_TEST]
       ev = { ...ev, blast: w.blast, radius: w.radius }
@@ -367,7 +379,8 @@ export class PixiRenderer implements GameRenderer {
       }
       case 'fall': {
         const p = frame.players.find((q) => q.id === ev.playerId)
-        if (p) this.fx.dust(p.x, ev.to, 12, TANK_W)
+        if (ev.parachute) this.view(ev.playerId).startChute(ev.from - ev.to)
+        else if (p) this.fx.dust(p.x, ev.to, 12, TANK_W)
         break
       }
       case 'prop':
@@ -531,6 +544,11 @@ export class PixiRenderer implements GameRenderer {
         v.ask = Math.max(0, v.ask - dt)
       }
       v.overlay.visible = true
+      v.stepChute(dt, p.alive)
+      if (v.landed) {
+        v.landed = false
+        this.fx.dust(p.x, p.y, 8, TANK_W)
+      }
       v.update(art, p, p.id === currentId, this.time, frame.wind, this.blocked, frame.terrain)
       // polvo de las orugas: una bocanada cada pocos pixels, desde la cola del tanque
       if (v.moved !== 0 && dt > 0) {
