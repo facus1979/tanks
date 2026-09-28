@@ -1,0 +1,217 @@
+// Resolución de un impacto: terreno, daño, utilería, barriles en cadena, caída y aplastamiento.
+import { deform, isSolid, solidRunUp } from './terrain'
+import {
+  FALL_DAMAGE,
+  TANK_H,
+  TANK_HALF_W,
+  WEAPONS,
+  type BlastStyle,
+  type GameEvent,
+  type GameState,
+  type Player,
+  type Prop,
+  type Terrain,
+  type WeaponId,
+} from './types'
+
+export const BARREL_RADIUS = 18
+export const BARREL_DAMAGE = 30
+export const CHAIN_DELAY = 0.18
+export const CRUSH_DEPTH = 8
+export const CRUSH_DAMAGE = 2 // por pixel pasado de CRUSH_DEPTH
+export const MIN_SUPPORT = 3 // columnas sólidas que sostienen al tanque
+
+export interface Blast {
+  x: number
+  y: number
+  radius: number
+  damage: number
+  weapon: WeaponId
+  blast: BlastStyle
+  terrain: 'destroy' | 'build' | 'dig'
+  t: number
+  directTank?: number
+  source?: 'shot' | 'barrel'
+}
+
+// Distancia del punto a la caja del tanque (0 si está adentro).
+export function tankDistance(p: Player, x: number, y: number): number {
+  const dx = Math.max(p.x - TANK_HALF_W - x, 0, x - (p.x + TANK_HALF_W))
+  const dy = Math.max(p.y - TANK_H - y, 0, y - p.y)
+  return Math.hypot(dx, dy)
+}
+
+export function blastDamage(p: Player, b: { x: number; y: number; radius: number; damage: number; terrain: string }): number {
+  const d = tankDistance(p, b.x, b.y)
+  const reach = b.terrain === 'build' ? b.radius * 0.5 : b.radius
+  if (d > reach) return 0
+  return b.damage * (1 - d / (reach + 1))
+}
+
+function propDistance(p: Prop, x: number, y: number): number {
+  const dx = Math.max(p.x - x, 0, x - (p.x + p.w - 1))
+  const dy = Math.max(p.y - y, 0, y - (p.y + p.h - 1))
+  return Math.hypot(dx, dy)
+}
+
+export function hurt(p: Player, raw: number, events: GameEvent[]): void {
+  const amount = Math.min(p.hp, Math.round(raw))
+  if (!p.alive || amount <= 0) return
+  p.hp -= amount
+  events.push({ type: 'damage', playerId: p.id, amount, hp: p.hp })
+  if (p.hp <= 0) {
+    p.alive = false
+    events.push({ type: 'death', playerId: p.id })
+  }
+}
+
+// Resuelve la explosión inicial y todo lo que desencadena. Devuelve los eventos en orden.
+// after corre antes de asentar tanques y utilería (napalm, túnel de la excavadora).
+export function resolveBlast(state: GameState, first: Blast, after?: (events: GameEvent[]) => void): GameEvent[] {
+  const events: GameEvent[] = []
+  const coverBefore = state.players.map((p) => cover(state.terrain, p))
+  const queue: Blast[] = [first]
+  while (queue.length > 0) {
+    const b = queue.shift()!
+    const debris = deform(state.terrain, b.x, b.y, b.radius, b.terrain)
+    events.push({
+      type: 'impact',
+      x: b.x,
+      y: b.y,
+      weapon: b.weapon,
+      blast: b.blast,
+      radius: b.radius,
+      t: b.t,
+      debris,
+      source: b.source ?? 'shot',
+    })
+    const mark = events.length
+    for (const p of state.players) {
+      if (!p.alive) continue
+      const amount = p.id === b.directTank ? b.damage : blastDamage(p, b)
+      if (amount > 0) hurt(p, amount, events)
+    }
+    for (const prop of state.props) {
+      if (!prop.alive) continue
+      const d = propDistance(prop, b.x, b.y)
+      const breaks = prop.kind === 'barrel' || prop.kind === 'crate' ? d <= b.radius : d <= b.radius * 0.6
+      if (!breaks) continue
+      prop.alive = false
+      events.push({ type: 'prop', propId: prop.id, kind: prop.kind, x: prop.x, y: prop.y, destroyed: true })
+      if (prop.kind === 'barrel') {
+        queue.push({
+          x: prop.x + prop.w / 2,
+          y: prop.y + prop.h / 2,
+          radius: BARREL_RADIUS,
+          damage: BARREL_DAMAGE,
+          weapon: 'normal',
+          blast: 'fire',
+          terrain: 'destroy',
+          t: b.t + CHAIN_DELAY,
+          source: 'barrel',
+        })
+      }
+    }
+    for (let i = mark; i < events.length; i++) {
+      const e = events[i]
+      if (e.type === 'damage' || e.type === 'death' || e.type === 'prop') e.t = b.t
+    }
+  }
+  after?.(events)
+  settleProps(state, events)
+  settleTanks(state, coverBefore, events)
+  return events
+}
+
+function cover(t: Terrain, p: Player): number {
+  return solidRunUp(t, p.x, p.y - TANK_H, 64)
+}
+
+function solidPropAt(props: Prop[], self: Prop, x: number, y: number): boolean {
+  for (const o of props) {
+    if (o === self || !o.alive || (o.kind !== 'barrel' && o.kind !== 'crate')) continue
+    if (x >= o.x && x < o.x + o.w && y >= o.y && y < o.y + o.h) return true
+  }
+  return false
+}
+
+function rowSupported(state: GameState, prop: Prop, y: number): boolean {
+  for (let x = prop.x; x < prop.x + prop.w; x++) {
+    if (isSolid(state.terrain, x, y) || solidPropAt(state.props, prop, x, y)) return true
+  }
+  return false
+}
+
+export function propSupported(state: GameState, prop: Prop): boolean {
+  const t = state.terrain
+  switch (prop.kind) {
+    case 'barrel':
+    case 'crate':
+      return rowSupported(state, prop, prop.y + prop.h)
+    case 'lamp':
+      for (let x = prop.x; x < prop.x + prop.w; x++) if (isSolid(t, x, prop.y - 1)) return true
+      return false
+    case 'flag':
+    case 'windsock':
+      return isSolid(t, prop.x, prop.y + prop.h) || isSolid(t, prop.x + 1, prop.y + prop.h)
+    case 'ladder':
+      for (let y = prop.y; y <= prop.y + prop.h; y++) {
+        if (isSolid(t, prop.x - 1, y) || isSolid(t, prop.x + prop.w, y)) return true
+        if (y === prop.y + prop.h) for (let x = prop.x; x < prop.x + prop.w; x++) if (isSolid(t, x, y)) return true
+      }
+      return false
+  }
+}
+
+function settleProps(state: GameState, events: GameEvent[]): void {
+  // de abajo hacia arriba, para que las pilas caigan juntas
+  const order = state.props.filter((p) => p.alive).sort((a, b) => b.y + b.h - (a.y + a.h) || a.id - b.id)
+  for (const prop of order) {
+    if (propSupported(state, prop)) continue
+    if (prop.kind !== 'barrel' && prop.kind !== 'crate') {
+      prop.alive = false
+      events.push({ type: 'prop', propId: prop.id, kind: prop.kind, x: prop.x, y: prop.y, destroyed: true })
+      continue
+    }
+    let y = prop.y
+    while (y + prop.h < state.terrain.h && !rowSupported(state, prop, y + prop.h)) {
+      y++
+      prop.y = y
+    }
+    events.push({ type: 'prop', propId: prop.id, kind: prop.kind, x: prop.x, y: prop.y, destroyed: false })
+  }
+}
+
+// Fila de apoyo del tanque buscando desde y hacia abajo.
+export function tankFloor(t: Terrain, x: number, y: number): number {
+  const cx = Math.round(x)
+  for (let yy = Math.max(0, Math.floor(y)); yy < t.h; yy++) {
+    let n = 0
+    for (let ix = cx - TANK_HALF_W; ix < cx + TANK_HALF_W; ix++) if (isSolid(t, ix, yy)) n++
+    if (n >= MIN_SUPPORT) return yy
+  }
+  return t.h
+}
+
+function settleTanks(state: GameState, coverBefore: number[], events: GameEvent[]): void {
+  for (const p of state.players) {
+    const floor = tankFloor(state.terrain, p.x, p.y)
+    if (floor > p.y) {
+      const from = p.y
+      p.y = floor
+      events.push({ type: 'fall', playerId: p.id, from, to: floor })
+      const drop = floor - from
+      if (p.alive && drop > 2) hurt(p, drop * FALL_DAMAGE, events)
+    }
+  }
+  state.players.forEach((p, i) => {
+    if (!p.alive) return
+    const depth = cover(state.terrain, p)
+    if (depth > CRUSH_DEPTH && depth > coverBefore[i]) hurt(p, (depth - CRUSH_DEPTH) * CRUSH_DAMAGE, events)
+  })
+}
+
+export function blastFor(weapon: WeaponId, x: number, y: number, t: number, directTank?: number): Blast {
+  const w = WEAPONS[weapon]
+  return { x, y, radius: w.radius, damage: w.damage, weapon, blast: w.blast, terrain: w.terrain, t, directTank }
+}

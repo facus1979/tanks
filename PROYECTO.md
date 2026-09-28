@@ -1,0 +1,141 @@
+# Tanks
+
+Artillería por turnos en el browser: las reglas de Scorched Earth con la estética de Broforce. Un humano contra 1 a 3 IAs. Después, la misma simulación en un servidor para multijugador online.
+
+Este archivo es la definición del proyecto. Si una decisión de acá cambia, se actualiza acá antes de codear el desvío.
+
+## Objetivo
+
+Scorched Earth: tanques sobre terreno irregular, ángulo y potencia, viento, trayectorias balísticas, terreno deformable, armas con explosiones distintas, tanques que se mueven.
+
+Broforce: pixel art moderno, personajes con personalidad, explosiones exageradas, destrucción visual del escenario, terreno con textura (no bloques planos).
+
+**Referencia visual aprobada:** `preview/look-test-1080.png`, generada por `scripts/lookdev/look-test.mjs`. El juego tiene que verse así. Es la vara para todas las capturas de QA.
+
+## Decisiones cerradas
+
+- Cliente: TypeScript + Vite. Render: PixiJS. Física propia, determinista, timestep fijo. Sin motor de cuerpos rígidos.
+- **Resolución lógica 800×450**, una sola pantalla, sin cámara. Se escala con nearest-neighbor al tamaño de la ventana.
+- **Terreno por pixel con materiales** (`Terrain.front` y `Terrain.back`, `Uint8Array` de 800×450). `front` colisiona. `back` es lo que había detrás y se dibuja oscuro donde `front` es aire. Esa es la pared de fondo de Broforce.
+- Materiales: tierra, piedra, ladrillo, madera, tabla, viga, poste, metal, roca madre. Cada uno con dureza; ver `MATERIALS`.
+- **Tanque de 28×20** con tripulante de 12×12 asomado por la escotilla. Cada jugador tiene color y tripulante propios.
+- **`POWER_SCALE` 4.03**, gravedad 220: potencia 100 cruza el mapa. Si el proyectil sale por arriba, se muestra una flecha en el borde.
+- Biomas: bosque con niebla (el de la referencia), jungla, atardecer industrial.
+- Máximo 4 jugadores. Arte propio generado por código (`scripts/paint-assets.mjs`); sin assets de terceros.
+- Sangre: no. Chispas, humo, escombros y fuego.
+- El online no se construye ahora, pero no puede exigir reescribir las reglas.
+
+## Reglas
+
+- Vida 100. Gana el último tanque en pie; si no queda ninguno, empate.
+- Viento nuevo cada turno, visible antes de apuntar. Rango -10 a 10.
+- Ángulo 0 a 180: 0 es horizontal a la derecha, 90 arriba y 180 horizontal a la izquierda. Potencia 0 a 100.
+- El tanque se apoya en el terreno. Si el piso desaparece, cae y recibe daño de caída. Si la tierra lo tapa, aplasta.
+- Un tiro puede dañar al que dispara. Los barriles explotan en cadena.
+- La IA usa la misma física, en una copia del estado, y le mete error según la dificultad.
+- F6: combustible por turno (`FUEL_PER_TURN`). El tanque sube escalones de hasta `MAX_CLIMB`.
+
+### Armas
+
+Valores finales de `WEAPONS` (F9). Balance medido con `npm run sim-check` (IA normal contra IA normal, 20 partidas): 11.1 tiros por partida de 2 tanques, 20.6 con 4.
+
+| # | Arma | Radio | Daño | Munición | Efecto |
+|---|---|---|---|---|---|
+| 1 | Normal | 14 | 22 | 99 | explosión `fire` |
+| 2 | Pesada | 26 | 36 | 2 | `bigfire` |
+| 3 | Tierra | 18 | 20 | 3 | agrega tierra (`build`); daña a medio radio |
+| 4 | Racimo | 10 | 12 c/u | 2 | se parte en 5 bombitas en el apogeo (vuelos con `startT`) |
+| 5 | Napalm | 16 | 14 + 18 de fuego | 2 | el fuego corre 40 px por la superficie, quema lo inflamable (front a AIR, back queda) y daña a los tanques adentro; eventos `burn` |
+| 6 | Excavadora | 9 | 10 | 2 | cava un túnel de 80 px en la dirección del vuelo; atraviesa todo salvo roca madre |
+| 7 | Rodadora | 16 | 30 | 2 | al tocar el piso rueda cuesta abajo (segundo vuelo con `startT`) hasta frenar, chocar una pared o un tanque |
+| 8 | Nuke | 60 | 55 | 1 | `nuke` |
+
+La IA: error normal ±6° y ±7 de potencia. Si no tiene tiro, prueba moverse (`ShotPlan.move`, pixels con signo; la sesión manda esos comandos `move` antes de apuntar). Tapada y sin tiro, usa la excavadora. Elige el arma verificando con la simulación completa y con un costo por munición especial.
+
+### Controles
+
+| Tecla | Acción |
+|---|---|
+| Izquierda / Derecha | Sube / baja el ángulo |
+| Arriba / Abajo | Sube / baja la potencia |
+| A / D (mantener) | Mueve el tanque gastando combustible (barra COMB en el HUD) |
+| 1 a 8 o click en el selector | Elige arma (orden de `WeaponId`; sin munición queda gris) |
+| Espacio | Disparar |
+| M | Silencia / activa el sonido |
+| Esc | En la pantalla de victoria, vuelve al menú |
+
+QA: `?play=<seed>` (con `&biome=` opcional) entra directo a una partida humana contra 2 IAs.
+
+## Arquitectura
+
+La simulación no conoce a Pixi, al DOM ni a la red. El renderer no decide daño, viento ni de quién es el turno.
+
+```
+src/sim        estado + comando → estado nuevo. Puro, determinista, testeable.
+src/game       sesión local: playback de los tiros, turno de la IA, modo demo
+src/render     Pixi. Dibuja terreno, tanques, efectos. Solo escucha eventos.
+src/input      teclado
+src/ui         menú y HUD en HTML
+src/audio      efectos
+scripts/       paint-assets.mjs (arte), sim-check.ts (pruebas de sim), screenshot.mjs (QA)
+```
+
+**Contratos**, que no se cambian sin actualizar este archivo:
+
+- `src/sim/types.ts`: estado, comandos, eventos, materiales y constantes. Coordenadas con **y hacia abajo**.
+- `src/render/manifest.ts`: forma de `public/assets/manifest.json`, que genera `paint-assets.mjs` y consume el renderer. `tank.treadFrames`: una tira de 4 frames 28×6 por color (orden de `bodies`), va sobre las últimas 6 filas del cuerpo; el frame f+1 es el tanque 1 px más adelante.
+- `src/render/types.ts`: `RenderFrame` que arma la sesión en cada frame. `matchId` cambia en cada `Session.start`; el renderer limpia cráteres, restos y partículas cuando cambia. `weapon` es el arma del tiro en curso (del estado antes de disparar; `null` sin tiro): el renderer elige con ella el sprite del proyectil y detecta la rodadora.
+- `src/sim/index.ts` exporta como mínimo: `createMatch`, `applyCommand`, `chooseShot`, `groundAt(terrain, x, halfW, fromY?)` (la y del piso bajo esa franja; con `fromY` busca hacia abajo desde esa fila, sin él desde el cielo), `fly`, `muzzle`, `PATH_DT`, `isSolid(terrain, x, y)`, más todo lo de `types.ts`.
+- Eventos: `impact` trae `source?: 'shot' | 'barrel'` (explosión en cadena de un barril). `damage`, `death`, `fall`, `prop` y `burn` traen un `t?` opcional; sin `t`, la sesión los ubica con el impacto anterior de la lista. `fire` devuelve `flights` (en F1 uno solo, `startT` 0) y `fly` devuelve también `time`.
+- Utilería en sim (`Prop.w/h`): barril 10×12, caja 12×12, escalera 8×h (se dibuja repitiendo `ladderTile` 8×4), foco 5×7 colgado del techo (`y` es la primera fila de aire), bandera 20×36 con el mástil en `x..x+1` y la tela a la derecha, manga 2×28 (solo el mástil; la manga la dibuja el renderer según el viento). Los sprites del manifiesto pueden ser más grandes (bandera 22×38 con el mástil en la columna 1, manga 33×30 con el mástil en la columna 16 y el suelo en la última fila).
+
+Comandos, y nada más, modifican la partida: `aim`, `selectWeapon`, `move`, `fire`. El resultado de `fire` trae los vuelos (`flights`) para animar y los eventos con su tiempo `t`. El estado autoritativo ya está resuelto cuando el proyectil "sale". La animación es presentación.
+
+Para no romper el online más adelante:
+
+- RNG con seed guardada en el estado. Nada de `Date.now()` ni `Math.random()` dentro de `sim`.
+- El estado se puede clonar y serializar. Las grillas viajan como bytes.
+
+### Modo demo (QA visual)
+
+`?demo=<seed>` arranca sola una partida en el bosque con 3 IAs y hace que P1 dispare un tiro fijo. El render se congela en el pico de la explosión. `?demo=<seed>&biome=jungle` cambia el bioma y `&freeze=0` no congela. `&weapon=<WeaponId>` hace que el tiro fijo de P1 use esa arma (QA de racimo, napalm, excavadora, rodadora y nuke). `?fxtest=<WeaponId>` (solo render) dibuja explosiones y proyectiles con el estilo de esa arma sin cambiar el terreno. `node scripts/screenshot.mjs "demo=1" preview/game-demo.png` saca la captura a 1920×1080 para comparar contra `preview/look-test-1080.png`.
+
+### Dueños de archivos (trabajo en paralelo)
+
+| Área | Archivos |
+|---|---|
+| sim | `src/sim/**` (salvo cambios de contrato), `scripts/sim-check.ts` |
+| arte | `scripts/paint-assets.mjs`, `scripts/lookdev/**`, `public/assets/**` |
+| render | `src/render/**` (salvo `manifest.ts`) |
+| juego y UI | `index.html`, `src/style.css`, `src/main.ts`, `src/game/**`, `src/ui/**`, `src/input/**`, `src/audio/**` |
+
+## Roadmap
+
+Las fases F1 a F4 forman la primera muestra, que tiene que parecerse a la referencia aprobada.
+
+- **F1 Terreno por pixel (sim).** Grilla de materiales, generación procedural por bioma (plataformas de piedra, búnker de ladrillo, torre de madera, cuevas), colisión, deformación con dureza, apoyo, caída y aplastamiento, utilería con barriles en cadena, IA sobre la grilla.
+  - Estado: hecha. `sim-check` 11087/11087 OK en los tres biomas.
+- **F2 Render del terreno.** Texturas por material, bordes, pared de fondo con oclusión, chamuscado, pasto y raíces.
+  - Estado: hecha. Materiales, bordes, pared de fondo, chamuscado y pasto/raíces a la par de `look-test.png`.
+- **F3 Ambientación.** Fondos por capas con niebla por bioma, utilería (escaleras, focos, banderas, manga de viento).
+  - Estado: hecha. Bosque, jungla e industrial con capas, niebla y utilería.
+- **F4 Explosiones.** Racimo de fuego con núcleo blanco, humo, escombros del material, chispas, luz, sacudón, flash y hit-stop. Una firma visual por `BlastStyle`.
+  - Estado: hecha. Firma por `BlastStyle`, tope de 300 partículas y polvo de suelo claro en fire/bigfire.
+- **F5 Personajes.** Tanques con tripulante, retroceso al disparar, tanque destruido en llamas, globos "!" y "?".
+  - Estado: hecha. Tripulante, retroceso, restos en llamas y globos "!"/"?".
+- **F6 Movimiento.** A/D con combustible, pendientes, caída.
+  - Estado: hecha. A/D con combustible, pendientes y caída.
+- **F7 Arsenal.** Racimo, napalm, excavadora, rodadora y nuke, con su efecto de terreno y su explosión.
+  - Estado: hecha. Racimo, napalm, excavadora, rodadora y nuke con terreno y explosión propios.
+- **F8 HUD al estilo Broforce.** Retratos, fuente pixel, munición en íconos, manga de viento.
+  - Estado: hecha. Placas con retrato, "Pn" y pestaña VOS, placas compactas para 3–4 tanques, munición y viento.
+- **F9 Feel, audio y balance.** Sonido por arma y material, partidas de 8 a 15 tiros, IA ajustada.
+  - Estado: hecha, con el ajuste fino pendiente de oído. Sonido por arma y por material dominante del debris; 11.1 tiros por partida con 2 tanques y 20.6 con 4.
+  - Rendimiento (2026-09-28, Chrome headless, GPU Intel D3D11, build de producción, rAF 20 s en tiempo real): `?demo=5&freeze=0` frame medio 16.7–16.8 ms, p95 16.8 ms, picos sueltos de 50–67 ms (turno de IA / inicio de explosión); `?fxtest=nuke` frame medio 16.7 ms, p95 16.8 ms. Antes del arreglo el demo daba 17.4–17.5 ms de media: `Raster.light()` se comía ~29% del CPU y ahora usa la caída tabulada por radio y recorta cada fila a su cuerda.
+- **Online**, como antes: servidor autoritativo que corre el mismo `sim`, sin lockstep.
+
+## Cómo se agrega algo
+
+- Arma nueva: un registro en `WEAPONS` y, si el efecto es nuevo, un modo de terreno en `sim` y un `BlastStyle` en el renderer.
+- Material nuevo: una constante y una entrada en `MATERIALS`, su textura en `paint-assets` y su entrada en el manifiesto.
+- Efecto nuevo: el sim emite un evento y Pixi lo dibuja.

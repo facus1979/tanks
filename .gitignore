@@ -1,0 +1,10 @@
+node_modules
+dist
+dist-sim
+*.local
+.DS_Store
+
+# capturas de trabajo; solo se versionan las referencias aprobadas
+preview/*
+!preview/look-test.png
+!preview/look-test-1080.png

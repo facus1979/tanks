@@ -1,0 +1,238 @@
+// Contrato de la simulación. Lo comparten sim, render, game y ui.
+// Coordenadas: x crece a la derecha, y crece hacia ABAJO (igual que la grilla y la pantalla).
+// Ángulo: 0 es horizontal a la derecha, 90 arriba, 180 horizontal a la izquierda.
+
+export const WORLD_W = 800
+export const WORLD_H = 450
+
+export const GRAVITY = 220
+export const POWER_SCALE = 4.03
+export const WIND_ACCEL = 9
+export const SUBSTEP = 1 / 240
+export const MAX_FLIGHT = 14
+
+// Geometría del tanque. Tiene que coincidir con public/assets/manifest.json.
+// El tanque mira a la derecha si angle <= 90; si no, el sprite se espeja.
+export const TANK_W = 28
+export const TANK_HALF_W = 14
+export const TANK_H = 20 // 14 de casco y torreta + 6 de orugas; el tripulante asoma por arriba
+export const PIVOT_X = 5 // desde el centro del tanque hacia donde mira
+export const PIVOT_Y = 17 // desde el piso hacia arriba
+export const BARREL_LEN = 14 // del pivote a la boca, incluido el freno
+
+export const PLAYER_HP = 100
+export const FALL_DAMAGE = 0.45
+export const FUEL_PER_TURN = 60 // pixels que puede avanzar por turno (F6)
+export const MAX_CLIMB = 3 // escalón máximo que sube sin frenarse
+
+export const ANGLE_SPEED = 70
+export const POWER_SPEED = 45
+
+// ---------- materiales ----------
+
+export const AIR = 0
+export const DIRT = 1
+export const STONE = 2
+export const BRICK = 3
+export const WOOD = 4 // tablones oscuros verticales
+export const SLAT = 5 // tablas claras horizontales (cabinas)
+export const BEAM = 6 // vigas horizontales
+export const POST = 7 // postes verticales
+export const METAL = 8 // chapa; muy dura
+export const BEDROCK = 9 // fondo del mapa; indestructible
+
+export type Material = number
+
+export interface MaterialDef {
+  id: Material
+  name: string
+  // Fracción del radio de la explosión que llega a romperlo. 1 = se rompe todo el radio.
+  toughness: number
+  flammable: boolean
+}
+
+export const MATERIALS: MaterialDef[] = [
+  { id: AIR, name: 'aire', toughness: 1, flammable: false },
+  { id: DIRT, name: 'tierra', toughness: 1, flammable: false },
+  { id: STONE, name: 'piedra', toughness: 0.7, flammable: false },
+  { id: BRICK, name: 'ladrillo', toughness: 0.8, flammable: false },
+  { id: WOOD, name: 'madera', toughness: 1, flammable: true },
+  { id: SLAT, name: 'tabla', toughness: 1, flammable: true },
+  { id: BEAM, name: 'viga', toughness: 0.9, flammable: true },
+  { id: POST, name: 'poste', toughness: 0.9, flammable: true },
+  { id: METAL, name: 'metal', toughness: 0.35, flammable: false },
+  { id: BEDROCK, name: 'roca madre', toughness: 0, flammable: false },
+]
+
+// Grilla por pixel. front es lo sólido (colisiona). back es lo que había detrás
+// (se dibuja oscuro donde front es AIR: la "pared de fondo" de Broforce). back no colisiona.
+export interface Terrain {
+  w: number
+  h: number
+  front: Uint8Array
+  back: Uint8Array
+}
+
+export type Biome = 'forest' | 'jungle' | 'industrial'
+export const BIOMES: Biome[] = ['forest', 'jungle', 'industrial']
+
+// ---------- utilería ----------
+
+// barrel explota en cadena; crate se rompe; el resto es decorativo y cae o desaparece
+// si se queda sin apoyo.
+export type PropKind = 'barrel' | 'crate' | 'ladder' | 'lamp' | 'flag' | 'windsock'
+
+export interface Prop {
+  id: number
+  kind: PropKind
+  x: number // esquina superior izquierda
+  y: number
+  w: number
+  h: number
+  alive: boolean
+}
+
+// ---------- armas ----------
+
+export type WeaponId = 'normal' | 'heavy' | 'dirt' | 'cluster' | 'napalm' | 'digger' | 'roller' | 'nuke'
+
+// Estilo visual de la explosión. El renderer elige el efecto por este campo, nunca por el id.
+export type BlastStyle = 'fire' | 'bigfire' | 'dirt' | 'napalm' | 'dig' | 'nuke'
+
+export interface WeaponDef {
+  id: WeaponId
+  name: string
+  radius: number
+  damage: number
+  terrain: 'destroy' | 'build' | 'dig'
+  blast: BlastStyle
+  ammo: number
+  // cluster: se parte en N al llegar al apogeo. roller: rueda cuesta abajo hasta frenar.
+  split?: number
+  rolls?: boolean
+  burn?: number // napalm: segundos de fuego que quema madera y daña por turno
+}
+
+export const WEAPONS: Record<WeaponId, WeaponDef> = {
+  normal: { id: 'normal', name: 'Normal', radius: 14, damage: 22, terrain: 'destroy', blast: 'fire', ammo: 99 },
+  heavy: { id: 'heavy', name: 'Pesada', radius: 26, damage: 36, terrain: 'destroy', blast: 'bigfire', ammo: 2 },
+  dirt: { id: 'dirt', name: 'Tierra', radius: 18, damage: 20, terrain: 'build', blast: 'dirt', ammo: 3 },
+  cluster: { id: 'cluster', name: 'Racimo', radius: 10, damage: 12, terrain: 'destroy', blast: 'fire', ammo: 2, split: 5 },
+  napalm: { id: 'napalm', name: 'Napalm', radius: 16, damage: 14, terrain: 'destroy', blast: 'napalm', ammo: 2, burn: 3 },
+  digger: { id: 'digger', name: 'Excavadora', radius: 9, damage: 10, terrain: 'dig', blast: 'dig', ammo: 2 },
+  roller: { id: 'roller', name: 'Rodadora', radius: 16, damage: 30, terrain: 'destroy', blast: 'fire', ammo: 2, rolls: true },
+  nuke: { id: 'nuke', name: 'Nuke', radius: 60, damage: 55, terrain: 'destroy', blast: 'nuke', ammo: 1 },
+}
+
+// Orden de la barra de armas (teclas 1 a 8).
+export const WEAPON_ORDER: WeaponId[] = ['normal', 'heavy', 'dirt', 'cluster', 'napalm', 'digger', 'roller', 'nuke']
+
+// ---------- jugadores y estado ----------
+
+export type PlayerKind = 'human' | 'ai'
+export type Difficulty = 'easy' | 'normal' | 'hard'
+export type Phase = 'aiming' | 'gameover'
+
+// Tripulantes con cara propia. El renderer mapea crew -> sprite y retrato.
+export type CrewId = 'bandana' | 'sarge' | 'rookie' | 'desert'
+export const CREWS: CrewId[] = ['bandana', 'sarge', 'rookie', 'desert']
+
+export interface Player {
+  id: number
+  name: string
+  kind: PlayerKind
+  color: number // color del jugador: franja, banderín, marco del HUD
+  crew: CrewId
+  x: number // centro del tanque
+  y: number // piso bajo el tanque (y de la primera fila sólida)
+  hp: number
+  angle: number
+  power: number
+  fuel: number
+  weapon: WeaponId
+  ammo: Record<WeaponId, number>
+  alive: boolean
+}
+
+export interface GameState {
+  seed: number
+  rng: number
+  width: number
+  height: number
+  biome: Biome
+  terrain: Terrain
+  props: Prop[]
+  wind: number
+  players: Player[]
+  current: number
+  phase: Phase
+  winnerId: number | null
+  turn: number
+}
+
+export type Command =
+  | { type: 'aim'; playerId: number; angle: number; power: number }
+  | { type: 'selectWeapon'; playerId: number; weapon: WeaponId }
+  | { type: 'move'; playerId: number; dir: -1 | 1 } // F6: un paso de ~1 px gastando combustible
+  | { type: 'fire'; playerId: number }
+
+export interface Vec2 {
+  x: number
+  y: number
+}
+
+export type ImpactKind = 'terrain' | 'tank' | 'prop' | 'out'
+
+export interface Impact {
+  kind: ImpactKind
+  x: number
+  y: number
+  tankId?: number
+  propId?: number
+}
+
+// Un disparo puede tener varios proyectiles (racimo). Cada uno con su camino y su impacto.
+export interface Flight {
+  path: Vec2[] // un punto cada PATH_DT segundos
+  impact: Impact
+  startT?: number // segundos desde el disparo en que arranca este tramo (racimo, rodadora)
+}
+
+export type GameEvent =
+  | {
+      type: 'impact'
+      x: number
+      y: number
+      weapon: WeaponId
+      blast: BlastStyle
+      radius: number
+      t: number // segundos desde el disparo; el playback lo dispara en ese momento
+      // cuántos pixels de cada material se rompieron: el renderer tira escombros de esos colores
+      debris: Partial<Record<Material, number>>
+      source?: 'shot' | 'barrel' // 'barrel': explosión en cadena de un barril
+    }
+  // t opcional: momento de playback. Sin t, el evento va con el impacto anterior de la lista.
+  | { type: 'damage'; playerId: number; amount: number; hp: number; t?: number }
+  | { type: 'death'; playerId: number; t?: number }
+  | { type: 'fall'; playerId: number; from: number; to: number; t?: number }
+  | { type: 'prop'; propId: number; kind: PropKind; x: number; y: number; destroyed: boolean; t?: number }
+  | { type: 'burn'; x: number; y: number; w: number; t?: number } // napalm quemando una franja
+  | { type: 'turn'; playerId: number }
+  | { type: 'wind'; value: number }
+  | { type: 'gameover'; winnerId: number | null }
+  | { type: 'empty'; playerId: number }
+
+export interface StepResult {
+  state: GameState
+  events: GameEvent[]
+  flights?: Flight[]
+}
+
+export interface MatchConfig {
+  bots: number
+  difficulty: Difficulty
+  biome?: Biome
+  seed?: number
+}
+
+export const TANK_COLORS = [0x3d8cf0, 0xe23d3d, 0xe2c13d, 0x3dbe5a]
