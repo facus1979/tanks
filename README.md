@@ -4,9 +4,20 @@ Artillería por turnos: las reglas de **Scorched Earth** con la estética de **B
 
 ![Gameplay de Tanks](preview/look-test.png)
 
-## Cómo jugar online
+## Dónde jugar
 
 Abrí el navegador en https://facus1979.github.io/tanks/
+
+## Jugar online con amigos
+
+1. En el menú elegí **ONLINE → CREAR SALA**. Aparece un código (por ejemplo `TANK-4F7K`) y el botón **COPIAR LINK**.
+2. Pasale el link a tus amigos. Al abrirlo entran directo al lobby y toman un casillero libre.
+3. Vos, como anfitrión, elegís qué casilleros son humanos remotos, IA o vacíos, las rondas, la dificultad, el bioma y el tiempo por turno, y apretás **EMPEZAR**.
+
+- La conexión es directa entre navegadores (WebRTC); no hay servidor propio.
+- Si alguien se desconecta, su tanque lo juega la IA hasta que vuelva a abrir el link.
+- Si el anfitrión cierra el juego, la partida termina.
+- Algunas redes muy cerradas (por ejemplo, redes corporativas) pueden bloquear WebRTC. Desde redes hogareñas normalmente funciona.
 
 ## Cómo correrlo local
 
@@ -91,6 +102,7 @@ scripts/
 - `npm run dev` — Servidor de desarrollo (Vite)
 - `npm run build` — Build de producción en `dist/`
 - `npm run sim-check` — Ejecuta pruebas de simulación
+- `npm run net-test` — Prueba online de punta a punta: dos pestañas de Chrome juegan una partida y tienen que terminar con el mismo estado (`NET_TEST_TRANSPORT=peer` la corre por internet con PeerJS)
 - `npm run preview` — Previsualiza el build
 
 Capturas para QA:

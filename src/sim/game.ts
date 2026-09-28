@@ -174,6 +174,20 @@ export function applyCommand(state: GameState, command: Command): StepResult {
   switch (command.type) {
     case 'nextRound':
       return state.phase === 'roundover' ? nextRound(state) : { state, events: [] }
+    case 'setKind': {
+      const i = state.players.findIndex((p) => p.id === command.playerId)
+      if (i < 0 || (command.kind !== 'human' && command.kind !== 'ai') || state.players[i].kind === command.kind) return { state, events: [] }
+      const next = shallow(state)
+      const p = next.players[i]
+      p.kind = command.kind
+      // en la tienda, una IA que entra compra y queda lista para no trabar la ronda
+      if (next.phase === 'shop' && p.kind === 'ai' && !p.ready) {
+        aiShop(p, next.difficulty, next.seed, next.round)
+        p.ready = true
+        return startIfReady(next, [])
+      }
+      return { state: next, events: [] }
+    }
     case 'buy':
     case 'sell':
     case 'ready':

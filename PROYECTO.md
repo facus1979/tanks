@@ -139,6 +139,7 @@ Para no romper el online más adelante:
 | vistas | `index.html`, `src/style.css`, `src/ui/**` (salvo `src/ui/types.ts`) |
 | flujo | `src/main.ts`, `src/game/**`, `src/input/**`, `src/audio/**` |
 | publicación | `.github/**`, `README.md`, `vite.config.ts` |
+| red | `src/net/**` (salvo `src/net/types.ts`), `scripts/net-test.mjs`, dependencias en `package.json` |
 
 Contratos extra: `src/ui/types.ts` (vistas ↔ flujo: título, menú, tienda, tabla, cartel de hot-seat, extras del HUD).
 
@@ -168,6 +169,15 @@ Las fases F1 a F4 forman la primera muestra, que tiene que parecerse a la refere
 - **F10 Rondas, tienda y hot-seat.** Partida de 1/3/5/10 rondas con mapa nuevo, plata por daño/kills/supervivencia, tienda entre rondas (armas, escudo, paracaídas, combustible, reparación, trazador), IA que compra, 2-4 casilleros humano/IA (hot-seat con cartel de turno), tabla entre rondas.
 - **F11 Feel II.** Pantalla de título con logo, tripulante eyectado al morir, cámara lenta en el golpe que cierra la ronda, IA en un worker (sin tirones), gamepad.
 - **F12 Publicación.** Deploy a GitHub Pages con GitHub Actions, README.
+- **F13 Online P2P.** Salas con código y link (`?join=CODIGO`), WebRTC vía PeerJS sin servidor propio; transporte local (BroadcastChannel, `?net=local`) para pruebas. El anfitrión es la autoridad: valida comandos y reparte el log ordenado; los clientes aplican el log sobre su réplica (sim determinista), con hash periódico y snapshot si hay desincronización. Límite de tiempo por turno, desconectado → IA, reconexión con token. Contrato: `src/net/types.ts`. Limitación aceptada: si el anfitrión se va, termina la partida.
+  - Estado: hecho. `npm run net-test` pasa con el transporte local (2 humanos + 1 IA, una ronda, réplicas con el mismo hash) y con PeerJS por internet (dos pestañas en la misma PC). Falta probarlo entre dos redes distintas.
+- **F14 Controles táctiles (tablet y celular).** Para iterar más adelante.
+  - Apuntar arrastrando desde el tanque: la dirección del arrastre da el ángulo y el largo da la potencia, con la trayectoria corta como guía. También se puede ajustar fino con botones +/- de ángulo y potencia.
+  - Botones en pantalla: disparar, mover ◀ ▶ (mantener), rueda de armas e ítems. Se muestran solo si el dispositivo es táctil (`pointer: coarse`).
+  - Pantallas (título, menú, lobby, tienda, tabla) usables con el dedo: objetivos de 44 px o más, sin hover, teclado virtual para el código de sala.
+  - Horizontal obligatorio (cartel "girá el dispositivo" en vertical), pantalla completa con un toque y vibración corta en impactos y en tu turno (`navigator.vibrate`).
+  - Criterio: una partida completa, incluida la tienda, jugable solo con el dedo en un celular de 6" y en una tablet, a 60 fps en un celular de gama media.
+- **Online con servidor** (más adelante, si hace falta): el mismo código del anfitrión corriendo en Node detrás de otro `Transport`.
 - **Online**, como antes: servidor autoritativo que corre el mismo `sim`, sin lockstep.
 
 ## Cómo se agrega algo

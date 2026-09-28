@@ -13,6 +13,7 @@ import type {
   Player,
   Prop,
   ShopId,
+  StepResult,
   Terrain,
   Vec2,
   WeaponId,
@@ -20,7 +21,7 @@ import type {
 import { FUEL_PER_TURN, ITEM_ORDER, SHOP, WEAPONS } from '../sim/types'
 import type { RenderFrame } from '../render/types'
 import type { HudModel, HudSide } from '../ui/hud'
-import type { BannerModel, ScoreModel, ShopModel } from '../ui/types'
+import type { BannerModel, HudNet, ScoreModel, ShopModel } from '../ui/types'
 import { AiClient } from './ai-client'
 import { pickDemoShot, seededRandom } from './demo'
 
@@ -28,6 +29,24 @@ export interface DemoOptions {
   freeze: boolean
   weapon?: WeaponId // QA: arma del tiro fijo de P1 (&weapon=)
 }
+
+// local: todo en este dispositivo. host: corre la sim y la IA, y loguea cada comando aceptado.
+// client: réplica; aplica el log del anfitrión y manda su input como pedido.
+export type SessionMode = 'local' | 'host' | 'client'
+
+export interface NetSeat {
+  mode: SessionMode
+  localIds: number[] // jugadores que se controlan desde este dispositivo
+  // host: HostRoom.dispatch (valida con applyNet, numera y reparte); client: ClientRoom.input
+  route: (command: Command) => boolean | void
+}
+
+interface Inbound {
+  command: Command
+  result: StepResult | null // client: ya aplicado sobre la réplica lógica; se muestra en orden
+}
+
+const TURN_COMMANDS = new Set<Command['type']>(['aim', 'selectWeapon', 'move', 'fire', 'useItem'])
 
 interface TimedEvent {
   t: number
@@ -101,6 +120,47 @@ export class Session {
   private scale = 1
   private lastHumanId: number | null = null // último humano que tuvo el turno (hot-seat)
   private tracerCache: { key: string; path: Vec2[] } | null = null
+  // online
+  private mode: SessionMode = 'local'
+  private localIds = new Set<number>()
+  private route: NetSeat['route'] | null = null
+  private inbox: Inbound[] = []
+  private logic: GameState | null = null // client: réplica con todo el log aplicado (adelante de lo que se ve)
+  private accepted = false
+  private awaitFire = 0 // client: segundos esperando que el anfitrión confirme el tiro
+  private sentReady = new Set<number>()
+  private sentNext = false
+  netHud: HudNet | null = null
+
+  get netMode(): SessionMode {
+    return this.mode
+  }
+
+  // Estado autoritativo: client, la réplica con todo el log; si no, con un tiro en
+  // reproducción, el de después del tiro.
+  get authState(): GameState | null {
+    if (this.mode === 'client') return this.logic
+    return this.playback ? this.playback.after : this.state
+  }
+
+  // host: humano remoto que tiene el turno (para el timer de la sala), con una clave por turno.
+  get remoteTurn(): { key: string; playerId: number } | null {
+    const s = this.state
+    if (this.mode !== 'host' || !s || s.phase !== 'aiming' || this.playback) return null
+    const p = s.players[s.current]
+    if (!p || !p.alive || !this.controlledByHuman(p) || this.isLocal(p)) return null
+    return { key: `${this.matchId}:${s.turn}:${p.id}`, playerId: p.id }
+  }
+
+  // Online: te toca a vos (humano de este dispositivo) y podés jugar.
+  get myTurn(): boolean {
+    return this.mode !== 'local' && this.inputEnabled
+  }
+
+  // client: pidió la próxima ronda y espera que el anfitrión la confirme.
+  get awaitingHost(): boolean {
+    return this.sentNext && this.state?.phase === 'roundover'
+  }
 
   get busy(): boolean {
     return this.playback !== null
@@ -133,14 +193,23 @@ export class Session {
     const s = this.state
     if (!s || s.phase !== 'aiming' || this.playback || this.frozen) return false
     const p = s.players[s.current]
-    return !!p && this.controlledByHuman(p) && !this.bannerFor()
+    if (this.mode === 'client' && (this.awaitFire > 0 || this.inbox.length > 0)) return false
+    return !!p && this.controlledHere(p) && !this.bannerFor()
   }
 
-  start(config: MatchConfig, demo?: DemoOptions): void {
+  start(config: MatchConfig, demo?: DemoOptions, seat?: NetSeat): void {
+    this.mode = demo ? 'local' : seat?.mode ?? 'local'
+    this.localIds = new Set(seat?.localIds ?? [])
+    this.route = seat?.route ?? null
+    this.inbox = []
+    this.awaitFire = 0
+    this.sentReady.clear()
+    this.sentNext = false
     const seed = config.seed ?? ((Math.random() * 0xffffffff) >>> 0)
     const slots = config.slots.slice(0, 4)
     this.config = { ...config, slots, rounds: Math.max(1, Math.round(config.rounds || 1)), seed }
     this.state = createMatch(this.config)
+    this.logic = this.mode === 'client' ? this.state : null
     this.playback = null
     this.fx = []
     this.ai = null
@@ -163,7 +232,92 @@ export class Session {
     this.tracerCache = null
     this.demo = demo ? { ...demo, shotDone: false, seed } : null
     this.random = demo ? seededRandom(seed ^ 0x5bd1e995) : Math.random
-    if (!demo?.freeze && !this.aiClient) this.aiClient = new AiClient()
+    if (!demo?.freeze && !this.aiClient && this.mode !== 'client') this.aiClient = new AiClient()
+  }
+
+  // ---------- online ----------
+
+  // host: HostRoom.hooks.apply. Todo comando del log pasa por acá (el del anfitrión y el de los
+  // peers, ya verificado por la sala). true si la sim lo aceptó.
+  applyNet(command: Command): boolean {
+    const s = this.state
+    if (this.mode !== 'host' || !s || this.playback) return false
+    if (TURN_COMMANDS.has(command.type)) {
+      const id = (command as { playerId: number }).playerId
+      if (s.phase !== 'aiming' || s.players[s.current]?.id !== id) return false
+    }
+    this.accepted = false
+    return this.dispatch(command) || this.accepted
+  }
+
+  // host: comando propio que espera a que termine el tiro en curso (setKind de un peer caído).
+  hostCommand(command: Command): void {
+    if (this.mode !== 'host') return
+    this.inbox.push({ command, result: null })
+  }
+
+  // client: ClientRoom.hooks.apply. Se aplica ya sobre la réplica lógica (para el hash) y se
+  // muestra en orden cuando termina el tiro en reproducción.
+  receive(command: Command): void {
+    if (this.mode !== 'client' || !this.logic) return
+    let result: StepResult
+    try {
+      result = applyCommand(this.logic, command)
+    } catch (err) {
+      console.error(err)
+      result = { state: this.logic, events: [] }
+    }
+    this.logic = result.state
+    this.inbox.push({ command, result })
+  }
+
+  // client: estado completo del anfitrión (desincronización o reconexión).
+  loadSnapshot(state: GameState): void {
+    const round = this.state?.round
+    this.state = state
+    this.logic = state
+    this.playback = null
+    this.inbox = []
+    this.awaitFire = 0
+    this.aim = null
+    this.terrainVersion++
+    if (round !== state.round) this.newRound()
+  }
+
+  // Cañón de otro jugador en vivo (aimLive): solo visual, no toca el estado.
+  remoteAim(playerId: number, angle: number, power: number): void {
+    const s = this.state
+    if (!s || this.playback || s.phase !== 'aiming') return
+    const p = s.players[s.current]
+    if (!p || p.id !== playerId || this.controlledHere(p)) return
+    this.aim = { playerId, angle: clamp(angle, 0, 180), power: clamp(power, 0, 100) }
+  }
+
+  // Apuntado en vivo del jugador de turno (para mandar como aimLive), o null.
+  liveAim(): { playerId: number; angle: number; power: number } | null {
+    const s = this.state
+    if (!s || this.playback || s.phase !== 'aiming') return null
+    const p = s.players[s.current]
+    if (!p || !p.alive) return null
+    if (this.aim && this.aim.playerId === p.id) return { ...this.aim }
+    return { playerId: p.id, angle: p.angle, power: p.power }
+  }
+
+  // Jugador que controla este dispositivo (humano, no IA).
+  isLocal(p: Player): boolean {
+    if (p.kind !== 'human') return false
+    return this.mode === 'local' || this.localIds.has(p.id)
+  }
+
+  // QA (?autotest=1): apunta a un valor fijo y dispara.
+  fireWith(angle: number, power: number): void {
+    if (!this.inputEnabled || !this.state) return
+    const aim = this.currentAim()
+    if (aim) {
+      aim.angle = clamp(angle, 0, 180)
+      aim.power = clamp(power, 0, 100)
+    }
+    this.fire()
   }
 
   // Ajuste continuo del ángulo y la potencia del humano. Se manda a la sim al disparar.
@@ -182,7 +336,8 @@ export class Session {
     this.moveAcc -= steps
     const p = this.state.players[this.state.current]
     while (steps-- > 0) {
-      if (!this.dispatch({ type: 'move', playerId: p.id, dir })) break
+      if (this.mode === 'client' && (p.fuel ?? 0) <= 0) break
+      if (!this.act({ type: 'move', playerId: p.id, dir })) break
       this.movedT = 0.12
     }
   }
@@ -198,7 +353,7 @@ export class Session {
       this.flash('Sin municion')
       return
     }
-    this.dispatch({ type: 'selectWeapon', playerId: p.id, weapon })
+    this.act({ type: 'selectWeapon', playerId: p.id, weapon })
   }
 
   // Arma anterior/siguiente con munición (gamepad).
@@ -209,7 +364,7 @@ export class Session {
     for (let i = 1; i <= order.length; i++) {
       const w = order[(at + dir * i + order.length * 2) % order.length]
       if ((p.ammo[w] ?? 0) > 0) {
-        if (w !== p.weapon) this.dispatch({ type: 'selectWeapon', playerId: p.id, weapon: w })
+        if (w !== p.weapon) this.act({ type: 'selectWeapon', playerId: p.id, weapon: w })
         return
       }
     }
@@ -228,7 +383,7 @@ export class Session {
       this.flash(`Sin ${ITEM_NAMES[item]}`)
       return false
     }
-    const ok = this.dispatch({ type: 'useItem', playerId: p.id, item })
+    const ok = this.act({ type: 'useItem', playerId: p.id, item })
     if (!ok) this.flash('No se puede')
     return ok
   }
@@ -252,7 +407,12 @@ export class Session {
   nextRound(): void {
     const s = this.state
     if (!s || s.phase !== 'roundover') return
-    this.dispatch({ type: 'nextRound' })
+    // client: la próxima ronda la decide el anfitrión
+    if (this.mode === 'client') {
+      this.sentNext = true
+      return
+    }
+    this.act({ type: 'nextRound' })
     this.skipEmptyShop()
   }
 
@@ -260,7 +420,7 @@ export class Session {
   shopQueue(): Player[] {
     const s = this.state
     if (!s || s.phase !== 'shop') return []
-    return s.players.filter((p) => p.kind === 'human' && !p.ready)
+    return s.players.filter((p) => this.isLocal(p) && !p.ready && !this.sentReady.has(p.id))
   }
 
   shopModel(playerId: number): ShopModel | null {
@@ -293,15 +453,22 @@ export class Session {
   }
 
   buy(playerId: number, id: ShopId): boolean {
-    return this.dispatch({ type: 'buy', playerId, id })
+    if (this.mode === 'client' && !this.shopModel(playerId)?.rows.find((r) => r.id === id)?.canBuy) return false
+    return this.act({ type: 'buy', playerId, id })
   }
 
   sell(playerId: number, id: ShopId): boolean {
-    return this.dispatch({ type: 'sell', playerId, id })
+    if (this.mode === 'client' && !this.shopModel(playerId)?.rows.find((r) => r.id === id)?.canSell) return false
+    return this.act({ type: 'sell', playerId, id })
   }
 
   ready(playerId: number): void {
-    this.dispatch({ type: 'ready', playerId })
+    if (this.mode === 'client') {
+      this.sentReady.add(playerId)
+      this.act({ type: 'ready', playerId })
+      return
+    }
+    this.act({ type: 'ready', playerId })
     this.skipEmptyShop()
   }
 
@@ -333,8 +500,9 @@ export class Session {
     const s = this.state
     if (!s || s.phase !== 'aiming' || this.playback || this.demo) return null
     const p = s.players[s.current]
-    if (!p || !p.alive || p.kind !== 'human' || p.id === this.lastHumanId) return null
-    if (s.players.filter((q) => q.kind === 'human' && q.alive).length < 2) {
+    if (!p || !p.alive || !this.isLocal(p) || p.id === this.lastHumanId) return null
+    // solo entre humanos del mismo dispositivo
+    if (s.players.filter((q) => this.isLocal(q) && q.alive).length < 2) {
       this.lastHumanId = p.id
       return null
     }
@@ -365,10 +533,13 @@ export class Session {
       this.scale = SLOW_SCALE
       this.slow = Math.max(0, this.slow - dt)
     }
+    if (this.awaitFire > 0) this.awaitFire = Math.max(0, this.awaitFire - dt)
     if (this.playback) {
       this.advance(dt * this.scale)
       return
     }
+    this.drain()
+    if (this.playback) return
     if (this.state.phase !== 'aiming') {
       this.phaseT += dt
       // demo: la partida entre IAs sigue sola (tienda de IAs incluida)
@@ -376,6 +547,7 @@ export class Session {
       return
     }
     this.phaseT = 0
+    if (this.mode === 'client') return
     this.driveAi(dt)
   }
 
@@ -469,7 +641,7 @@ export class Session {
             hp: Math.round(p.hp),
             alive: p.alive,
             active: !!current && p.id === current.id,
-            you: !!human && p.id === human.id && (human.kind === 'human' || p.id === demoP1),
+            you: !!human && p.id === human.id && (this.mode === 'local' ? human.kind === 'human' || p.id === demoP1 : this.isLocal(human)),
           }
         : null
     // el resto de los tanques, en orden de jugador, con placa compacta
@@ -502,7 +674,7 @@ export class Session {
       showAim: !!current && !pb,
       ammoAll,
       fuel: current ? Math.max(0, current.fuel ?? 0) / FUEL_PER_TURN : 0,
-      showBar: !!current && this.controlledByHuman(current) && s.phase === 'aiming',
+      showBar: !!current && this.controlledHere(current) && s.phase === 'aiming',
       // el demo congelado se compara contra capturas previas: sin extras
       extras: this.demo?.freeze ? undefined : {
         round: s.round ?? 1,
@@ -511,6 +683,7 @@ export class Session {
         items,
         shield: Math.max(0, shieldOwner?.shield ?? 0),
         tracer: !!ammoOwner?.tracer,
+        net: this.netHud,
       },
     }
   }
@@ -521,7 +694,8 @@ export class Session {
     const winner = s.players.find((p) => p.id === s.winnerId)
     if (!winner) return 'Empate'
     const humans = s.players.filter((p) => p.kind === 'human').length
-    return this.controlledByHuman(winner) && humans === 1 ? 'Ganaste' : `Gano ${winner.name}`
+    const alone = this.mode === 'local' ? humans === 1 : s.players.filter((p) => this.isLocal(p)).length === 1
+    return this.controlledHere(winner) && alone ? 'Ganaste' : `Gano ${winner.name}`
   }
 
   winner(): Player | null {
@@ -537,25 +711,32 @@ export class Session {
     if (s.phase === 'gameover' && !this.playback) return this.resultText()
     if (s.phase !== 'aiming' && !this.playback) return 'Fin de ronda'
     if (this.playback || !current) return ''
-    if (this.controlledByHuman(current)) {
-      return s.players.filter((p) => p.kind === 'human').length > 1 ? `Turno de ${current.name}` : 'Tu turno'
+    if (this.controlledHere(current)) {
+      return s.players.filter((p) => this.isLocal(p)).length > 1 ? `Turno de ${current.name}` : 'Tu turno'
     }
+    if (this.controlledByHuman(current)) return `Turno de ${current.name}`
     return `${current.name} apunta`
   }
 
   // Humano en foco para el HUD: el de turno, o el último que jugó, o el primero.
   private focusHuman(players: Player[], current: Player | undefined): Player | undefined {
-    if (current && current.kind === 'human' && !this.demo) return current
+    if (current && this.isLocal(current) && !this.demo) return current
     if (this.lastHumanId != null) {
       const p = players.find((q) => q.id === this.lastHumanId)
       if (p) return p
     }
-    return players.find((p) => p.kind === 'human')
+    return players.find((p) => this.isLocal(p)) ?? players.find((p) => p.kind === 'human')
   }
 
+  // Humano (en cualquier dispositivo): no lo maneja la IA.
   private controlledByHuman(p: Player): boolean {
     if (p.kind !== 'human') return false
     return !this.demo
+  }
+
+  // Humano de este dispositivo: el input local lo mueve.
+  private controlledHere(p: Player): boolean {
+    return this.controlledByHuman(p) && this.isLocal(p)
   }
 
   private flash(text: string): void {
@@ -566,15 +747,15 @@ export class Session {
   private skipEmptyShop(): void {
     // sin humanos en la tienda (todas IAs): la ronda arranca sola
     const s = this.state
-    if (!s || s.phase !== 'shop' || s.players.some((p) => p.kind === 'human' && !p.ready)) return
+    if (this.mode === 'client' || !s || s.phase !== 'shop' || s.players.some((p) => p.kind === 'human' && !p.ready)) return
     const any = s.players[0]
-    if (any) this.dispatch({ type: 'ready', playerId: any.id })
+    if (any) this.act({ type: 'ready', playerId: any.id })
   }
 
   private tracerPath(s: GameState): Vec2[] | null {
     if (s.phase !== 'aiming') return null
     const p = s.players[s.current]
-    if (!p || !p.tracer || !this.controlledByHuman(p) || this.bannerFor()) return null
+    if (!p || !p.tracer || !this.controlledHere(p) || this.bannerFor()) return null
     const aim = this.aim && this.aim.playerId === p.id ? this.aim : p
     const angle = Math.round(aim.angle)
     const power = Math.round(aim.power)
@@ -617,22 +798,52 @@ export class Session {
     if (aim) {
       const angle = exact ? aim.angle : Math.round(aim.angle)
       const power = exact ? aim.power : Math.round(aim.power)
-      if (angle !== p.angle || power !== p.power) this.dispatch({ type: 'aim', playerId, angle, power })
+      if (angle !== p.angle || power !== p.power || this.mode !== 'local') this.act({ type: 'aim', playerId, angle, power })
     }
-    this.dispatch({ type: 'fire', playerId })
+    this.act({ type: 'fire', playerId })
+    if (this.mode === 'client') this.awaitFire = 4
   }
 
-  // Devuelve false si la sim rechazó o no implementa el comando.
-  private dispatch(command: Command): boolean {
+  // Comando pedido desde este dispositivo (input, IA, timer). En línea va por la sala: el
+  // anfitrión lo numera y lo aplica con applyNet; el cliente lo manda como pedido.
+  private act(command: Command): boolean {
+    if (this.mode === 'local' || !this.route) return this.dispatch(command)
+    if (this.mode === 'client' && (!this.state || this.playback)) return false
+    return this.route(command) !== false
+  }
+
+  // Muestra lo que llegó por la red (client) o lo diferido (host), en orden, sin pisar un tiro.
+  private drain(): void {
+    while (this.inbox.length && !this.playback && this.state) {
+      const item = this.inbox.shift()!
+      const c = item.command
+      if (this.mode !== 'client') {
+        this.act(c)
+        continue
+      }
+      const s = this.state
+      const ok = this.dispatch(c, item.result ?? undefined)
+      if (c.type === 'move' && ok) this.movedT = 0.12
+      if (c.type === 'aim' && this.aim?.playerId === c.playerId) {
+        const p = s.players.find((q) => q.id === c.playerId)
+        if (!p || !this.isLocal(p)) this.aim = null
+      }
+      if (c.type === 'fire' || c.type === 'setKind') this.awaitFire = 0
+    }
+  }
+
+  // Devuelve false si la sim rechazó o no implementa el comando. pre: resultado ya calculado (client).
+  private dispatch(command: Command, pre?: StepResult): boolean {
     const s = this.state
     if (!s || this.playback) return false
     let result
     try {
-      result = applyCommand(s, command)
+      result = pre ?? applyCommand(s, command)
     } catch (err) {
       if (command.type !== 'move') console.error(err)
       return false
     }
+    this.accepted = result.state !== s || result.events.length > 0
     if (command.type === 'fire') {
       this.aim = null
       this.ai = null
@@ -661,6 +872,8 @@ export class Session {
     this.phaseT = 0
     this.slow = 0
     this.tracerCache = null
+    this.sentReady.clear()
+    this.sentNext = false
   }
 
   private startPlayback(before: GameState, after: GameState, events: GameEvent[], flights: Flight[], shooterId: number): void {
@@ -875,7 +1088,7 @@ export class Session {
       ai.moveAcc -= steps
       const dir: -1 | 1 = ai.move > 0 ? 1 : -1
       while (steps-- > 0 && ai.move !== 0) {
-        if (!this.dispatch({ type: 'move', playerId: actor.id, dir })) {
+        if (!this.act({ type: 'move', playerId: actor.id, dir })) {
           ai.move = 0
           break
         }
@@ -917,7 +1130,7 @@ export class Session {
     ai.t = 0
     ai.move = Math.round(plan.move ?? 0)
     ai.moveAcc = 0
-    if (plan.weapon !== actor.weapon) this.dispatch({ type: 'selectWeapon', playerId: actor.id, weapon: plan.weapon })
+    if (plan.weapon !== actor.weapon) this.act({ type: 'selectWeapon', playerId: actor.id, weapon: plan.weapon })
   }
 
   private plan(s: GameState, actor: Player): ShotPlan {

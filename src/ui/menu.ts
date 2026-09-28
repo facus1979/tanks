@@ -38,11 +38,11 @@ const ROW_DIFF = 5
 const ROW_BIOME = 6
 const ROW_PLAY = 7
 
-export function createMenuView(root?: HTMLElement): MenuView {
+export function createMenuView(root?: HTMLElement): MenuView & { onOnline(cb: () => void): void } {
   return new MenuScreen(root ?? screenRoot('menu-view'))
 }
 
-class MenuScreen implements MenuView {
+export class MenuScreen implements MenuView {
   private slots: Slot[] = []
   private rounds = 3
   private difficulty: Difficulty = 'normal'
@@ -53,6 +53,8 @@ class MenuScreen implements MenuView {
   private onPlay: (config: MatchConfig) => void = () => {}
   private unbind: (() => void) | null = null
   private playBtn!: HTMLButtonElement
+  private onlineBtn!: HTMLButtonElement
+  private onOnlineCb: () => void = () => {}
   private msg!: HTMLElement
   private slotEls: { root: HTMLElement; kind: HTMLElement; crew: HTMLElement; name: HTMLElement; num: HTMLElement; portrait: HTMLCanvasElement; kindLabel: HTMLCanvasElement; nameLabel: HTMLCanvasElement; numLabel: HTMLCanvasElement }[] = []
   private optionEls: { rounds: HTMLButtonElement[]; diff: HTMLButtonElement[]; biome: HTMLButtonElement[] } = { rounds: [], diff: [], biome: [] }
@@ -162,11 +164,14 @@ class MenuScreen implements MenuView {
     this.msg = el('div', 'msg')
     this.msg.append(this.msgLabel)
     this.playBtn = button('JUGAR', () => this.play(), 'play')
+    this.onlineBtn = button('ONLINE', () => this.online(), 'play online')
+    const go = el('div', 'actions')
+    go.append(this.playBtn, this.onlineBtn)
     const hint = el('div', 'hint')
     const hl = el('div', 'hint-line')
     hl.append(label('FLECHAS MOVER   ESPACIO ELEGIR   ESC SALIR DEL NOMBRE', 0x9a8e80))
     hint.append(hl)
-    frame.append(title, slotsBox, opts, this.msg, this.playBtn, hint)
+    frame.append(title, slotsBox, opts, this.msg, go, hint)
     this.root.replaceChildren(frame)
     this.sync()
   }
@@ -228,7 +233,8 @@ class MenuScreen implements MenuView {
     mark(this.optionEls.biome, this.biome, ROW_BIOME)
     const ok = this.occupied() >= 2
     this.playBtn.classList.toggle('dis', !ok)
-    this.playBtn.classList.toggle('sel', this.row === ROW_PLAY)
+    this.playBtn.classList.toggle('sel', this.row === ROW_PLAY && this.col !== 1)
+    this.onlineBtn.classList.toggle('sel', this.row === ROW_PLAY && this.col === 1)
     setLabel(this.msgLabel, ok ? '' : 'MINIMO 2 JUGADORES')
   }
 
@@ -249,7 +255,10 @@ class MenuScreen implements MenuView {
         this.editing = false
       } else if (this.col === 1) this.cycleCrew(this.row, 1)
       else if (s.kind !== 'empty') this.editing = !this.editing
-    } else if (this.row === ROW_PLAY) this.play()
+    } else if (this.row === ROW_PLAY) {
+      if (this.col === 1) this.online()
+      else this.play()
+    }
     this.sync()
   }
 
@@ -279,6 +288,7 @@ class MenuScreen implements MenuView {
     else {
       const dir = nav === 'left' ? -1 : 1
       if (this.row < 4) this.col = Math.max(0, Math.min(2, this.col + dir))
+      else if (this.row === ROW_PLAY) this.col = Math.max(0, Math.min(1, this.col + dir))
       else if (this.row === ROW_ROUNDS) this.rounds = ROUNDS[(ROUNDS.indexOf(this.rounds) + dir + ROUNDS.length) % ROUNDS.length]
       else if (this.row === ROW_DIFF) {
         const i = DIFFICULTIES.findIndex((d) => d.id === this.difficulty)
@@ -289,6 +299,7 @@ class MenuScreen implements MenuView {
       }
     }
     if (this.row < 4 && this.slots[this.row].kind === 'empty' && this.col === 2) this.col = 1
+    if (this.row >= 4) this.col = this.row === ROW_PLAY ? Math.min(this.col, 1) : 0
     this.sync()
   }
 
@@ -304,6 +315,14 @@ class MenuScreen implements MenuView {
     else return true
     this.sync()
     return true
+  }
+
+  onOnline(cb: () => void): void {
+    this.onOnlineCb = cb
+  }
+
+  private online(): void {
+    this.onOnlineCb()
   }
 
   private play(): void {

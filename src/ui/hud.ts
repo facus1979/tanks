@@ -3,7 +3,7 @@ import { ITEM_ORDER, WEAPONS, WORLD_H, WORLD_W, type CrewId, type ItemId, type W
 import type { Viewport } from '../render/types'
 import { uiAssets, type UiAssets } from './assets'
 import { OUT, css, drawText, measure } from './pixelfont'
-import type { HudExtras } from './types'
+import type { HudExtras, HudNet } from './types'
 
 // Tecla de cada ítem usable (el paracaídas es pasivo). La lee también el flujo de entrada.
 export const ITEM_KEYS: Partial<Record<ItemId, string>> = { shield: 'Q', fuel: 'F', repair: 'R', tracer: 'T' }
@@ -102,6 +102,7 @@ export class Hud {
     this.compacts(assets, model.others, right, model.showBar)
     this.top(assets, model)
     if (model.extras) this.extras(assets, model.extras, model.showBar)
+    if (model.extras?.net) this.net(assets, model.extras.net)
     this.barVisible = model.showBar
     if (model.showBar) this.weaponBar(assets, model)
   }
@@ -454,6 +455,65 @@ export class Hud {
     }
   }
 
+
+  // Esquina superior derecha: código de sala, peers con conexión y ping, cuenta regresiva del turno.
+  // Debajo del panel superior, centrado: "ESPERANDO A <NOMBRE>...".
+  private net(assets: UiAssets, net: HudNet): void {
+    const ctx = this.ctx
+    const font = assets.font
+    const code = net.code
+    const rows = net.peers.map((p) => ({
+      name: p.name.toUpperCase(),
+      ping: p.connected ? (p.ping == null ? '--' : `${Math.round(p.ping)}MS`) : 'OFF',
+      ok: p.connected,
+    }))
+    let inner = measure(font, code)
+    for (const r of rows) inner = Math.max(inner, 9 + measure(font, r.name) + 8 + measure(font, r.ping))
+    const w = inner + 10
+    const h = 4 + font.h + (rows.length ? 4 + rows.length * (font.h + 3) : 0) + 4
+    const x0 = WORLD_W - 3 - w
+    const y0 = 3
+    rect(ctx, x0, y0, w, h, OUT)
+    rect(ctx, x0 + 1, y0 + 1, w - 2, h - 2, BRONZE)
+    rect(ctx, x0 + 2, y0 + 2, w - 4, h - 4, DARK)
+    drawText(ctx, font, code, x0 + 5, y0 + 4, GOLD)
+    let y = y0 + 4 + font.h + 4
+    for (const r of rows) {
+      rect(ctx, x0 + 5, y + 1, 5, 5, OUT)
+      rect(ctx, x0 + 6, y + 2, 3, 3, r.ok ? 0x3ac04a : 0xd0362c)
+      drawText(ctx, font, r.name, x0 + 14, y, r.ok ? 0xffffff : GREY)
+      const pw = measure(font, r.ping)
+      const slow = r.ok && r.ping !== '--' && Number.parseInt(r.ping, 10) > 250
+      drawText(ctx, font, r.ping, x0 + w - 5 - pw, y, !r.ok ? 0xd0362c : slow ? 0xff6a3a : GREY)
+      y += font.h + 3
+    }
+    let below = y0 + h + 3
+    if (net.turnLeft != null) {
+      const secs = Math.max(0, Math.ceil(net.turnLeft))
+      const urgent = secs <= 10
+      const text = String(secs)
+      const scale = urgent ? 3 : 2
+      const tw = measure(font, text) * scale
+      const bw = Math.max(tw + 12, 30)
+      const bh = (font.h + 2) * scale + 6
+      const bx = WORLD_W - 3 - bw
+      rect(ctx, bx, below, bw, bh, OUT)
+      rect(ctx, bx + 1, below + 1, bw - 2, bh - 2, urgent ? 0xd0362c : BRONZE)
+      rect(ctx, bx + 2, below + 2, bw - 4, bh - 4, urgent ? 0x3a0e0a : DARK)
+      bigText(ctx, font, text, bx + Math.floor((bw - tw) / 2), below + 3, scale, urgent ? 0xff5a4a : 0xffffff)
+      below += bh + 3
+    }
+    if (net.waiting) {
+      const text = net.waiting.toUpperCase().replace(/…/g, '...')
+      const tw = measure(font, text)
+      const sx = Math.round((WORLD_W - tw) / 2)
+      const sy = 44
+      rect(ctx, sx - 6, sy - 4, tw + 12, font.h + 8, OUT)
+      rect(ctx, sx - 5, sy - 3, tw + 10, font.h + 6, BRONZE)
+      rect(ctx, sx - 4, sy - 2, tw + 8, font.h + 4, DARK)
+      drawText(ctx, font, text, sx, sy, /RECONECT|DESCONECT/.test(text) ? 0xff8a6a : GOLD)
+    }
+  }
   private itemIcon(assets: UiAssets, id: ItemId, x: number, y: number): void {
     const ctx = this.ctx
     const icons = assets.itemIcons
@@ -502,4 +562,16 @@ function silhouette(ctx: CanvasRenderingContext2D, x: number, y: number, color: 
   rect(ctx, x + 12, y + 15, 2, 2, OUT)
   rect(ctx, x + 18, y + 15, 2, 2, OUT)
   rect(ctx, x + 6, y + 23, 20, 9, 0x4a5a2a)
+}
+
+// Texto ampliado por un factor entero (cuenta regresiva).
+function bigText(ctx: CanvasRenderingContext2D, font: UiAssets['font'], text: string, x: number, y: number, scale: number, color: number): void {
+  const w = measure(font, text) + 2
+  const tmp = document.createElement('canvas')
+  tmp.width = w
+  tmp.height = font.h + 2
+  const t = tmp.getContext('2d')
+  if (!t) return
+  drawText(t, font, text, 0, 0, color)
+  ctx.drawImage(tmp, 0, 0, w, tmp.height, x, y, w * scale, tmp.height * scale)
 }

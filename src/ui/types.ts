@@ -2,6 +2,7 @@
 // y el flujo del juego (src/main.ts + src/game/**, que las crea y las alimenta).
 // Las vistas no conocen a la sesión: reciben modelos y avisan con callbacks.
 import type { Biome, CrewId, Difficulty, ItemId, MatchConfig, ShopId } from '../sim'
+import type { LobbyState, Role } from '../net/types'
 
 // ---------- título y menú ----------
 
@@ -99,6 +100,52 @@ export interface HudExtras {
   items: Record<ItemId, number> // inventario de ese humano
   shield: number // escudo activo del jugador de turno
   tracer: boolean
+  net?: HudNet | null
+}
+
+// ---------- online ----------
+
+// src/ui/online.ts: "CREAR SALA" / "UNIRSE" (con campo de código) / volver. prefill: código del link ?join=.
+export interface OnlineMenuView {
+  show(handlers: { host: () => void; join: (code: string) => void; back: () => void }, prefill?: string): void
+  hide(): void
+  error(message: string): void
+}
+
+export interface LobbyModel {
+  role: Role
+  lobby: LobbyState
+  link: string // URL para compartir (…/?join=CODIGO)
+  mySlot: number | null
+  status: string // "CONECTANDO…", "ESPERANDO JUGADORES", errores
+  canStart: boolean // anfitrión: al menos 2 casilleros ocupados y todos los humanos conectados
+}
+
+// src/ui/lobby.ts: código grande + botón copiar link, 4 casilleros (anfitrión los configura: humano remoto /
+// IA / vacío, y los ajustes de partida; cliente toma un casillero libre), estado de cada peer, empezar / salir.
+export interface LobbyView {
+  show(
+    model: LobbyModel,
+    handlers: {
+      claim: (slot: number) => void
+      release: () => void
+      setSlot: (slot: number, kind: 'human' | 'ai' | 'off') => void // solo anfitrión
+      setOption: (key: 'rounds' | 'difficulty' | 'biome' | 'turnSeconds', value: number | string) => void // solo anfitrión
+      start: () => void // solo anfitrión
+      leave: () => void
+    },
+  ): void
+  update(model: LobbyModel): void
+  hide(): void
+}
+
+// Estado de red para el HUD (lo llena el flujo; null en partida local).
+export interface HudNet {
+  role: Role
+  code: string
+  peers: { name: string; connected: boolean; ping: number | null }[]
+  turnLeft: number | null // segundos que le quedan al turno actual, si hay límite
+  waiting: string | null // "ESPERANDO A <NOMBRE>…", "RECONECTANDO…"
 }
 
 // ---------- menú: valores por defecto ----------

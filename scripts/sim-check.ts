@@ -20,6 +20,9 @@ import {
   chooseShot,
   cloneState,
   createMatch,
+  decodeState,
+  encodeState,
+  hashState as netHash,
   fly,
   isSolid,
   groundAt,
@@ -38,6 +41,7 @@ import {
   biomeFor,
   owned,
   type Biome,
+  type Command,
   type Difficulty,
   type GameEvent,
   type GameState,
@@ -750,6 +754,104 @@ function toRoundover(): GameState {
   console.log(`tienda: ${((performance.now() - t0) / 1000).toFixed(1)} s`)
   check(stuck === 0, `${stuck} partidas de 3 rondas sin terminar`)
   check(buyers >= visits * 0.8, `las IA casi siempre compran (${buyers}/${visits})`)
+}
+
+{
+  // réplicas: B aplica el log de A paso a paso; C arranca de un snapshot a mitad de partida
+  let hashMs = 0
+  for (const seed of [11, 12]) {
+    const config: MatchConfig = { slots: [{ kind: 'human' }, { kind: 'ai' }, { kind: 'ai' }], rounds: 3, difficulty: 'normal', biome: 'rotate', seed }
+    let a = createMatch(config)
+    let bytes = encodeState(a)
+    let b = decodeState(bytes)
+    check(netHash(a) === netHash(b), `réplica inicial: hash igual (seed ${seed})`)
+    check(b.terrain.front !== a.terrain.front && b.players !== a.players, 'decodeState no comparte memoria con el original')
+    let c: GameState | null = null
+    let steps = 0
+    let diverged = 0
+    let kindChanges = 0
+    const send = (cmd: Command): void => {
+      a = applyCommand(a, cmd).state
+      b = applyCommand(b, cmd).state
+      if (c) c = applyCommand(c, cmd).state
+      steps++
+      const h0 = performance.now()
+      const ha = netHash(a)
+      hashMs += performance.now() - h0
+      if (ha !== netHash(b) || (c && ha !== netHash(c))) {
+        diverged++
+        if (diverged === 1) console.error(`  divergencia en paso ${steps}: ${cmd.type}`)
+      }
+      if (steps === 60 && !c) {
+        c = decodeState(encodeState(a))
+        check(netHash(c) === netHash(a), 'snapshot a mitad de partida: hash igual')
+      }
+      // setKind en medio de la partida: humano -> IA -> humano
+      if (steps === 30 || steps === 90 || steps === 150) {
+        kindChanges++
+        send({ type: 'setKind', playerId: 0, kind: a.players[0].kind === 'human' ? 'ai' : 'human' })
+      }
+    }
+    let guard = 0
+    while (a.phase !== 'gameover' && guard++ < 2000) {
+      if (a.phase === 'aiming') {
+        const p = a.players[a.current]
+        const plan = chooseShot(a, config.difficulty)
+        for (const item of plan.items ?? []) send({ type: 'useItem', playerId: p.id, item })
+        for (let i = 0; i < Math.abs(plan.move ?? 0); i++) send({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
+        if (a.current !== p.id || a.phase !== 'aiming') continue
+        send({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon })
+        send({ type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power })
+        send({ type: 'fire', playerId: p.id })
+      } else if (a.phase === 'roundover') send({ type: 'nextRound' })
+      else if (a.phase === 'shop') {
+        for (const p of a.players) {
+          if (a.phase !== 'shop' || p.ready) continue
+          // en la segunda tienda el humano se desconecta: pasa a IA y compra solo
+          if (a.round === 2 && p.id === 0 && p.kind === 'human') send({ type: 'setKind', playerId: 0, kind: 'ai' })
+          else {
+            if (p.kind === 'human') send({ type: 'buy', playerId: p.id, id: 'heavy' })
+            send({ type: 'ready', playerId: p.id })
+          }
+        }
+      }
+    }
+    check(a.phase === 'gameover', `réplicas: partida de 3 rondas terminó (seed ${seed})`)
+    check(diverged === 0, `réplicas: ${diverged} pasos con hash distinto (seed ${seed})`)
+    check(c !== null && netHash(c) === netHash(a) && netHash(b) === netHash(a), `réplicas: estado final igual (seed ${seed})`)
+    check(c !== null && JSON.stringify(c.players) === JSON.stringify(a.players), 'réplica C: jugadores idénticos al final')
+    check(kindChanges >= 1, 'setKind se probó en medio de la partida')
+    bytes = encodeState(a)
+    check(netHash(decodeState(bytes)) === netHash(a), 'decode(encode(final)) conserva el hash')
+    console.log(`réplicas: seed ${seed}, ${steps} comandos, ${(bytes.length / 1024).toFixed(0)} KB por snapshot`)
+  }
+  const s = createMatch(mk(2, 'normal', 'forest', 3, 1, 1))
+  const h = netHash(s)
+  check(h === netHash(cloneState(s)), 'hashState: un clon tiene el mismo hash')
+  const moved = cloneState(s)
+  moved.terrain.front[1234] ^= 1
+  check(netHash(moved) !== h, 'hashState: cambia si cambia la grilla')
+  const w = cloneState(s)
+  w.players[1].hp -= 1
+  check(netHash(w) !== h, 'hashState: cambia si cambia un jugador')
+  const r = cloneState(s)
+  r.rng ^= 1
+  check(netHash(r) !== h, 'hashState: cambia si cambia el rng')
+  const ord = cloneState(s)
+  ord.players[0] = Object.fromEntries(Object.entries(ord.players[0]).reverse()) as typeof ord.players[0]
+  check(netHash(ord) === h, 'hashState: no depende del orden de claves')
+  // setKind: solo cambia el tipo, en cualquier fase; ids inválidos no hacen nada
+  const k = applyCommand(s, { type: 'setKind', playerId: 0, kind: 'ai' }).state
+  check(k.players[0].kind === 'ai' && k.players[1].kind === s.players[1].kind, 'setKind: cambia solo el tipo')
+  const k2 = applyCommand(k, { type: 'setKind', playerId: 0, kind: 'human' }).state
+  check(netHash(k2) === h, 'setKind ida y vuelta: mismo hash')
+  check(applyCommand(s, { type: 'setKind', playerId: 9, kind: 'ai' }).state === s, 'setKind: jugador inexistente no hace nada')
+  check(netHash(s) === h, 'setKind no muta el estado anterior')
+  const t1 = performance.now()
+  for (let i = 0; i < 20; i++) netHash(s)
+  const per = (performance.now() - t1) / 20
+  console.log(`hashState: ${per.toFixed(2)} ms por llamada (${hashMs.toFixed(0)} ms en las réplicas)`)
+  check(per < 5, `hashState rápido (${per.toFixed(2)} ms)`)
 }
 
 console.log(`IA peor caso: ${worstMs.toFixed(0)} ms`)

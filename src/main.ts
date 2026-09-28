@@ -3,6 +3,11 @@ import { Keyboard, weaponSlot } from './input/keyboard'
 import { Gamepad } from './input/gamepad'
 import { Sfx } from './audio/sfx'
 import { Session } from './game/session'
+import type { NetSeat } from './game/session'
+import { Online } from './game/online'
+import { normalizeCode, readNetParams } from './net'
+import { createOnlineMenuView } from './ui/online'
+import { createLobbyView } from './ui/lobby'
 import { Hud, WEAPON_SLOTS } from './ui/hud'
 import { loadUiAssets } from './ui/assets'
 import { createMenuView, refreshLabels } from './ui/menu'
@@ -11,6 +16,7 @@ import { createBannerView } from './ui/banner'
 import { createScoreboardView } from './ui/scoreboard'
 import { createShopView } from './ui/shop'
 import { DEFAULT_CONFIG } from './ui/types'
+import { chooseShot } from './sim'
 import {
   ANGLE_SPEED,
   BIOMES,
@@ -48,6 +54,11 @@ const demo =
 const playParam = demo || uitest ? null : params.get('play')
 // &aisync=1: QA, la IA calcula en el hilo principal (para comparar contra el worker)
 const aiSync = params.get('aisync') === '1'
+// Online: ?host=1, ?join=CODIGO, ?net=local, ?autotest=1 (scripts/net-test.mjs)
+const net = readNetParams()
+const netStart = demo || uitest || playParam != null ? null : net.host ? 'host' : net.join ? 'join' : null
+// autotest: cada humano apunta con la IA difícil, así la partida de prueba termina rápido
+const AUTO_SHOT = { delay: 0.8 }
 
 const ITEM_KEYS: Record<string, ItemId> = { KeyQ: 'shield', KeyF: 'fuel', KeyR: 'repair', KeyT: 'tracer' }
 
@@ -63,8 +74,17 @@ const menu = createMenuView()
 const banner = createBannerView()
 const scoreboard = createScoreboardView()
 const shop = createShopView()
+const onlineMenu = createOnlineMenuView()
+const lobbyView = createLobbyView()
 
-let screen: 'title' | 'menu' | 'play' = 'title'
+let screen: 'title' | 'menu' | 'online' | 'lobby' | 'play' = 'title'
+let online: Online | null = null
+let lobbyShown = false
+let wasMyTurn = false
+let autoT = 0
+let lastTick = performance.now()
+let shopState: unknown = null
+let mounted = false
 // qué vista tapa la partida
 let overlay: 'none' | 'banner' | 'score' | 'final' | 'shop' = 'none'
 let shopFor: number | null = null
@@ -96,18 +116,41 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyM') sfx.toggleMute()
 })
 
+menu.onOnline(() => {
+  if (screen !== 'menu') return
+  sfx.click()
+  showOnlineMenu()
+})
+
 if (uitest) {
   // la página de prueba de vistas la monta index.html
 } else if (demo || playParam != null) {
   // entra directo a la partida
+} else if (netStart === 'host') {
+  openHost()
+} else if (netStart === 'join' && net.join) {
+  openJoin(net.join)
 } else {
   showTitle()
 }
+
+// Online con la pestaña en segundo plano: rAF se frena y la partida de los demás también.
+// Un intervalo avanza la sesión a paso fijo mientras no llegan frames.
+setInterval(() => {
+  if (!online || screen !== 'play') return
+  const now = performance.now()
+  const late = (now - lastTick) / 1000
+  if (late < 0.3) return
+  lastTick = now
+  const steps = Math.min(120, Math.floor(late * 60))
+  for (let i = 0; i < steps; i++) step1(1 / 60, false, i === steps - 1)
+}, 100)
 
 // Sin top-level await: Pixi importa sus renderers en chunks que dependen de este
 // módulo, y en el build eso deja el import dinámico esperando para siempre.
 if (!uitest) {
   void renderer.mount(stage).then(() => {
+    mounted = true
     renderer.setLoop(tick)
     layout()
     window.addEventListener('resize', layout)
@@ -166,6 +209,7 @@ function enterPlay(): void {
 }
 
 function toMenu(): void {
+  leaveOnline()
   screen = 'menu'
   paused = false
   sfx.engine(false)
@@ -181,6 +225,166 @@ function toMenu(): void {
   })
 }
 
+// ---------- online ----------
+
+function showOnlineMenu(message?: string): void {
+  leaveOnline()
+  screen = 'online'
+  sfx.engine(false)
+  closeOverlay()
+  menu.hide()
+  title.hide()
+  hud.hide()
+  stage.hidden = true
+  keys.capture = false
+  onlineMenu.show(
+    {
+      host: () => {
+        if (screen !== 'online') return
+        sfx.click()
+        openHost()
+      },
+      join: (raw) => {
+        if (screen !== 'online') return
+        const code = normalizeCode(raw)
+        if (!code) {
+          sfx.empty()
+          onlineMenu.error('CODIGO INVALIDO')
+          return
+        }
+        sfx.click()
+        openJoin(code)
+      },
+      back: () => {
+        if (screen !== 'online') return
+        sfx.click()
+        onlineMenu.hide()
+        toMenu()
+      },
+    },
+    net.join ?? undefined,
+  )
+  if (message) onlineMenu.error(message)
+}
+
+function openHost(): void {
+  openRoom('host')
+}
+
+function openJoin(code: string): void {
+  openRoom('client', code)
+}
+
+function openRoom(role: 'host' | 'client', code?: string): void {
+  leaveOnline()
+  onlineMenu.hide()
+  title.hide()
+  menu.hide()
+  hud.hide()
+  stage.hidden = true
+  keys.capture = false
+  screen = 'lobby'
+  lobbyShown = false
+  const room: Online = new Online(role, net.kind, session, {
+    lobby: () => {
+      if (online !== room) return
+      if (net.autotest && role === 'host') autotestLobby(room)
+      refreshLobby()
+    },
+    start: (config, seat, pending) => {
+      if (online !== room) return
+      startOnline(config, seat, pending)
+    },
+    end: (reason) => {
+      if (online !== room) return
+      online = null
+      showOnlineMenu(reason.toUpperCase())
+    },
+    peer: (joined) => sfx.peer(joined),
+  })
+  online = room
+  void room.open(code).then(() => {
+    if (online === room && net.autotest && role === 'host') autotestLobby(room)
+  })
+}
+
+// autotest: 2 humanos (anfitrión + un cliente) y 1 IA, 1 ronda; arranca cuando el cliente tomó su casillero.
+let autotestBusy = false
+function autotestLobby(room: Online): void {
+  const lobby = room.lobby
+  if (autotestBusy || !lobby || room.started || !room.code) return
+  autotestBusy = true
+  try {
+    if (lobby.slots[1]?.kind !== 'human') room.setSlot(1, 'human')
+    if (lobby.slots[2]?.kind !== 'ai') room.setSlot(2, 'ai')
+    if (lobby.slots[3]?.kind !== 'off') room.setSlot(3, 'off')
+    if (lobby.rounds !== 1) room.setOption('rounds', 1)
+    // fuera del callback de la sala: el hello del cliente todavía se está procesando
+    if (room.canStart()) setTimeout(() => online === room && !room.started && room.start(), 300)
+  } finally {
+    autotestBusy = false
+  }
+}
+
+function refreshLobby(): void {
+  if (!online || screen !== 'lobby') return
+  const model = online.lobbyModel()
+  if (!model) return
+  if (lobbyShown) {
+    lobbyView.update(model)
+    return
+  }
+  lobbyShown = true
+  const room = online
+  lobbyView.show(model, {
+    claim: (slot) => {
+      sfx.click()
+      room.claim(slot)
+    },
+    release: () => {
+      sfx.click()
+      room.release()
+    },
+    setSlot: (slot, kind) => {
+      sfx.click()
+      room.setSlot(slot, kind)
+    },
+    setOption: (key, value) => {
+      sfx.click()
+      room.setOption(key, value)
+    },
+    start: () => {
+      if (!room.start()) sfx.empty()
+      else sfx.click()
+    },
+    leave: () => {
+      sfx.click()
+      toMenu()
+    },
+  })
+}
+
+function startOnline(config: MatchConfig, seat: NetSeat, _snapshotPending: boolean): void {
+  lobbyView.hide()
+  lobbyShown = false
+  lastConfig = config
+  session.start(config, undefined, seat)
+  sfx.unlock()
+  wasMyTurn = false
+  autoT = 0
+  enterPlay()
+}
+
+function leaveOnline(): void {
+  if (!online) return
+  const room = online
+  online = null
+  room.close()
+  lobbyView.hide()
+  lobbyShown = false
+  session.netHud = null
+}
+
 function closeOverlay(): void {
   banner.hide()
   scoreboard.hide()
@@ -192,6 +396,7 @@ function closeOverlay(): void {
 }
 
 function layout(): void {
+  if (!mounted) return
   const vp = renderer.resize()
   hud.place(vp)
   refreshLabels()
@@ -215,15 +420,17 @@ function fastForwardFor(seconds: number): void {
 }
 
 function tick(rawDt: number): void {
+  lastTick = performance.now()
   step1(Math.min(0.05, Math.max(0, rawDt)), true)
 }
 
-function step1(dt: number, live: boolean): void {
+function step1(dt: number, live: boolean, draw = true): void {
   if (screen !== 'play') return
   const padState = live ? pad.poll() : null
   if (live && overlay === 'none') {
     const pressed = keys.consumePressed()
-    if (pressed.has('KeyP') || padState?.pressed.has('pause')) {
+    // online no hay pausa: la partida sigue para los demás
+    if (!online && (pressed.has('KeyP') || padState?.pressed.has('pause'))) {
       paused = !paused
       sfx.click()
       sfx.engine(false)
@@ -238,9 +445,32 @@ function step1(dt: number, live: boolean): void {
     return
   }
   session.update(dt)
+  if (online) {
+    online.update(dt)
+    session.netHud = online.hudNet()
+    const mine = session.myTurn
+    if (mine && !wasMyTurn) sfx.yourTurn()
+    wasMyTurn = mine
+    if (net.autotest && mine && overlay === 'none') {
+      autoT += dt
+      if (autoT >= AUTO_SHOT.delay) {
+        autoT = 0
+        const s = session.state
+        if (s) {
+          const plan = chooseShot(s, 'hard')
+          session.fireWith(plan.angle, plan.power)
+        }
+      }
+    } else autoT = 0
+  }
 
   for (const shot of session.pullShots()) sfx.fire(shot.weapon)
   sfx.engine(live && session.moving)
+  if (!draw) {
+    session.pullFx()
+    flow()
+    return
+  }
   const frame = session.frame()
   if (!frame) return
   const events = session.pullFx()
@@ -333,6 +563,15 @@ function playSounds(events: GameEvent[]): void {
 // Pantallas entre turnos y rondas, según la fase de la partida.
 function flow(): void {
   const s = session.state
+  // online la fase puede cambiar por el anfitrión con una pantalla abierta
+  if (s && online) {
+    if ((overlay === 'score' && s.phase !== 'roundover') || (overlay === 'shop' && s.phase !== 'shop')) closeOverlay()
+    else if (overlay === 'shop' && shopFor != null && s !== shopState) {
+      shopState = s
+      const m = session.shopModel(shopFor)
+      if (m) shop.update(m)
+    }
+  }
   if (!s || overlay !== 'none' || session.busy) return
   if (session.isDemo) {
     // demo sin congelar: la partida entre IAs sigue con otra seed
@@ -357,7 +596,7 @@ function flow(): void {
       return
     }
     case 'roundover': {
-      if (session.finishedFor < 1.4) return
+      if (session.finishedFor < 1.4 || session.awaitingHost) return
       // la última ronda va directo a la tabla final
       if (s.round >= s.rounds) {
         session.nextRound()
@@ -401,6 +640,14 @@ function flow(): void {
         () => {
           if (overlay !== 'final') return
           sfx.click()
+          // online la revancha se arma de nuevo desde el lobby
+          if (online) {
+            const role = online.role
+            toMenu()
+            if (role === 'host') openHost()
+            else showOnlineMenu()
+            return
+          }
           begin(lastConfig)
         },
         () => {
@@ -419,6 +666,7 @@ function openShop(playerId: number): void {
   if (!model) return
   overlay = 'shop'
   shopFor = playerId
+  shopState = session.state
   sfx.engine(false)
   const refresh = () => {
     const m = session.shopModel(playerId)

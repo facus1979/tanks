@@ -322,6 +322,22 @@ export class Sfx {
     this.tone({ freq: 784, dur: 0.22, type: 'square', gain: 0.07, delay: 0.2 })
   }
 
+  // Online: te toca. Dos pitidos agudos que suben.
+  yourTurn(): void {
+    if (!this.ready) return
+    this.tone({ freq: 880, dur: 0.09, type: 'square', gain: 0.06 })
+    this.tone({ freq: 1175, dur: 0.16, type: 'square', gain: 0.07, delay: 0.11 })
+    this.tone({ freq: 587, dur: 0.25, type: 'triangle', gain: 0.1, delay: 0.11 })
+  }
+
+  // Online: alguien se conectó (sube) o se desconectó (baja).
+  peer(joined: boolean): void {
+    if (!this.ready) return
+    const [a, b] = joined ? [440, 660] : [660, 330]
+    this.tone({ freq: a, dur: 0.08, type: 'triangle', gain: 0.12 })
+    this.tone({ freq: b, dur: 0.14, type: 'triangle', gain: 0.12, delay: 0.09 })
+  }
+
   // Fin de ronda: redoble y golpe.
   roundEnd(): void {
     if (!this.ready) return

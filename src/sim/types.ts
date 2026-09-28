@@ -254,6 +254,7 @@ export type Command =
   | { type: 'buy'; playerId: number; id: ShopId } // shop: compra un paquete
   | { type: 'sell'; playerId: number; id: ShopId } // shop: devuelve un paquete al 50%
   | { type: 'ready'; playerId: number } // shop: listo. Con todos los humanos listos arranca la ronda
+  | { type: 'setKind'; playerId: number; kind: PlayerKind } // online: un desconectado pasa a IA y vuelve a humano
 // Las IA compran solas al entrar a la tienda (determinista, con el rng del estado).
 
 export interface Vec2 {

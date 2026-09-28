@@ -1,15 +1,17 @@
-// Página de prueba de las vistas: ?uitest=title|menu|banner|score|final|shop|hud con modelos falsos.
+// Página de prueba de las vistas: ?uitest=online|lobby|title|menu|banner|score|final|shop|hud con modelos falsos.
 // index.html la carga solo si la query trae uitest; main.ts puede llamar mountUiTest(name) si prefiere.
 import { ITEM_ORDER, SHOP, type ShopId } from '../sim/types'
 import { loadUiAssets } from './assets'
 import { Hud } from './hud'
 import { refreshLabels } from './kit'
 import { createBannerView } from './banner'
+import { createLobbyView } from './lobby'
 import { createMenuView } from './menu'
+import { createOnlineMenuView } from './online'
 import { createScoreboardView } from './scoreboard'
 import { createShopView } from './shop'
 import { createTitleView } from './title'
-import type { ScoreModel, ShopModel } from './types'
+import type { LobbyModel, ScoreModel, ShopModel } from './types'
 
 const ROWS = [
   { id: 0, name: 'BANDANA', color: 0x3d8cf0, crew: 'bandana' as const, alive: true, roundsWon: 2, kills: 3, earned: 1150, money: 1750 },
@@ -32,6 +34,32 @@ function shopModel(money: number, owned: Record<string, number>): ShopModel {
       canBuy: money >= s.price && (owned[s.id] ?? 0) + s.qty <= s.max,
       canSell: (owned[s.id] ?? 0) >= s.qty,
     })),
+  }
+}
+
+const params = new URLSearchParams(location.search)
+
+function lobbyModel(role: 'host' | 'client'): LobbyModel {
+  const host = role === 'host'
+  return {
+    role,
+    link: 'http://localhost:5173/?join=TANK-4F7K',
+    mySlot: host ? 0 : null,
+    status: 'ESPERANDO JUGADORES',
+    canStart: false,
+    lobby: {
+      code: 'TANK-4F7K',
+      rounds: 3,
+      difficulty: 'normal',
+      biome: 'rotate',
+      turnSeconds: 45,
+      slots: [
+        { kind: 'human', name: 'Facu', crew: 'bandana', owner: 'host', connected: true },
+        { kind: 'human', name: 'Sargento', crew: 'sarge', owner: 'peer1', connected: true },
+        { kind: 'human', name: '', crew: 'rookie', owner: null, connected: false },
+        { kind: 'ai', name: 'IA', crew: 'desert', owner: null, connected: true },
+      ],
+    },
   }
 }
 
@@ -82,7 +110,36 @@ export async function mountUiTest(name: string): Promise<boolean> {
       ammoAll: { normal: 99, heavy: 2, dirt: 3, cluster: 0, napalm: 2, digger: 2, roller: 2, nuke: 1 },
       fuel: 0.7,
       showBar: true,
-      extras: { round: 2, rounds: 3, money: 1250, items, shield: 25, tracer: true },
+      extras: {
+        round: 2,
+        rounds: 3,
+        money: 1250,
+        items,
+        shield: 25,
+        tracer: true,
+        net: params.has('net')
+          ? { role: 'host', code: 'TANK-4F7K', peers: [{ name: 'Sargento', connected: true, ping: 48 }, { name: 'Novato', connected: false, ping: null }], turnLeft: Number(params.get('net')) || 27, waiting: 'ESPERANDO A SARGENTO…' }
+          : null,
+      },
+    })
+  } else if (name === 'online') {
+    const view = createOnlineMenuView()
+    const handlers = { host: () => console.log('host'), join: (c: string) => { console.log('join', c); view.error('SALA NO ENCONTRADA') }, back: () => console.log('back') }
+    view.show(handlers, params.get('join') ?? undefined)
+  } else if (name === 'lobby') {
+    const view = createLobbyView()
+    const model = lobbyModel(params.get('role') === 'client' ? 'client' : 'host')
+    const push = (fn: (m: LobbyModel) => void) => {
+      fn(model)
+      view.update({ ...model, lobby: { ...model.lobby }, canStart: model.lobby.slots.filter((s) => s.kind !== 'off').length >= 2 })
+    }
+    view.show(model, {
+      claim: (i) => push((m) => { m.lobby.slots[i] = { ...m.lobby.slots[i], owner: 'me', name: 'Yo', connected: true }; m.mySlot = i }),
+      release: () => push((m) => { if (m.mySlot != null) m.lobby.slots[m.mySlot] = { ...m.lobby.slots[m.mySlot], owner: null, name: '' }; m.mySlot = null }),
+      setSlot: (i, kind) => push((m) => { m.lobby.slots[i] = { ...m.lobby.slots[i], kind, owner: kind === 'human' ? null : null } }),
+      setOption: (key, v) => push((m) => { (m.lobby as unknown as Record<string, unknown>)[key] = v }),
+      start: () => console.log('start'),
+      leave: () => console.log('leave'),
     })
   } else return false
   return true
