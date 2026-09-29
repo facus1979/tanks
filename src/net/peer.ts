@@ -6,13 +6,28 @@ import { BaseTransport, HOST_ID, PEER_PREFIX, RETRY_FOR, wait } from './base'
 import type { NetMessage } from './types'
 import { makeRoomCode } from './util'
 
+// STUN alcanza entre redes "amables". Datos móviles y routers con NAT estricto necesitan TURN (un relay).
+// Por defecto se usa el relay público de Open Relay; con VITE_TURN_URLS (separadas por coma),
+// VITE_TURN_USER y VITE_TURN_PASS en el build se usa uno propio (p. ej. una cuenta gratis de Metered).
+const env = import.meta.env as Record<string, string | undefined>
+const TURN: RTCIceServer = env.VITE_TURN_URLS
+  ? { urls: env.VITE_TURN_URLS.split(',').map((u) => u.trim()), username: env.VITE_TURN_USER, credential: env.VITE_TURN_PASS }
+  : {
+      urls: [
+        'turn:openrelay.metered.ca:80',
+        'turn:openrelay.metered.ca:443',
+        'turn:openrelay.metered.ca:443?transport=tcp',
+      ],
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    }
+
 const OPTIONS: Partial<PeerOptions> = {
   debug: 0,
   config: {
     iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+      TURN,
     ],
   },
 }
@@ -27,7 +42,10 @@ export class PeerTransport extends BaseTransport {
   private conns = new Map<string, DataConnection>()
   private hostPeerId = ''
   private retrying = false
-  private onHide = () => this.close()
+  // Solo al irse de verdad: si la página queda en caché (celular que cambia de app) puede volver.
+  private onHide = (e: PageTransitionEvent) => {
+    if (!e.persisted) this.close()
+  }
 
   async host(code?: string): Promise<string> {
     const { Peer } = await loadPeer()

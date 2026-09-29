@@ -14,8 +14,10 @@ export interface NetTransport extends Transport {
 export const HOST_ID = 'host' // peerId con el que el cliente ve al anfitrión
 export const PEER_PREFIX = 'tanks-'
 const PING_EVERY = 2000
-const DROP_AFTER = 9000 // sin tráfico durante este tiempo → el peer se cayó
-export const RETRY_FOR = 30000 // el cliente reintenta reconectar durante este tiempo
+// Holgado a propósito: el navegador frena los timers de pestañas en segundo plano y el celular
+// congela la página al cambiar de app (p. ej. para mandar el link por WhatsApp).
+const DROP_AFTER = 25000 // sin tráfico durante este tiempo → el peer se cayó
+export const RETRY_FOR = 120000 // el cliente reintenta reconectar durante este tiempo
 
 interface Link {
   lastSeen: number

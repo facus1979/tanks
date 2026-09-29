@@ -18,7 +18,9 @@ const layer = process.argv.includes('--layer')
 const TIMEOUT = Number(process.env.NET_TEST_TIMEOUT ?? 10 * 60) * 1000 // la máquina es lenta
 const port = 5250 + Math.floor(Math.random() * 50)
 const debugPort = 9300 + Math.floor(Math.random() * 200)
-const base = `http://localhost:${port}`
+// NET_TEST_URL=https://facus1979.github.io/tanks prueba el sitio publicado (sin levantar vite).
+const remote = (process.env.NET_TEST_URL ?? '').replace(/\/+$/, '')
+const base = remote || `http://localhost:${port}`
 
 const CHROMES = [
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
@@ -35,19 +37,21 @@ const log = (...a) => console.log(`[${((performance.now() - t0) / 1000).toFixed(
 let vite, chrome, profile, cdp
 let code = 1
 try {
-  vite = spawn(process.execPath, [path.join(root, 'node_modules/vite/bin/vite.js'), '--port', String(port), '--strictPort'], {
-    cwd: root,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  let viteLog = ''
-  vite.stdout.on('data', (d) => (viteLog += d))
-  vite.stderr.on('data', (d) => (viteLog += d))
-  await waitFor(async () => (await fetch(base + '/')).ok, 30000, () => 'vite no respondió\n' + viteLog)
-  log('vite listo en', base)
-  // calentar vite: que transforme y optimice dependencias (peerjs, pixi) antes de abrir pestañas
-  for (const u of ['/src/main.ts', '/src/net/index.ts', '/src/net/peer.ts', '/src/net/local.ts', '/src/net/host.ts', '/src/net/client.ts'])
-    await fetch(base + u).catch(() => {})
-  await sleep(4000)
+  if (!remote) {
+    vite = spawn(process.execPath, [path.join(root, 'node_modules/vite/bin/vite.js'), '--port', String(port), '--strictPort'], {
+      cwd: root,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let viteLog = ''
+    vite.stdout.on('data', (d) => (viteLog += d))
+    vite.stderr.on('data', (d) => (viteLog += d))
+    await waitFor(async () => (await fetch(base + '/')).ok, 30000, () => 'vite no respondió\n' + viteLog)
+    log('vite listo en', base)
+    // calentar vite: que transforme y optimice dependencias (peerjs, pixi) antes de abrir pestañas
+    for (const u of ['/src/main.ts', '/src/net/index.ts', '/src/net/peer.ts', '/src/net/local.ts', '/src/net/host.ts', '/src/net/client.ts'])
+      await fetch(base + u).catch(() => {})
+    await sleep(4000)
+  } else log('probando el sitio publicado', base)
 
   profile = fs.mkdtempSync(path.join(root, 'node_modules/.net-test-'))
   chrome = spawn(
