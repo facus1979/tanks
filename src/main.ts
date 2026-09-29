@@ -1,6 +1,7 @@
 import { PixiRenderer } from './render/pixi/PixiRenderer'
 import { Keyboard, weaponSlot } from './input/keyboard'
-import { Gamepad } from './input/gamepad'
+import { Gamepad, type PadState } from './input/gamepad'
+import { TouchControls, fullscreenButton, isTouchDevice, vibrate } from './input/touch'
 import { Sfx } from './audio/sfx'
 import { Session } from './game/session'
 import type { NetSeat } from './game/session'
@@ -65,6 +66,13 @@ const ITEM_KEYS: Record<string, ItemId> = { KeyQ: 'shield', KeyF: 'fuel', KeyR: 
 const renderer = new PixiRenderer()
 const keys = new Keyboard()
 const pad = new Gamepad()
+const touch = new TouchControls(stage)
+if (isTouchDevice()) {
+  // pantalla completa también fuera de la partida (menú, lobby, tienda)
+  const fs = fullscreenButton()
+  fs.classList.add('fs-global')
+  document.getElementById('app')?.append(fs)
+}
 const sfx = new Sfx()
 const session = new Session()
 session.syncAi = aiSync
@@ -421,12 +429,13 @@ function fastForwardFor(seconds: number): void {
 
 function tick(rawDt: number): void {
   lastTick = performance.now()
+  touch.setActive(screen === 'play' && overlay === 'none')
   step1(Math.min(0.05, Math.max(0, rawDt)), true)
 }
 
 function step1(dt: number, live: boolean, draw = true): void {
   if (screen !== 'play') return
-  const padState = live ? pad.poll() : null
+  const padState = live ? mergePad(pad.poll(), touch.poll()) : null
   if (live && overlay === 'none') {
     const pressed = keys.consumePressed()
     // online no hay pausa: la partida sigue para los demás
@@ -449,7 +458,10 @@ function step1(dt: number, live: boolean, draw = true): void {
     online.update(dt)
     session.netHud = online.hudNet()
     const mine = session.myTurn
-    if (mine && !wasMyTurn) sfx.yourTurn()
+    if (mine && !wasMyTurn) {
+      sfx.yourTurn()
+      vibrate([40, 60, 40])
+    }
     wasMyTurn = mine
     if (net.autotest && mine && overlay === 'none') {
       autoT += dt
@@ -485,6 +497,17 @@ function step1(dt: number, live: boolean, draw = true): void {
   flow()
 }
 
+// Gamepad y controles táctiles se suman: los dos devuelven el mismo formato.
+function mergePad(a: PadState, b: PadState): PadState {
+  const clamp1 = (n: number): number => Math.max(-1, Math.min(1, n))
+  return {
+    angle: clamp1(a.angle + b.angle),
+    power: clamp1(a.power + b.power),
+    move: a.move || b.move,
+    pressed: new Set([...a.pressed, ...b.pressed]),
+  }
+}
+
 function handleInput(dt: number, pressed: Set<string>, padState: ReturnType<Gamepad['poll']> | null): void {
   if (!session.inputEnabled) return
   let dAngle = 0
@@ -498,6 +521,8 @@ function handleInput(dt: number, pressed: Set<string>, padState: ReturnType<Game
     dPower += padState.power * POWER_SPEED * dt
   }
   session.nudge(dAngle, dPower)
+  const drag = touch.dragAim()
+  if (drag) session.aimTo(drag.angle, drag.power)
   const left = keys.isDown('KeyA') || padState?.move === -1
   const right = keys.isDown('KeyD') || padState?.move === 1
   if (left !== right) session.move(left ? -1 : 1, dt)

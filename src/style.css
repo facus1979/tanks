@@ -352,3 +352,55 @@ canvas { image-rendering: pixelated; image-rendering: crisp-edges; }
   .lobby-slot .cell.kind { width: calc(var(--px) * 42); }
   .lobby-opts { width: calc(var(--px) * 70); }
 }
+
+/* ---------- táctil (F14) ---------- */
+html.touch, html.touch body { overscroll-behavior: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+html.touch #stage, #touch { touch-action: none; }
+html.touch button, html.touch .cell { touch-action: manipulation; }
+
+#touch { position: fixed; inset: 0; z-index: 4; pointer-events: none; }
+#touch[hidden] { display: none !important; }
+.touch-col {
+  position: absolute; top: 50%; transform: translateY(-58%);
+  display: flex; flex-direction: column; gap: 10px; pointer-events: none;
+}
+.touch-col.left { left: max(10px, env(safe-area-inset-left)); }
+.touch-col.right { right: max(10px, env(safe-area-inset-right)); align-items: flex-end; }
+.touch-row { display: flex; gap: 10px; }
+.touch-top { position: absolute; top: max(8px, env(safe-area-inset-top)); right: max(10px, env(safe-area-inset-right)); display: flex; gap: 8px; }
+.touch-btn {
+  pointer-events: auto;
+  min-width: 56px; min-height: 48px; padding: 0 10px;
+  font: bold 14px/1 ui-monospace, "Courier New", monospace; letter-spacing: 1px; color: #f4efe4;
+  background: #1c1614b8; border: 3px solid var(--bronze); border-radius: 0;
+  box-shadow: 3px 3px 0 #000a; opacity: 0.82;
+  -webkit-tap-highlight-color: transparent;
+}
+.touch-btn.on { background: var(--gold); color: var(--out); opacity: 1; transform: translate(2px, 2px); box-shadow: 1px 1px 0 #000a; }
+.touch-btn.fire { min-width: 132px; min-height: 60px; font-size: 18px; background: #a8281cd0; border-color: var(--gold); }
+.touch-btn.fs, .touch-top .touch-btn { min-width: 44px; min-height: 44px; font-size: 16px; }
+.fs-global { position: fixed; z-index: 8; bottom: max(8px, env(safe-area-inset-bottom)); right: max(8px, env(safe-area-inset-right)); }
+.touch-guide { position: fixed; inset: 0; width: 100%; height: 100%; display: none; pointer-events: none; }
+.touch-guide line { stroke: var(--gold); stroke-width: 3; }
+/* altura de celular apaisado: botones compactos y más transparentes para no tapar la escena */
+@media (max-height: 520px) {
+  .touch-btn { min-width: 46px; min-height: 40px; padding: 0 6px; font-size: 11px; border-width: 2px; opacity: 0.7; }
+  .touch-btn.fire { min-width: 100px; min-height: 48px; font-size: 14px; }
+  .touch-col, .touch-row { gap: 6px; }
+  .touch-top .touch-btn { min-width: 40px; min-height: 36px; }
+}
+.touch-playing .fs-global { display: none; }
+
+#rotate { display: none; }
+@media (pointer: coarse) and (orientation: portrait) {
+  #rotate {
+    position: fixed; inset: 0; z-index: 20; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
+    background: var(--bg); color: var(--gold); text-align: center; padding: 24px;
+    font: bold 22px/1.3 ui-monospace, "Courier New", monospace; letter-spacing: 2px;
+  }
+  #rotate .phone { width: 46px; height: 80px; border: 4px solid var(--bronze); animation: rotate-hint 1.6s ease-in-out infinite; }
+}
+@keyframes rotate-hint { 0%, 30% { transform: rotate(0); } 60%, 100% { transform: rotate(-90deg); } }
+
+.code-field { position: relative; }
+.code-input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; font-size: 16px; border: 0; padding: 0; background: transparent; color: transparent; caret-color: transparent; }

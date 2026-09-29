@@ -320,6 +320,15 @@ export class Session {
     this.fire()
   }
 
+  // Apuntado absoluto (arrastre táctil). Igual que nudge, se manda a la sim al disparar.
+  aimTo(angle: number, power: number): void {
+    if (!this.inputEnabled || !this.state) return
+    const aim = this.currentAim()
+    if (!aim) return
+    aim.angle = clamp(Math.round(angle), 0, 180)
+    aim.power = clamp(Math.round(power), 0, 100)
+  }
+
   // Ajuste continuo del ángulo y la potencia del humano. Se manda a la sim al disparar.
   nudge(dAngle: number, dPower: number): void {
     if (!this.inputEnabled || !this.state || (dAngle === 0 && dPower === 0)) return

@@ -1,6 +1,7 @@
 // Menú online: crear sala, unirse con código (o pegando el link) y volver.
 import { bindNav, button, el, label, screenRoot, setLabel, type Nav } from './kit'
 import type { OnlineMenuView } from './types'
+import { isTouchDevice } from '../input/touch'
 
 // Acepta el link completo (?join=TANK-4F7K) o el código suelto y lo normaliza a TANK-XXXX.
 export function normalizeCode(raw: string): string {
@@ -29,6 +30,7 @@ class OnlineScreen implements OnlineMenuView {
   private backBtn!: HTMLButtonElement
   private field!: HTMLElement
   private fieldLabel!: HTMLCanvasElement
+  private input: HTMLInputElement | null = null
   private msgLabel!: HTMLCanvasElement
   private blink = 0
   private caret = true
@@ -91,6 +93,26 @@ class OnlineScreen implements OnlineMenuView {
       this.row = 1
       this.sync()
     })
+    if (isTouchDevice()) {
+      // En táctil el campo tiene un input real encima (invisible) para que aparezca el teclado del sistema.
+      const input = document.createElement('input')
+      input.className = 'code-input'
+      input.setAttribute('inputmode', 'text')
+      input.setAttribute('autocapitalize', 'characters')
+      input.setAttribute('autocomplete', 'off')
+      input.spellcheck = false
+      input.value = this.text
+      input.addEventListener('focus', () => {
+        this.row = 1
+        this.sync()
+      })
+      input.addEventListener('input', () => {
+        this.text = normalizeCode(input.value)
+        this.sync()
+      })
+      this.field.append(input)
+      this.input = input
+    }
     this.joinBtn = button('UNIRSE', () => this.pick(2))
     const join = el('div', 'actions')
     join.append(this.field, this.joinBtn)
@@ -148,6 +170,12 @@ class OnlineScreen implements OnlineMenuView {
 
   // En el campo del código las letras son texto.
   private rawKey(e: KeyboardEvent): boolean {
+    // Con el input táctil enfocado, las letras las escribe el propio input; Enter confirma.
+    if (this.input && e.target === this.input) {
+      if (e.key !== 'Enter') return false
+      this.activate()
+      return true
+    }
     if (this.row !== 1) return false
     if (e.key === 'Backspace') this.text = this.text.slice(0, -1)
     else if (e.key.length === 1 && /[a-zA-Z0-9-]/.test(e.key) && this.text.length < CODE_LEN) this.text += e.key.toUpperCase()

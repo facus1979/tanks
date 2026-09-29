@@ -171,7 +171,8 @@ Las fases F1 a F4 forman la primera muestra, que tiene que parecerse a la refere
 - **F12 Publicación.** Deploy a GitHub Pages con GitHub Actions, README.
 - **F13 Online P2P.** Salas con código y link (`?join=CODIGO`), WebRTC vía PeerJS sin servidor propio; transporte local (BroadcastChannel, `?net=local`) para pruebas. El anfitrión es la autoridad: valida comandos y reparte el log ordenado; los clientes aplican el log sobre su réplica (sim determinista), con hash periódico y snapshot si hay desincronización. Límite de tiempo por turno, desconectado → IA, reconexión con token. Contrato: `src/net/types.ts`. Limitación aceptada: si el anfitrión se va, termina la partida.
   - Estado: hecho. `npm run net-test` pasa con el transporte local (2 humanos + 1 IA, una ronda, réplicas con el mismo hash) y con PeerJS por internet (dos pestañas en la misma PC). Falta probarlo entre dos redes distintas.
-- **F14 Controles táctiles (tablet y celular).** Para iterar más adelante.
+- **F14 Controles táctiles (tablet y celular).**
+  - Estado: primera versión hecha (`src/input/touch.ts`): apuntar arrastrando, botones en pantalla, aviso para girar el dispositivo, pantalla completa, vibración en tu turno online, campo del código de sala con teclado del sistema. Falta probarlo en dispositivos reales y medir fps en un celular de gama media.
   - Apuntar arrastrando desde el tanque: la dirección del arrastre da el ángulo y el largo da la potencia, con la trayectoria corta como guía. También se puede ajustar fino con botones +/- de ángulo y potencia.
   - Botones en pantalla: disparar, mover ◀ ▶ (mantener), rueda de armas e ítems. Se muestran solo si el dispositivo es táctil (`pointer: coarse`).
   - Pantallas (título, menú, lobby, tienda, tabla) usables con el dedo: objetivos de 44 px o más, sin hover, teclado virtual para el código de sala.

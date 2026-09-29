@@ -46,6 +46,8 @@ Luego abrí http://localhost:5173 en tu navegador.
 
 **Gamepad:** stick izquierdo o cruceta para ángulo y potencia, gatillos o bumpers para mover, **A** dispara, **X / Y** arma anterior / siguiente, **B** usa el primer ítem disponible, **Start** pausa. También navega el menú, la tienda, la tabla y el cartel de turno.
 
+**Celular y tablet:** poné el dispositivo en horizontal. Arrastrá el dedo sobre el campo de batalla para apuntar: la dirección es el ángulo y el largo del arrastre la potencia. Los botones en pantalla ajustan fino (POT ±, ÁNG ↺ ↻), mueven el tanque (◀ ▶, mantener apretado), cambian de arma, usan ítems y disparan (FUEGO). Arriba a la derecha están la pausa y la pantalla completa. Para unirte a una sala desde el celular, lo más simple es abrir el link que te pasan.
+
 ## Modos de juego
 
 ### Rondas y tienda
