@@ -1,7 +1,7 @@
 // Tanques con tripulante, utilería y globos.
 import { Container, Graphics, Sprite, Texture } from 'pixi.js'
 import type { Player, Prop, Terrain } from '../../sim/types'
-import { AIR, TANK_H, TANK_W, WORLD_W } from '../../sim/types'
+import { AIR, TANK_H, TANK_W } from '../../sim/types'
 import type { Art, Font } from './assets'
 import { GLYPHS, OUT } from './fallback'
 import { mul } from './raster'
@@ -208,7 +208,7 @@ export class TankView {
       const fits = (dx: number, dy: number): boolean => {
         const x = bx + dx
         const y = by + dy
-        return x >= 0 && y >= 0 && x + b.width <= WORLD_W && !blocked?.(x, y, b.width, b.height)
+        return x >= 0 && y >= 0 && x + b.width <= (terrain?.w ?? Infinity) && !blocked?.(x, y, b.width, b.height)
       }
       const spot = BUBBLE_SPOTS.find(([dx, dy]) => fits(dx, dy))
       if (spot) {

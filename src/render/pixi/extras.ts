@@ -1,8 +1,9 @@
 // F10/F11: escudo, trazador, tripulante eyectado y cortina entre rondas. Todo con el dt que recibe el renderer.
 import { Container, Graphics, Sprite, Texture } from 'pixi.js'
 import type { GameEvent, Player, Terrain, Vec2 } from '../../sim/types'
-import { AIR, SHIELD_HP, WORLD_H, WORLD_W } from '../../sim/types'
+import { AIR, SHIELD_HP } from '../../sim/types'
 import type { RenderFrame } from '../types'
+import { VIEW_H, VIEW_W } from '../types'
 import type { Art } from './assets'
 import type { Fx } from './fx'
 import { Rng } from './raster'
@@ -123,7 +124,7 @@ export class Extras {
     this.tracerG.clear()
   }
 
-  // Cortina que barre de izquierda a derecha mostrando el mapa nuevo.
+  // Cortina que barre de izquierda a derecha mostrando el mapa nuevo (cubre la pantalla, no el mundo).
   startTransition(): void {
     this.curtainT = CURTAIN_TIME
     this.drawCurtain()
@@ -180,7 +181,7 @@ export class Extras {
     this.updateShields(frame, dt, time, dropOf)
     this.updateShards(dt)
     this.updateCrews(frame.terrain, dt)
-    this.drawTracer(frame.aimPreview ?? null, time)
+    this.drawTracer(frame.aimPreview ?? null, time, frame.terrain)
     this.updateCurtain(dt)
     void art
   }
@@ -281,7 +282,7 @@ export class Extras {
       c.x += c.vx * dt
       c.y += c.vy * dt
       c.sprite.rotation += c.vr * dt
-      let done = c.age > 5 || c.y > WORLD_H + 24 || c.x < -24 || c.x > WORLD_W + 24
+      let done = c.age > 5 || c.y > t.h + 24 || c.x < -24 || c.x > t.w + 24
       if (!done && c.vy > 0 && this.solid(t, c.x, c.y + 5)) {
         if (c.bounced) {
           this.puff(c.x, c.y + 4)
@@ -317,7 +318,7 @@ export class Extras {
   }
 
   // Puntos cada ~3.5 px que titilan, y una cruz donde termina el tiro.
-  private drawTracer(path: Vec2[] | null, time: number): void {
+  private drawTracer(path: Vec2[] | null, time: number, t: Terrain): void {
     const g = this.tracerG
     g.clear()
     if (!path || path.length < 2) return
@@ -335,7 +336,7 @@ export class Extras {
         const x = Math.round(a.x + ((b.x - a.x) * pos) / len)
         const y = Math.round(a.y + ((b.y - a.y) * pos) / len)
         n++
-        if (y < -2 || x < -2 || x > WORLD_W + 2) continue
+        if (x < -2 || x > t.w + 2) continue
         const ph = (n * 0.37 + time * 3.3) % 1
         const on = ph < 0.6
         g.rect(x, y, 2, 2).fill({ color: on ? 0xfff3a8 : 0xffffff, alpha: on ? 1 : 0.4 })
@@ -343,7 +344,7 @@ export class Extras {
       toNext -= len - pos
     }
     const end = path[path.length - 1]
-    if (end.y >= 0 && end.y < WORLD_H && end.x >= 0 && end.x < WORLD_W) {
+    if (end.y >= 0 && end.y < t.h && end.x >= 0 && end.x < t.w) {
       const ex = Math.round(end.x)
       const ey = Math.round(end.y)
       const r = 3 + (Math.floor(time * 4) % 2)
@@ -370,12 +371,12 @@ export class Extras {
     }
     g.visible = true
     const u = 1 - this.curtainT / CURTAIN_TIME
-    const w = WORLD_W / CURTAIN_COLS
+    const w = VIEW_W / CURTAIN_COLS
     for (let i = 0; i < CURTAIN_COLS; i++) {
       const start = (i / CURTAIN_COLS) * 0.6
       const local = Math.min(1, Math.max(0, (u - start) / 0.4))
-      const h = Math.ceil(((1 - local) * WORLD_H) / 6) * 6
-      if (h > 0) g.rect(i * w, 0, w, Math.min(WORLD_H, h)).fill(CURTAIN_COLOR)
+      const h = Math.ceil(((1 - local) * VIEW_H) / 6) * 6
+      if (h > 0) g.rect(i * w, 0, w, Math.min(VIEW_H, h)).fill(CURTAIN_COLOR)
     }
   }
 }

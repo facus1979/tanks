@@ -1,7 +1,9 @@
 import { Application, Container, Graphics, Sprite, Texture, TextureStyle } from 'pixi.js'
 import type { Biome, GameEvent, Player, Prop, Vec2, WeaponId } from '../../sim/types'
-import { BARREL_LEN, PIVOT_X, PIVOT_Y, TANK_H, TANK_W, WEAPONS, WORLD_H, WORLD_W } from '../../sim/types'
+import { BARREL_LEN, PIVOT_X, PIVOT_Y, TANK_H, TANK_W, WEAPONS } from '../../sim/types'
+import type { Terrain } from '../../sim/types'
 import type { GameRenderer, RenderFrame, Viewport } from '../types'
+import { VIEW_H, VIEW_W } from '../types'
 import { BUBBLE_HOLD, BUBBLE_TIME, PropView, RECOIL_TIME, TankView } from './actors'
 import type { Art } from './assets'
 import { loadArt } from './assets'
@@ -16,6 +18,17 @@ const SCORCH_STYLES = new Set(['fire', 'bigfire', 'napalm', 'nuke'])
 const NEAR_MISS = 40
 const THREAT_MARGIN = 70
 const TRAIL_STEP = 7 // px entre puntos de la estela
+// Buffers de efectos y luces: la pantalla más un margen (el origen se redondea a múltiplos de 4 con zoom 1).
+const BUF_W = VIEW_W + 8
+const BUF_H = VIEW_H + 8
+const MIN_ZOOM = 0.5
+const MAX_ZOOM = 4
+// Margen (px de mundo) alrededor de la vista para pintar trozos de terreno: cubre el sacudón.
+const CULL_MARGIN = 48
+// Parallax: el cielo casi quieto; las capas siguientes de 0,15 a 0,7 de la velocidad del terreno.
+const SKY_PARALLAX = 0.04
+const LAMP_R = 34
+const LAMP_TEX = 72 // lado de la textura de luz de un foco (radio 34 más el corrimiento de la trama)
 // QA: ?fxpeek=0.3 adelanta los efectos esos segundos al congelarse (para comparar capturas).
 const FX_PEEK = Number(new URLSearchParams(location.search).get('fxpeek') ?? 0) || 0
 // depuración: congela la imagen tras N s de vuelo del primer tiro (capturas de la estela)
@@ -85,13 +98,13 @@ export class PixiRenderer implements GameRenderer {
   private flashG = new Graphics()
   private glowG = new Graphics()
 
-  private painter = new TerrainPainter(WORLD_W, WORLD_H)
-  private backSprite = new Sprite()
-  private frontSprite = new Sprite()
-  private backTex: Texture | null = null
-  private frontTex: Texture | null = null
+  private painter: TerrainPainter | null = null
+  private backLayer = new Container()
+  private frontLayer = new Container()
+  private backChunks: Sprite[] = []
+  private frontChunks: Sprite[] = []
 
-  private fx = new Fx(WORLD_W, WORLD_H)
+  private fx = new Fx(BUF_W, BUF_H)
   private extras = new Extras(this.fx)
   private fxSprite = new Sprite()
   private lightSprite = new Sprite()
@@ -100,10 +113,15 @@ export class PixiRenderer implements GameRenderer {
   private fxShown = false
   private lightShown = false
 
-  private lamps = new Raster(WORLD_W, WORLD_H)
-  private lampSprite = new Sprite()
-  private lampTex: Texture | null = null
+  private lampLayer = new Container()
+  private lampTex = new Map<string, Texture>()
   private lampKey = ''
+
+  private bgLayers: { tex: Texture; holder: Container; tiles: Sprite[] }[] = []
+  // Cámara aplicada en el último frame, sin sacudón: el origen del mundo cae en (camX, camY) de la pantalla lógica.
+  private camX = 0
+  private camY = 0
+  private camZ = 1
 
   private tanks = new Map<number, TankView>()
   private props = new Map<number, PropView>()
@@ -134,8 +152,8 @@ export class PixiRenderer implements GameRenderer {
     this.host = host
     TextureStyle.defaultOptions.scaleMode = 'nearest'
     await this.app.init({
-      width: WORLD_W,
-      height: WORLD_H,
+      width: VIEW_W,
+      height: VIEW_H,
       background: 0x14121c,
       antialias: false,
       resolution: 1,
@@ -147,32 +165,24 @@ export class PixiRenderer implements GameRenderer {
     host.appendChild(this.app.canvas)
     this.art = await loadArt()
 
-    this.backTex = canvasTexture(this.painter.back.canvas)
-    this.frontTex = canvasTexture(this.painter.front.canvas)
     this.fxTex = canvasTexture(this.fx.fx.canvas)
     this.lightTex = canvasTexture(this.fx.light.canvas)
-    this.lampTex = canvasTexture(this.lamps.canvas)
-    this.backSprite.texture = this.backTex
-    this.frontSprite.texture = this.frontTex
     this.fxSprite.texture = this.fxTex
     this.lightSprite.texture = this.lightTex
-    this.lampSprite.texture = this.lampTex
     this.lightSprite.blendMode = 'add'
-    this.lampSprite.blendMode = 'add'
     this.fxSprite.visible = false
     this.lightSprite.visible = false
-    this.lampSprite.visible = false
 
-    this.flashG.rect(0, 0, WORLD_W, WORLD_H).fill(0xffffff)
+    this.flashG.rect(0, 0, VIEW_W, VIEW_H).fill(0xffffff)
     this.flashG.alpha = 0
-    this.glowG.rect(0, 0, WORLD_W, WORLD_H).fill(0xffffff)
+    this.glowG.rect(0, 0, VIEW_W, VIEW_H).fill(0xffffff)
     this.glowG.blendMode = 'add'
     this.glowG.alpha = 0
     this.world.addChild(
-      this.backSprite,
+      this.backLayer,
       this.propLayer,
-      this.lampSprite,
-      this.frontSprite,
+      this.lampLayer,
+      this.frontLayer,
       this.tankLayer,
       this.lightSprite,
       this.fxSprite,
@@ -193,25 +203,27 @@ export class PixiRenderer implements GameRenderer {
     this.onFrame = loop
   }
 
-  // v2: stub del contrato (mundo = pantalla). La cámara real la hace el área render.
+  // Ventana → pantalla lógica → mundo, con la cámara del último frame (sin sacudón).
   screenToWorld(clientX: number, clientY: number): Vec2 {
     const r = this.app.canvas.getBoundingClientRect()
-    return { x: ((clientX - r.left) / (r.width || 1)) * WORLD_W, y: ((clientY - r.top) / (r.height || 1)) * WORLD_H }
+    const lx = ((clientX - r.left) / (r.width || 1)) * VIEW_W
+    const ly = ((clientY - r.top) / (r.height || 1)) * VIEW_H
+    return { x: (lx - this.camX) / this.camZ, y: (ly - this.camY) / this.camZ }
   }
 
   resize(): Viewport {
     const ww = window.innerWidth
     const wh = window.innerHeight
-    const sx = ww / WORLD_W
-    const sy = wh / WORLD_H
+    const sx = ww / VIEW_W
+    const sy = wh / VIEW_H
     const fit = Math.min(sx, sy)
     const byWidth = sx <= sy
     const avail = byWidth ? ww : wh
-    const logical = byWidth ? WORLD_W : WORLD_H
+    const logical = byWidth ? VIEW_W : VIEW_H
     const k = Math.floor(fit)
     const scale = k >= 1 && k * logical >= 0.85 * avail ? k : fit
-    const w = Math.round(WORLD_W * scale)
-    const h = Math.round(WORLD_H * scale)
+    const w = Math.round(VIEW_W * scale)
+    const h = Math.round(VIEW_H * scale)
     const x = Math.floor((ww - w) / 2)
     const y = Math.floor((wh - h) / 2)
     if (this.host) {
@@ -237,7 +249,9 @@ export class PixiRenderer implements GameRenderer {
       if (this.matchId !== -1) this.reset()
       this.matchId = frame.matchId
     }
+    const painter = this.ensurePainter(frame.terrain)
     if (frame.biome !== this.biome) this.setBiome(art, frame.biome)
+    this.applyCamera(frame)
     this.fx.setTerrain(frame.terrain)
     this.fx.wind = frame.wind
 
@@ -254,9 +268,13 @@ export class PixiRenderer implements GameRenderer {
     const changed = frame.terrainVersion !== this.version
     this.version = frame.terrainVersion
     const pal = art.palette[frame.biome] ?? art.palette.forest
-    if (this.painter.update(frame.terrain, art, pal, changed)) {
-      this.backTex?.source.update()
-      this.frontTex?.source.update()
+    {
+      const x0 = -this.camX / this.camZ - CULL_MARGIN
+      const x1 = x0 + VIEW_W / this.camZ + 2 * CULL_MARGIN
+      for (const i of painter.update(frame.terrain, art, pal, changed, x0, x1)) {
+        this.backChunks[i].texture.source.update()
+        this.frontChunks[i].texture.source.update()
+      }
     }
 
     this.trackShot(frame, anim)
@@ -268,16 +286,6 @@ export class PixiRenderer implements GameRenderer {
     this.time += step
     if (anim > 0) this.fx.decay(anim)
 
-    this.fx.draw(this.shotViews(frame))
-    this.stats?.sample(this.fx.count, dt, performance.now() - t0, this.fx.trails)
-
-    this.syncTanks(art, frame, step)
-    this.extras.update(art, frame, step, this.time, (id) => this.tanks.get(id)?.dropOff ?? 0)
-    this.syncProps(art, frame.props, frame.wind)
-    this.syncLamps(frame.props)
-    this.upload()
-    this.syncArrows(art, frame)
-
     if (anim > 0) {
       const s = this.fx.shake
       if (s > 0.3) {
@@ -288,14 +296,18 @@ export class PixiRenderer implements GameRenderer {
         this.shakeY = 0
       }
     }
-    this.world.x = this.shakeX
-    this.world.y = this.shakeY
-    const n = this.bg.children.length
-    this.bg.children.forEach((c, i) => {
-      const f = i === 0 || n < 2 ? 0 : 0.15 + (0.55 * i) / (n - 1)
-      c.x = Math.round(this.shakeX * f)
-      c.y = Math.round(this.shakeY * f)
-    })
+    this.placeWorld()
+
+    this.fx.draw(this.shotViews(frame))
+    this.stats?.sample(this.fx.count, dt, performance.now() - t0, this.fx.trails)
+
+    this.syncTanks(art, frame, step)
+    this.extras.update(art, frame, step, this.time, (id) => this.tanks.get(id)?.dropOff ?? 0)
+    this.syncProps(art, frame.props, frame.wind)
+    this.syncLamps(frame.props)
+    this.upload()
+    this.syncArrows(art, frame)
+    this.placeBackground(frame.terrain)
     this.flashG.tint = this.fx.flashColor
     this.flashG.alpha = Math.min(0.95, this.fx.flash)
     this.glowG.tint = this.fx.glowColor
@@ -303,7 +315,7 @@ export class PixiRenderer implements GameRenderer {
   }
 
   private reset(): void {
-    this.painter.reset()
+    this.painter?.reset()
     this.fx.reset()
     this.extras.reset()
     for (const v of this.tanks.values()) v.destroy()
@@ -311,6 +323,7 @@ export class PixiRenderer implements GameRenderer {
     for (const v of this.props.values()) v.destroy()
     this.props.clear()
     this.lampKey = ''
+    for (const c of this.lampLayer.removeChildren()) c.destroy()
     this.lastShooter = null
     this.near.clear()
     this.hitThisShot.clear()
@@ -321,12 +334,118 @@ export class PixiRenderer implements GameRenderer {
 
   private setBiome(art: Art, biome: Biome): void {
     this.biome = biome
-    for (const c of this.bg.removeChildren()) c.destroy()
+    for (const c of this.bg.removeChildren()) c.destroy({ children: true })
     const def = art.backgrounds[biome] ?? art.backgrounds.forest
-    for (const t of def.layers) this.bg.addChild(new Sprite(t))
+    this.bgLayers = def.layers.map((tex) => {
+      const holder = new Container()
+      this.bg.addChild(holder)
+      return { tex, holder, tiles: [] }
+    })
     this.app.renderer.background.color = def.fog
     this.fx.fog = def.fog
-    this.painter.markDirty({ x0: 0, y0: 0, x1: WORLD_W, y1: WORLD_H })
+    const p = this.painter
+    if (p) p.markDirty({ x0: 0, y0: 0, x1: p.w, y1: p.h })
+  }
+
+  // Pintor y trozos del terreno del tamaño del mundo de esta partida (se rehacen si cambia el tamaño).
+  private ensurePainter(t: Terrain): TerrainPainter {
+    const old = this.painter
+    if (old && old.w === t.w && old.h === t.h) return old
+    for (const s of this.backChunks.concat(this.frontChunks)) s.destroy({ texture: true, textureSource: true })
+    const p = new TerrainPainter(t.w, t.h)
+    if (old) p.craters = old.craters
+    const make = (c: { x0: number; canvas: HTMLCanvasElement }): Sprite => {
+      const s = new Sprite(canvasTexture(c.canvas))
+      s.x = c.x0
+      return s
+    }
+    this.backChunks = p.back.chunks.map(make)
+    this.frontChunks = p.front.chunks.map(make)
+    this.backLayer.addChild(...this.backChunks)
+    this.frontLayer.addChild(...this.frontChunks)
+    this.painter = p
+    this.version = -1
+    return p
+  }
+
+  // Cámara del frame sin sacudón. El origen del mundo cae siempre en un pixel entero de la pantalla lógica.
+  private applyCamera(frame: RenderFrame): void {
+    const cam = frame.camera
+    const t = frame.terrain
+    const z = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, cam && Number.isFinite(cam.zoom) ? cam.zoom : 1))
+    const cx = cam && Number.isFinite(cam.cx) ? cam.cx : t.w / 2
+    const cy = cam && Number.isFinite(cam.cy) ? cam.cy : t.h / 2
+    this.camZ = z
+    this.camX = Math.round(VIEW_W / 2 - cx * z)
+    this.camY = Math.round(VIEW_H / 2 - cy * z)
+  }
+
+  // Ubica el mundo (cámara + sacudón) y los buffers de efectos sobre lo visible, y oculta los trozos fuera de la vista.
+  private placeWorld(): void {
+    const z = this.camZ
+    const wx = this.camX + this.shakeX
+    const wy = this.camY + this.shakeY
+    this.world.position.set(wx, wy)
+    this.world.scale.set(z)
+    let ox = -wx / z
+    let oy = -wy / z
+    if (z === 1) {
+      // múltiplos de 4: la trama de Bayer de los efectos queda fija al mundo, igual que en v1
+      ox = Math.floor(ox / 4) * 4
+      oy = Math.floor(oy / 4) * 4
+    }
+    this.fx.setView(ox, oy, z)
+    for (const s of [this.fxSprite, this.lightSprite]) {
+      s.position.set(ox, oy)
+      s.scale.set(1 / z)
+    }
+    const x0 = -wx / z - 1
+    const x1 = x0 + VIEW_W / z + 2
+    for (let i = 0; i < this.backChunks.length; i++) {
+      const b = this.backChunks[i]
+      const vis = b.x < x1 && b.x + b.texture.width > x0
+      b.visible = vis
+      this.frontChunks[i].visible = vis
+    }
+  }
+
+  // Capas del fondo repetidas a lo ancho (alternando con la copia espejada, sin costuras) y con parallax:
+  // cada capa se corre una fracción f del movimiento del terreno, se achica con el zoom en esa proporción
+  // y se apoya entre el pie de la pantalla (f = 0) y el pie del mundo (f = 1).
+  private placeBackground(t: Terrain): void {
+    const n = this.bgLayers.length
+    const z = this.camZ
+    const footWorld = this.camY + t.h * z
+    this.bgLayers.forEach((L, i) => {
+      const f = i === 0 || n < 2 ? SKY_PARALLAX : 0.15 + (0.55 * i) / (n - 1)
+      const fs = i === 0 || n < 2 ? 0 : f // el cielo no se sacude (como en v1)
+      const s = 1 + (z - 1) * f
+      const tw = L.tex.width * s
+      const th = L.tex.height * s
+      let scroll = -this.camX * f
+      let foot = VIEW_H + (footWorld - VIEW_H) * f
+      if (s === 1) {
+        scroll = Math.round(scroll)
+        foot = Math.round(foot)
+      }
+      const first = Math.floor(scroll / tw)
+      const startX = first * tw - scroll + Math.round(this.shakeX * fs)
+      const y = foot - th + Math.round(this.shakeY * fs)
+      const need = Math.max(1, Math.ceil((VIEW_W - startX) / tw))
+      while (L.tiles.length < need) {
+        const sp = new Sprite(L.tex)
+        L.tiles.push(sp)
+        L.holder.addChild(sp)
+      }
+      L.tiles.forEach((sp, k) => {
+        sp.visible = k < need
+        if (k >= need) return
+        const mirrored = ((first + k) & 1) === 1
+        const x = startX + k * tw
+        sp.scale.set(mirrored ? -s : s, s)
+        sp.position.set(mirrored ? x + tw : x, y)
+      })
+    })
   }
 
   private onEvent(ev: GameEvent, frame: RenderFrame): void {
@@ -342,7 +461,7 @@ export class PixiRenderer implements GameRenderer {
     }
     switch (ev.type) {
       case 'impact':
-        if (ev.y > WORLD_H + 30 || ev.x < -60 || ev.x > WORLD_W + 60) return
+        if (ev.y > frame.terrain.h + 30 || ev.x < -60 || ev.x > frame.terrain.w + 60) return
         {
           // la excavadora cava en la dirección en que venía el proyectil más cercano
           let dir = { dx: 0, dy: 1 }
@@ -356,7 +475,7 @@ export class PixiRenderer implements GameRenderer {
           }
           this.fx.explosion(ev.blast, ev.x, ev.y, ev.radius, ev.debris, dir.dx, dir.dy)
         }
-        if (SCORCH_STYLES.has(ev.blast)) this.painter.addCrater(ev.x, ev.y, ev.radius)
+        if (SCORCH_STYLES.has(ev.blast)) this.painter?.addCrater(ev.x, ev.y, ev.radius)
         this.impactSeen = true
         // el tanque más amenazado grita '!', los otros cercanos se preguntan '?'
         {
@@ -398,7 +517,7 @@ export class PixiRenderer implements GameRenderer {
         break
       case 'burn':
         this.fx.burn(ev.x, ev.y, ev.w)
-        this.painter.addCrater(ev.x + ev.w / 2, ev.y, Math.max(3, ev.w / 2))
+        this.painter?.addCrater(ev.x + ev.w / 2, ev.y, Math.max(3, ev.w / 2))
         break
     }
   }
@@ -425,7 +544,6 @@ export class PixiRenderer implements GameRenderer {
     const weapon = FX_TEST ?? frame.weapon ?? shooter?.weapon
     const n = frame.projectiles.length
     frame.projectiles.forEach((p, i) => {
-      if (p.y < -4) return
       const st = this.trailLast.length === n ? this.trailLast[i] : undefined
       if (st && this.rolling(frame, st.ground)) {
         const floor = this.floorBelow(frame, p.x, p.y)
@@ -482,7 +600,7 @@ export class PixiRenderer implements GameRenderer {
         // racimo: se abre en el apogeo
         const cx = proj.reduce((a, p) => a + p.x, 0) / proj.length
         const cy = proj.reduce((a, p) => a + p.y, 0) / proj.length
-        if (cy > -10) this.fx.pop(cx, cy)
+        if (cy > this.viewTop - 10) this.fx.pop(cx, cy)
       }
       if (this.trailLast.length !== proj.length) this.trailLast = proj.map((p) => ({ x: p.x, y: p.y, acc: 0, dx: 0, dy: 1, ground: 0, spin: 0 }))
       proj.forEach((pr, i) => {
@@ -518,7 +636,7 @@ export class PixiRenderer implements GameRenderer {
           let s = TRAIL_STEP - last.acc
           for (; s <= d; s += TRAIL_STEP) {
             const y = last.y + (dy * s) / d
-            if (y > -20) this.fx.trailPoint(last.x + (dx * s) / d, y)
+            if (y > this.viewTop - 20) this.fx.trailPoint(last.x + (dx * s) / d, y)
           }
           last.acc = d - (s - TRAIL_STEP)
         }
@@ -592,17 +710,38 @@ export class PixiRenderer implements GameRenderer {
     }
   }
 
-  // Luz fija de los focos: solo se repinta si cambian.
+  // Fila de mundo del borde de arriba de la vista (sin sacudón).
+  private get viewTop(): number {
+    return -this.camY / this.camZ
+  }
+
+  // Luz fija de los focos: un sprite aditivo por foco, solo se rehacen si cambian. La textura depende de dónde
+  // cae el centro respecto de la trama de Bayer (16 variantes): queda igual que pintada en un buffer del mundo.
   private syncLamps(props: Prop[]): void {
     const lamps = props.filter((p) => p.kind === 'lamp' && p.alive)
     const key = lamps.map((p) => `${Math.round(p.x)},${Math.round(p.y)}`).join(';')
     if (key === this.lampKey) return
     this.lampKey = key
-    this.lamps.clear()
-    for (const p of lamps) this.lamps.light(p.x + p.w / 2, p.y + p.h + 2, 34, 0xffb04a, 0.55)
-    this.lamps.flush()
-    this.lampTex?.source.update()
-    this.lampSprite.visible = lamps.length > 0
+    for (const c of this.lampLayer.removeChildren()) c.destroy()
+    for (const p of lamps) {
+      const cx = Math.round(p.x + p.w / 2)
+      const cy = Math.round(p.y + p.h + 2)
+      const bx = Math.floor((cx - LAMP_R) / 4) * 4
+      const by = Math.floor((cy - LAMP_R) / 4) * 4
+      const k = `${cx - bx},${cy - by}`
+      let tex = this.lampTex.get(k)
+      if (!tex) {
+        const r = new Raster(LAMP_TEX, LAMP_TEX)
+        r.light(cx - bx, cy - by, LAMP_R, 0xffb04a, 0.55)
+        r.flush()
+        tex = canvasTexture(r.canvas)
+        this.lampTex.set(k, tex)
+      }
+      const s = new Sprite(tex)
+      s.blendMode = 'add'
+      s.position.set(bx, by)
+      this.lampLayer.addChild(s)
+    }
   }
 
   private upload(): void {
@@ -622,8 +761,12 @@ export class PixiRenderer implements GameRenderer {
     this.lightSprite.visible = light.dirty
   }
 
+  // Flecha en el borde de arriba de la pantalla por cada proyectil que sale por arriba de la vista.
   private syncArrows(art: Art, frame: RenderFrame): void {
-    const off = frame.projectiles.filter((p) => p.y < 0 && p.x > -20 && p.x < WORLD_W + 20)
+    const z = this.camZ
+    const off = frame.projectiles
+      .map((p) => ({ x: this.camX + p.x * z, y: this.camY + p.y * z }))
+      .filter((p) => p.y < 0 && p.x > -20 && p.x < VIEW_W + 20)
     while (this.arrows.length < off.length) {
       const s = new Sprite(art.arrow)
       this.arrows.push(s)
@@ -634,7 +777,7 @@ export class PixiRenderer implements GameRenderer {
       s.visible = !!p
       if (!p) return
       const w = s.texture.width
-      s.x = Math.max(2, Math.min(WORLD_W - w - 2, Math.round(p.x - w / 2)))
+      s.x = Math.max(2, Math.min(VIEW_W - w - 2, Math.round(p.x - w / 2)))
       s.y = 2 + (Math.floor(this.time * 6) % 2)
     })
   }
