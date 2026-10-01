@@ -1,10 +1,15 @@
 // Terreno por pixel: misma lógica visual que paintTerrainBack/paintTerrainFront/paintTufts de look-test.mjs.
-// Se pinta en dos buffers (pared de fondo y frente) para que la utilería quede entre los dos.
+// Se pinta en dos capas (pared de fondo y frente) para que la utilería quede entre las dos.
+// v2: el mundo puede medir hasta 2400 de ancho. Cada capa guarda los pixels del mundo entero en memoria,
+// pero se sube a la GPU en trozos de CHUNK_W de ancho: solo se repinta y se sube el trozo que cambió, y
+// los trozos fuera de la vista se pintan de a uno por frame (o cuando entran en la vista).
 import { AIR, BEAM, DIRT, POST, SLAT, STONE, WOOD } from '../../sim/types'
 import type { Terrain } from '../../sim/types'
 import type { Art, BiomePalette } from './assets'
 import { MATERIAL_FLAT, OUT } from './fallback'
-import { Raster, bayer, mix, mul, rnd } from './raster'
+import { bayer, mix, mul, rnd } from './raster'
+
+export const CHUNK_W = 256
 
 export interface Crater {
   x: number
@@ -23,27 +28,70 @@ export interface Rect {
   y1: number
 }
 
-export class TerrainPainter {
-  readonly back: Raster
-  readonly front: Raster
-  craters: Crater[] = []
-  private prevFront: Uint8Array | null = null
-  private prevBack: Uint8Array | null = null
-  private pending: Rect | null = null
+export interface Chunk {
+  x0: number
+  w: number
+  canvas: HTMLCanvasElement
+  ctx: CanvasRenderingContext2D
+}
+
+// Pixels RGBA del mundo entero, volcados a canvases de CHUNK_W de ancho (uno por trozo).
+export class ChunkLayer {
+  readonly data: Uint8ClampedArray
+  private image: ImageData
+  readonly chunks: Chunk[] = []
 
   constructor(
     readonly w: number,
     readonly h: number,
   ) {
-    this.back = new Raster(w, h)
-    this.front = new Raster(w, h)
+    this.image = new ImageData(w, h)
+    this.data = this.image.data
+    for (let x0 = 0; x0 < w; x0 += CHUNK_W) {
+      const cw = Math.min(CHUNK_W, w - x0)
+      const canvas = document.createElement('canvas')
+      canvas.width = cw
+      canvas.height = h
+      const ctx = canvas.getContext('2d')
+      if (!ctx) throw new Error('Sin canvas 2D')
+      this.chunks.push({ x0, w: cw, canvas, ctx })
+    }
+  }
+
+  // Copia el rectángulo (ya recortado a un solo trozo) al canvas de ese trozo.
+  flush(i: number, r: Rect): void {
+    const c = this.chunks[i]
+    c.ctx.putImageData(this.image, -c.x0, 0, r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0)
+  }
+}
+
+export class TerrainPainter {
+  readonly back: ChunkLayer
+  readonly front: ChunkLayer
+  craters: Crater[] = []
+  private prevFront: Uint8Array | null = null
+  private prevBack: Uint8Array | null = null
+  private pending: (Rect | null)[] // por trozo, ya con el margen de los bordes
+  private changed: number[] = []
+
+  constructor(
+    readonly w: number,
+    readonly h: number,
+  ) {
+    this.back = new ChunkLayer(w, h)
+    this.front = new ChunkLayer(w, h)
+    this.pending = this.back.chunks.map(() => null)
+  }
+
+  get chunkCount(): number {
+    return this.pending.length
   }
 
   reset(): void {
     this.craters = []
     this.prevFront = null
     this.prevBack = null
-    this.pending = null
+    this.pending.fill(null)
   }
 
   addCrater(x: number, y: number, r: number): void {
@@ -53,20 +101,8 @@ export class TerrainPainter {
     this.markDirty({ x0: Math.floor(x - m), y0: Math.floor(y - m), x1: Math.ceil(x + m), y1: Math.ceil(y + m) })
   }
 
-  markDirty(r: Rect): void {
-    const p = this.pending
-    this.pending = p ? { x0: Math.min(p.x0, r.x0), y0: Math.min(p.y0, r.y0), x1: Math.max(p.x1, r.x1), y1: Math.max(p.y1, r.y1) } : r
-  }
-
-  // Devuelve el rectángulo repintado, o null si no hizo falta.
-  update(terrain: Terrain, art: Art, pal: BiomePalette, changed: boolean): Rect | null {
-    if (changed) {
-      const diff = this.diff(terrain)
-      if (diff) this.markDirty(diff)
-    }
-    const p = this.pending
-    if (!p) return null
-    this.pending = null
+  // Marca para repintar (con 8 px de margen: bordes, oclusión y pasto dependen de los vecinos), repartido por trozo.
+  markDirty(p: Rect): void {
     const M = 8
     const r: Rect = {
       x0: Math.max(0, p.x0 - M),
@@ -74,21 +110,43 @@ export class TerrainPainter {
       x1: Math.min(this.w, p.x1 + M),
       y1: Math.min(this.h, p.y1 + M),
     }
-    if (r.x1 <= r.x0 || r.y1 <= r.y0) return null
-    this.paint(terrain, art, pal, r)
-    this.back.flush(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0)
-    this.front.flush(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0)
-    return r
+    if (r.x1 <= r.x0 || r.y1 <= r.y0) return
+    const i0 = Math.floor(r.x0 / CHUNK_W)
+    const i1 = Math.min(this.pending.length - 1, Math.floor((r.x1 - 1) / CHUNK_W))
+    for (let i = i0; i <= i1; i++) {
+      const c = this.back.chunks[i]
+      const q: Rect = { x0: Math.max(r.x0, c.x0), y0: r.y0, x1: Math.min(r.x1, c.x0 + c.w), y1: r.y1 }
+      const p0 = this.pending[i]
+      this.pending[i] = p0 ? { x0: Math.min(p0.x0, q.x0), y0: Math.min(p0.y0, q.y0), x1: Math.max(p0.x1, q.x1), y1: Math.max(p0.y1, q.y1) } : q
+    }
   }
 
-  // true si la grilla nueva difiere en más pixels de los que puede cambiar un tiro (partida nueva)
-  bigChange(t: Terrain): boolean {
-    const pf = this.prevFront
-    if (!pf || pf.length !== t.front.length) return false
-    const f = t.front
-    let n = 0
-    for (let i = 0; i < f.length; i += 3) if (f[i] !== pf[i] && ++n > 8000) return true
-    return false
+  // Repinta lo pendiente de los trozos que tocan [viewX0, viewX1) y, como mucho, de un trozo más fuera de la vista.
+  // Devuelve los índices de los trozos repintados (para subir sus texturas).
+  update(terrain: Terrain, art: Art, pal: BiomePalette, changed: boolean, viewX0 = 0, viewX1 = Infinity): number[] {
+    if (changed) {
+      const diff = this.diff(terrain)
+      if (diff) this.markDirty(diff)
+    }
+    const out = this.changed
+    out.length = 0
+    let spare = 1
+    for (let i = 0; i < this.pending.length; i++) {
+      const r = this.pending[i]
+      if (!r) continue
+      const c = this.back.chunks[i]
+      const visible = c.x0 + c.w > viewX0 && c.x0 < viewX1
+      if (!visible) {
+        if (spare <= 0) continue
+        spare--
+      }
+      this.pending[i] = null
+      this.paint(terrain, art, pal, r)
+      this.back.flush(i, r)
+      this.front.flush(i, r)
+      out.push(i)
+    }
+    return out
   }
 
   private diff(t: Terrain): Rect | null {

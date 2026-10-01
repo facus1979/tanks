@@ -1,7 +1,8 @@
 // Carga public/assets/manifest.json (forma de ../manifest.ts). Todo lo que falte se reemplaza por arte de reserva.
 import { Rectangle, Texture } from 'pixi.js'
 import type { Biome, CrewId } from '../../sim/types'
-import { BIOMES, CREWS, TANK_COLORS, WORLD_H, WORLD_W } from '../../sim/types'
+import { BIOMES, CREWS, TANK_COLORS } from '../../sim/types'
+import { VIEW_H, VIEW_W } from '../types'
 import type { AssetManifest, Strip } from '../manifest'
 import * as fb from './fallback'
 import { bayer, mix } from './raster'
@@ -122,17 +123,17 @@ async function loadManifest(): Promise<Partial<AssetManifest> | null> {
 function skyFallback(biome: Biome): HTMLCanvasElement {
   const stops = fb.BIOME_SKY[biome]
   const c = document.createElement('canvas')
-  c.width = WORLD_W
-  c.height = WORLD_H
+  c.width = VIEW_W
+  c.height = VIEW_H
   const ctx = c.getContext('2d')
   if (!ctx) return c
-  const img = ctx.createImageData(WORLD_W, WORLD_H)
-  for (let y = 0; y < WORLD_H; y++) {
-    for (let x = 0; x < WORLD_W; x++) {
-      const t = Math.min(1, Math.floor((y / WORLD_H) * 22 + bayer(x, y)) / 22) * (stops.length - 1)
+  const img = ctx.createImageData(VIEW_W, VIEW_H)
+  for (let y = 0; y < VIEW_H; y++) {
+    for (let x = 0; x < VIEW_W; x++) {
+      const t = Math.min(1, Math.floor((y / VIEW_H) * 22 + bayer(x, y)) / 22) * (stops.length - 1)
       const i0 = Math.min(stops.length - 2, Math.floor(t))
       const col = mix(stops[i0], stops[i0 + 1], t - i0)
-      const i = (y * WORLD_W + x) * 4
+      const i = (y * VIEW_W + x) * 4
       img.data[i] = (col >> 16) & 255
       img.data[i + 1] = (col >> 8) & 255
       img.data[i + 2] = col & 255

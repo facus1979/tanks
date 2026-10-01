@@ -1,4 +1,6 @@
-// Partículas y explosiones, dibujadas en pixels enteros sobre un buffer 800×450 (ver explosion()/cluster() del look-test).
+// Partículas y explosiones, dibujadas en pixels enteros (ver explosion()/cluster() del look-test).
+// v2: las partículas viven en coordenadas de mundo y se dibujan en buffers del tamaño de la pantalla
+// (fx y light), que el renderer ubica sobre la parte visible del mundo con Raster.setView.
 import type { BlastStyle, Terrain } from '../../sim/types'
 import { AIR, WEAPONS } from '../../sim/types'
 import { DEBRIS_COLORS, OUT } from './fallback'
@@ -225,9 +227,24 @@ export class Fx {
   private terrain: Terrain | null = null
   wreckPos: (id: number) => { x: number; y: number } | null = () => null
 
+  // w × h: tamaño de los buffers (la pantalla más un margen), no del mundo.
   constructor(w: number, h: number) {
     this.fx = new Raster(w, h)
     this.light = new Raster(w, h)
+  }
+
+  // Ubica los dos buffers sobre el mundo (ver Raster.setView).
+  setView(ox: number, oy: number, z: number): void {
+    this.fx.setView(ox, oy, z)
+    this.light.setView(ox, oy, z)
+  }
+
+  private get worldW(): number {
+    return this.terrain?.w ?? this.fx.w
+  }
+
+  private get worldH(): number {
+    return this.terrain?.h ?? this.fx.h
   }
 
   setTerrain(t: Terrain): void {
@@ -986,10 +1003,11 @@ export class Fx {
     const w = Math.max(1, g.w * (1 - u * 0.6))
     const dither = 1 - u
     const fx = this.fx
-    const x0 = Math.max(0, Math.floor(g.x - rad - w))
-    const x1 = Math.min(fx.w - 1, Math.ceil(g.x + rad + w))
-    const y0 = Math.max(0, Math.floor(g.y - rad - w))
-    const y1 = Math.min(fx.h - 1, Math.ceil(g.y + rad + w))
+    // recortado a la parte del mundo que cubre el buffer
+    const x0 = Math.max(Math.ceil(fx.left), Math.floor(g.x - rad - w))
+    const x1 = Math.min(Math.floor(fx.right) - 1, Math.ceil(g.x + rad + w))
+    const y0 = Math.max(Math.ceil(fx.top), Math.floor(g.y - rad - w))
+    const y1 = Math.min(Math.floor(fx.bottom) - 1, Math.ceil(g.y + rad + w))
     const outer = (rad + w) * (rad + w)
     const inner = Math.max(0, rad - w) ** 2
     const edge = Math.max(0, rad + w - 1.5) ** 2
@@ -1063,7 +1081,9 @@ export class Fx {
         p.y = ny
       }
     }
-    this.debris = this.debris.filter((p) => p.age < p.life && p.x > -10 && p.x < this.fx.w + 10 && p.y < this.fx.h + 10)
+    const W = this.worldW
+    const H = this.worldH
+    this.debris = this.debris.filter((p) => p.age < p.life && p.x > -10 && p.x < W + 10 && p.y < H + 10)
 
     for (const p of this.sparks) {
       p.age += dt
@@ -1153,7 +1173,7 @@ export class Fx {
         g.age = g.life
       }
     }
-    this.drops = this.drops.filter((g) => g.age < g.life && g.x > -10 && g.x < this.fx.w + 10 && g.y < this.fx.h + 10)
+    this.drops = this.drops.filter((g) => g.age < g.life && g.x > -10 && g.x < W + 10 && g.y < H + 10)
   }
 
   decay(dt: number): void {
