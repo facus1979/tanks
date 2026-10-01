@@ -1,9 +1,9 @@
 // HUD al estilo Broforce: un canvas de 800×450 sobre el del juego, escalado igual y pixelado.
-import { ITEM_ORDER, WEAPONS, WORLD_H, WORLD_W, type CrewId, type ItemId, type WeaponId } from '../sim/types'
+import { ITEM_ORDER, WEAPONS, WORLD_H, WORLD_W, type CrewId, type ItemId, type Vec2, type WeaponId } from '../sim/types'
 import type { Viewport } from '../render/types'
 import { uiAssets, type UiAssets } from './assets'
 import { OUT, css, drawText, measure } from './pixelfont'
-import type { HudExtras, HudNet } from './types'
+import type { HudExtras, HudNet, MinimapInput } from './types'
 
 // Tecla de cada ítem usable (el paracaídas es pasivo). La lee también el flujo de entrada.
 export const ITEM_KEYS: Partial<Record<ItemId, string>> = { shield: 'Q', fuel: 'F', repair: 'R', tracer: 'T' }
@@ -51,7 +51,7 @@ const BAR_W = SLOT * WEAPON_SLOTS.length + 6
 const BAR_H = 38
 const BOX = 16
 
-export class Hud {
+export class Hud implements MinimapInput {
   private canvas: HTMLCanvasElement
   private ctx: CanvasRenderingContext2D
   private key = ''
@@ -105,6 +105,11 @@ export class Hud {
     if (model.extras?.net) this.net(assets, model.extras.net)
     this.barVisible = model.showBar
     if (model.showBar) this.weaponBar(assets, model)
+  }
+
+  // v2: stub del contrato; lo implementa el área vistas junto con el minimapa.
+  minimapAt(_clientX: number, _clientY: number): Vec2 | null {
+    return null
   }
 
   // Arma bajo un punto de la ventana (clientX/Y), o null.
