@@ -124,7 +124,7 @@ export function createMatch(config: MatchConfig): GameState {
 function setupRound(state: GameState): void {
   const rng = new Rng(roundSeed(state.seed, state.round))
   const biome = biomeFor(state.biomeMode, state.seed, state.round)
-  const gen = generate(biome, rng, state.players.length)
+  const gen = generate(biome, rng, state.players.length, state.width, state.height)
   state.biome = biome
   state.terrain = gen.terrain
   state.props = gen.props

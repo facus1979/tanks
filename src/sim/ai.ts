@@ -1,5 +1,5 @@
-import { fly, muzzle } from './ballistics'
-import { applyCommand, cloneState } from './game'
+import { fly, muzzle, skylineOf } from './ballistics'
+import { applyCommand } from './game'
 import { blastDamage } from './physics'
 import { Rng, hashSeed } from './rng'
 import { NAPALM_DPS, NAPALM_SPREAD, resolveShot } from './weapons'
@@ -9,10 +9,12 @@ import {
   TANK_H,
   WEAPONS,
   WEAPON_ORDER,
+  WORLD_W,
   type Difficulty,
   type GameState,
   type ItemId,
   type Player,
+  type Terrain,
   type WeaponId,
 } from './types'
 
@@ -20,6 +22,15 @@ const ERROR: Record<Difficulty, { angle: number; power: number }> = {
   easy: { angle: 9, power: 12 },
   normal: { angle: 6, power: 7 },
   hard: { angle: 1, power: 1.5 },
+}
+
+// v2: escala del mapa (k = ancho / 800). Con mapas más anchos la misma potencia cubre más
+// pixels, así que la búsqueda va más fina y el error en grados y potencia se achica para que
+// el error en pixels quede parecido al de v1 (ERROR_SCALE_EXP: 1 = mismo error en pixels).
+// Con k = 1 todo da igual que en v1.
+const ERROR_SCALE_EXP = 1
+function mapScale(state: GameState): number {
+  return state.terrain.w / WORLD_W
 }
 
 // Cuánto "cuesta" gastar cada munición: la IA guarda lo especial para cuando rinde.
@@ -116,10 +127,15 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
     return { angle: t.x > actor.x ? 30 : 150, power: 45, weapon: 'digger', ...extra }
   }
 
+  const k = mapScale(state)
+  const errScale = k > 1 ? k ** ERROR_SCALE_EXP : 1
   const err = ERROR[difficulty]
+  // en mapas grandes un punto de potencia son muchos pixels: el plan va con un decimal
+  const q = k > 1 ? 10 : 1
+  const round = (n: number) => Math.round(n * q) / q
   const plan: ShotPlan = {
-    angle: clamp(Math.round(best.angle + (rand() * 2 - 1) * err.angle), 0, 180),
-    power: clamp(Math.round(best.power + (rand() * 2 - 1) * err.power), 10, 100),
+    angle: clamp(round(best.angle + ((rand() * 2 - 1) * err.angle) / errScale), 0, 180),
+    power: clamp(round(best.power + ((rand() * 2 - 1) * err.power) / errScale), 10, 100),
     weapon: best.weapon,
   }
   if (move !== 0) plan.move = move
@@ -149,8 +165,9 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   let best: Candidate = { angle: actor.angle, power: actor.power, weapon: weapons[0], score: -Infinity }
   let total = 0
   let blocked = 0
+  const sky = skylineOf(state.terrain, state.players, state.props)
   const consider = (angle: number, power: number) => {
-    const r = estimate(state, actor, targets, weapons, angle, power)
+    const r = estimate(state, actor, targets, weapons, angle, power, sky)
     total++
     if (r.blocked) blocked++
     for (const c of r.list) {
@@ -159,13 +176,22 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
       if (c.score > best.score) best = c
     }
   }
+  const k = mapScale(state)
   const da = fine ? 6 : 12
   const dp = fine ? 4 : 8
-  for (let angle = 6; angle <= 174; angle += da) for (let power = 24; power <= 100; power += dp) consider(angle, power)
+  // en mapas anchos la potencia mínima de 24 ya tira lejos: se busca desde más abajo
+  const p0 = k > 1 ? 12 : 24
+  for (let angle = 6; angle <= 174; angle += da) for (let power = p0; power <= 100; power += dp) consider(angle, power)
   if (fine) {
     const a0 = best.angle
     const p0 = best.power
     for (let a = -4; a <= 4; a += 1) for (let p = -3; p <= 3; p += 1) consider(clamp(a0 + a, 0, 180), clamp(p0 + p, 10, 100))
+  }
+  if (k > 1) {
+    // segundo refinamiento: un punto de potencia o un grado ya son decenas de pixels
+    const a1 = best.angle
+    const p1 = best.power
+    for (let a = -1; a <= 1; a += 0.5) for (let p = -1; p <= 1; p += 0.25) if (a !== 0 || p !== 0) consider(clamp(a1 + a, 0, 180), clamp(p1 + p, 10, 100))
   }
   // verificación con la simulación completa (racimo, rodadora y napalm no se estiman bien)
   const pool = [...perWeapon.values(), best]
@@ -184,8 +210,10 @@ function estimate(
   weapons: WeaponId[],
   angle: number,
   power: number,
+  skyline?: Int16Array,
 ): { list: Candidate[]; blocked: boolean } {
   const flight = fly({
+    skyline,
     terrain: state.terrain,
     players: state.players,
     props: state.props,
@@ -218,8 +246,35 @@ function estimate(
   return { list, blocked }
 }
 
+// Grilla de trabajo para simulate: se reusa entre llamadas para no generar basura (en los mapas
+// grandes cada copia son megas y las pausas del GC se notaban en el turno de la IA). Nunca sale
+// de simulate, así que reusarla no cambia ningún resultado.
+let scratch: Terrain | null = null
+
+function scratchCopy(t: Terrain): Terrain {
+  if (!scratch || scratch.front.length !== t.front.length) {
+    scratch = { w: t.w, h: t.h, front: new Uint8Array(t.front.length), back: new Uint8Array(t.back.length) }
+  }
+  scratch.w = t.w
+  scratch.h = t.h
+  scratch.front.set(t.front)
+  scratch.back.set(t.back)
+  return scratch
+}
+
+// Copia del estado como cloneState, pero con la grilla de trabajo.
+function scratchState(state: GameState): GameState {
+  return {
+    ...state,
+    terrain: scratchCopy(state.terrain),
+    props: state.props.map((p) => ({ ...p })),
+    players: state.players.map((p) => ({ ...p, ammo: { ...p.ammo }, items: { ...p.items } })),
+    earnings: { ...state.earnings },
+  }
+}
+
 function simulate(state: GameState, c: Candidate): number {
-  const s = cloneState(state)
+  const s = scratchState(state)
   const actor = s.players[s.current]
   actor.angle = c.angle
   actor.power = c.power
