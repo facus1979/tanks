@@ -1,18 +1,20 @@
 // Sala online: código y link, 4 casilleros con retrato, ajustes de partida (anfitrión) y empezar / salir.
-import { CREWS, TANK_COLORS, type CrewId } from '../sim/types'
+import { CREWS, MAP_SIZE_ORDER, TANK_COLORS, type CrewId } from '../sim/types'
 import type { LobbySlot } from '../net/types'
 import { bindNav, el, label, portrait, screenRoot, setLabel, setPortrait, type Nav } from './kit'
+import { SIZE_NAMES } from './menu'
 import type { LobbyModel, LobbyView } from './types'
 
 type Handlers = Parameters<LobbyView['show']>[1]
 type SlotKind = 'human' | 'ai' | 'off'
-type OptionKey = 'rounds' | 'difficulty' | 'biome' | 'turnSeconds'
+type OptionKey = 'rounds' | 'difficulty' | 'biome' | 'size' | 'turnSeconds'
 
 const KIND_CYCLE: SlotKind[] = ['human', 'ai', 'off']
 const KIND_NAMES: Record<SlotKind, string> = { human: 'HUMANO', ai: 'IA', off: 'VACIO' }
 const CREW_NAMES: Record<CrewId, string> = { bandana: 'BANDANA', sarge: 'SARGENTO', rookie: 'NOVATO', desert: 'DESIERTO' }
 
-const OPTIONS: { key: OptionKey; name: string; values: { v: number | string; text: string }[] }[] = [
+// fallback: el valor que se muestra si el lobby no trae la clave (un anfitrión anterior a v2 no manda size)
+const OPTIONS: { key: OptionKey; name: string; values: { v: number | string; text: string }[]; fallback?: number | string }[] = [
   { key: 'rounds', name: 'RONDAS', values: [1, 3, 5, 10].map((n) => ({ v: n, text: String(n) })) },
   {
     key: 'difficulty',
@@ -34,6 +36,7 @@ const OPTIONS: { key: OptionKey; name: string; values: { v: number | string; tex
       { v: 'rotate', text: 'ROTATIVO' },
     ],
   },
+  { key: 'size', name: 'MAPA', values: MAP_SIZE_ORDER.map((id) => ({ v: id, text: SIZE_NAMES[id] })), fallback: 'small' },
   {
     key: 'turnSeconds',
     name: 'TIEMPO TURNO',
@@ -45,6 +48,11 @@ const OPTIONS: { key: OptionKey; name: string; values: { v: number | string; tex
     ],
   },
 ]
+
+function optionValue(m: LobbyModel, i: number): number | string | undefined {
+  const o = OPTIONS[i]
+  return m.lobby[o.key] ?? o.fallback
+}
 
 export function createLobbyView(root?: HTMLElement): LobbyView {
   return new LobbyScreen(root ?? screenRoot('lobby-view'))
@@ -241,9 +249,10 @@ class LobbyScreen implements LobbyView {
     })
     this.optBox.classList.toggle('ro', !host)
     OPTIONS.forEach((o, i) => {
-      const v = o.values.find((x) => x.v === m.lobby[o.key])
+      const val = optionValue(m, i)
+      const v = o.values.find((x) => x.v === val)
       const e = this.optEls[i]
-      setLabel(e.value, v ? v.text : String(m.lobby[o.key]).toUpperCase(), host ? 0xffffff : 0xc8bca8)
+      setLabel(e.value, v ? v.text : String(val).toUpperCase(), host ? 0xffffff : 0xc8bca8)
       e.btn.classList.toggle('sel', cur?.t === 'opt' && cur.i === i)
     })
     this.startBtn.hidden = !host
@@ -281,7 +290,7 @@ class LobbyScreen implements LobbyView {
     const m = this.model
     if (!m || !this.isHost() || !this.handlers) return
     const o = OPTIONS[i]
-    const at = o.values.findIndex((x) => x.v === m.lobby[o.key])
+    const at = o.values.findIndex((x) => x.v === optionValue(m, i))
     const next = o.values[(at + dir + o.values.length) % o.values.length]
     this.handlers.setOption(o.key, next.v)
   }

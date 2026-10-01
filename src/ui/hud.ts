@@ -1,8 +1,9 @@
 // HUD al estilo Broforce: un canvas de 800×450 sobre el del juego, escalado igual y pixelado.
-import { ITEM_ORDER, WEAPONS, WORLD_H, WORLD_W, type CrewId, type ItemId, type Vec2, type WeaponId } from '../sim/types'
-import type { Viewport } from '../render/types'
+import { ITEM_ORDER, WEAPONS, type CrewId, type ItemId, type Vec2, type WeaponId } from '../sim/types'
+import { VIEW_H, VIEW_W, type Viewport } from '../render/types'
 import { uiAssets, type UiAssets } from './assets'
 import { OUT, css, drawText, measure } from './pixelfont'
+import { MinimapTerrain, drawEdgeArrows, drawMinimap, minimapLayout, minimapPoint, type MinimapLayout } from './minimap'
 import type { HudExtras, HudNet, MinimapInput } from './types'
 
 // Tecla de cada ítem usable (el paracaídas es pasivo). La lee también el flujo de entrada.
@@ -50,6 +51,8 @@ const SLOT = 18
 const BAR_W = SLOT * WEAPON_SLOTS.length + 6
 const BAR_H = 38
 const BOX = 16
+const BLINK_MS = 280 // titileo del tanque del turno en el minimapa
+const MM_GAP = 6 // del borde de abajo del minimapa (marco incluido) al panel de puntería
 
 export class Hud implements MinimapInput {
   private canvas: HTMLCanvasElement
@@ -57,11 +60,13 @@ export class Hud implements MinimapInput {
   private key = ''
   private vp: Viewport | null = null
   private barVisible = false
+  private mm: MinimapLayout | null = null // dónde quedó el minimapa en el último dibujo
+  private mmTerrain = new MinimapTerrain()
 
   constructor(private root: HTMLElement) {
     this.canvas = document.createElement('canvas')
-    this.canvas.width = WORLD_W
-    this.canvas.height = WORLD_H
+    this.canvas.width = VIEW_W
+    this.canvas.height = VIEW_H
     this.canvas.className = 'hud-canvas'
     const ctx = this.canvas.getContext('2d')
     if (!ctx) throw new Error('Sin canvas 2D para el HUD')
@@ -91,36 +96,62 @@ export class Hud implements MinimapInput {
   }
 
   update(model: HudModel): void {
-    const key = JSON.stringify(model)
+    const mm = model.extras?.minimap ?? null
+    // la grilla no entra en la clave (son bytes); su cambio lo marca terrainVersion
+    const blink = !!mm && mm.tanks.some((t) => t.current && t.alive) && Math.floor(performance.now() / BLINK_MS) % 2 === 0
+    const key = JSON.stringify(model, (k, v) => (k === 'terrain' ? undefined : v)) + (blink ? '*' : '')
     if (key === this.key) return
     this.key = key
     const ctx = this.ctx
     const assets = uiAssets()
-    ctx.clearRect(0, 0, WORLD_W, WORLD_H)
+    ctx.clearRect(0, 0, VIEW_W, VIEW_H)
     if (model.human) this.side(assets, model.human, false)
-    const right = model.rival ? this.side(assets, model.rival, true) : WORLD_W - 2
+    const right = model.rival ? this.side(assets, model.rival, true) : VIEW_W - 2
     this.compacts(assets, model.others, right, model.showBar)
-    this.top(assets, model)
-    if (model.extras) this.extras(assets, model.extras, model.showBar)
-    if (model.extras?.net) this.net(assets, model.extras.net)
+    // v2: el minimapa va arriba al centro y el panel de puntería baja debajo de él
+    this.mm = mm ? minimapLayout(mm.terrain) : null
+    let topY = 3
+    if (mm && this.mm) {
+      drawMinimap(ctx, this.mm, mm, this.mmTerrain.image(mm.terrain, mm.terrainVersion), blink)
+      topY = this.mm.y + this.mm.h + MM_GAP
+    }
+    const below = this.top(assets, model, topY)
+    let leftBottom = 3
+    let rightBottom = 3
+    if (model.extras) leftBottom = this.extras(assets, model.extras, model.showBar)
+    if (model.extras?.net) rightBottom = this.net(assets, model.extras.net, below)
+    if (mm) {
+      const pad = Math.max(10, assets.font.h + 4)
+      drawEdgeArrows(ctx, assets.font, mm, { leftTop: leftBottom + pad, rightTop: rightBottom + pad, bottom: VIEW_H - 64 })
+    }
     this.barVisible = model.showBar
     if (model.showBar) this.weaponBar(assets, model)
   }
 
-  // v2: stub del contrato; lo implementa el área vistas junto con el minimapa.
-  minimapAt(_clientX: number, _clientY: number): Vec2 | null {
-    return null
+  // Punto de la ventana → mundo si cae sobre el minimapa (con margen táctil); si no, null.
+  minimapAt(clientX: number, clientY: number): Vec2 | null {
+    const mm = this.mm
+    if (!mm || !this.vp || this.root.hidden) return null
+    const p = this.toLogical(clientX, clientY)
+    return p ? minimapPoint(mm, p.x, p.y) : null
+  }
+
+  private toLogical(clientX: number, clientY: number): { x: number; y: number } | null {
+    const rect = this.root.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) return null
+    return { x: ((clientX - rect.left) / rect.width) * VIEW_W, y: ((clientY - rect.top) / rect.height) * VIEW_H }
   }
 
   // Arma bajo un punto de la ventana (clientX/Y), o null.
   weaponAt(clientX: number, clientY: number): WeaponId | null {
     const vp = this.vp
     if (!vp || !this.barVisible || this.root.hidden) return null
-    const rect = this.root.getBoundingClientRect()
-    const lx = ((clientX - rect.left) / rect.width) * WORLD_W
-    const ly = ((clientY - rect.top) / rect.height) * WORLD_H
+    const p = this.toLogical(clientX, clientY)
+    if (!p) return null
+    const lx = p.x
+    const ly = p.y
     const bx = barX()
-    const by = WORLD_H - 2 - BAR_H
+    const by = VIEW_H - 2 - BAR_H
     if (ly < by + 2 || ly > by + 4 + BOX + 8 || lx < bx + 3) return null
     const i = Math.floor((lx - bx - 3) / SLOT)
     return i >= 0 && i < WEAPON_SLOTS.length ? WEAPON_SLOTS[i] : null
@@ -130,7 +161,7 @@ export class Hud implements MinimapInput {
     const ctx = this.ctx
     const font = assets.font
     const bx = barX()
-    const by = WORLD_H - 2 - BAR_H
+    const by = VIEW_H - 2 - BAR_H
     rect(ctx, bx, by, BAR_W, BAR_H, OUT)
     rect(ctx, bx + 1, by + 1, BAR_W - 2, BAR_H - 2, BRONZE)
     rect(ctx, bx + 2, by + 2, BAR_W - 4, BAR_H - 4, DARK)
@@ -180,8 +211,8 @@ export class Hud implements MinimapInput {
     const ctx = this.ctx
     const font = assets.font
     const size = 36
-    const fx = flip ? WORLD_W - 2 - size : 2
-    const fy = WORLD_H - 2 - size
+    const fx = flip ? VIEW_W - 2 - size : 2
+    const fy = VIEW_H - 2 - size
     rect(ctx, fx, fy, size, size, OUT)
     rect(ctx, fx + 1, fy + 1, size - 2, size - 2, side.alive ? side.color : 0x4a4440)
     rect(ctx, fx + 2, fy + 2, size - 4, size - 4, 0x1c1614)
@@ -205,7 +236,7 @@ export class Hud implements MinimapInput {
     const bw = Math.max(80, measure(font, name) + 12)
     const bh = Math.max(22, font.h + 17)
     const bx = flip ? fx - bw + 1 : fx + size - 1
-    const by = WORLD_H - 2 - bh
+    const by = VIEW_H - 2 - bh
     rect(ctx, bx, by, bw, bh, OUT)
     rect(ctx, bx + 1, by + 1, bw - 2, bh - 2, side.alive ? side.color : 0x4a4440)
     rect(ctx, bx + 2, by + 2, bw - 4, bh - 4, DARK)
@@ -244,9 +275,9 @@ export class Hud implements MinimapInput {
     const font = assets.font
     const ps = 20
     const h = 20
-    const limit = bar ? barX() + BAR_W + 4 : WORLD_W / 2 - 40
+    const limit = bar ? barX() + BAR_W + 4 : VIEW_W / 2 - 40
     let x = right - 4
-    let y = WORLD_H - 2 - h
+    let y = VIEW_H - 2 - h
     for (const side of list) {
       const name = side.name.toUpperCase()
       const pipW = PIPS * 7 - 3
@@ -318,7 +349,8 @@ export class Hud implements MinimapInput {
     return width
   }
 
-  private top(assets: UiAssets, model: HudModel): void {
+  // Panel de puntería centrado en y0 y el cartel de estado debajo. Devuelve la y donde terminan.
+  private top(assets: UiAssets, model: HudModel, y0: number): number {
     const ctx = this.ctx
     const font = assets.font
     const h = Math.max(20, font.h + 13)
@@ -343,8 +375,7 @@ export class Hud implements MinimapInput {
     ]
     const pad = 7
     const total = sections.reduce((a, b) => a + b, 0) + pad * (sections.length + 1)
-    const x0 = Math.round((WORLD_W - total) / 2)
-    const y0 = 3
+    const x0 = Math.round((VIEW_W - total) / 2)
     rect(ctx, x0, y0, total, h, OUT)
     rect(ctx, x0 + 1, y0 + 1, total - 2, h - 2, BRONZE)
     rect(ctx, x0 + 2, y0 + 2, total - 4, h - 4, DARK)
@@ -398,16 +429,18 @@ export class Hud implements MinimapInput {
     if (model.status) {
       const text = model.status.toUpperCase()
       const w = measure(font, text)
-      const sx = Math.round((WORLD_W - w) / 2)
+      const sx = Math.round((VIEW_W - w) / 2)
       const sy = y0 + h + 4
       rect(ctx, sx - 5, sy - 3, w + 10, font.h + 6, OUT)
       rect(ctx, sx - 4, sy - 2, w + 8, font.h + 4, DARK)
       drawText(ctx, font, text, sx, sy, GOLD)
+      return sy + font.h + 3
     }
+    return y0 + h
   }
 
-  // Esquina superior izquierda: ronda y plata, y debajo los ítems con cantidad y tecla.
-  private extras(assets: UiAssets, ex: HudExtras, showItems: boolean): void {
+  // Esquina superior izquierda: ronda y plata, y debajo los ítems con cantidad y tecla. Devuelve la y de abajo.
+  private extras(assets: UiAssets, ex: HudExtras, showItems: boolean): number {
     const ctx = this.ctx
     const font = assets.font
     const round = `RONDA ${ex.round}/${ex.rounds}`
@@ -438,7 +471,7 @@ export class Hud implements MinimapInput {
       drawText(ctx, font, t, x0 + 4, y + 3, 0xffffff)
       y += font.h + 9
     }
-    if (!showItems) return
+    if (!showItems) return y - 3
     for (const id of ITEM_ORDER) {
       const n = ex.items[id] ?? 0
       const key = ITEM_KEYS[id]
@@ -458,12 +491,14 @@ export class Hud implements MinimapInput {
       }
       y += 17
     }
+    return y - 1
   }
 
 
   // Esquina superior derecha: código de sala, peers con conexión y ping, cuenta regresiva del turno.
   // Debajo del panel superior, centrado: "ESPERANDO A <NOMBRE>...".
-  private net(assets: UiAssets, net: HudNet): void {
+  // below: la y donde terminan el panel de puntería y el estado. Devuelve la y de abajo de la columna derecha.
+  private net(assets: UiAssets, net: HudNet, below: number): number {
     const ctx = this.ctx
     const font = assets.font
     const code = net.code
@@ -476,7 +511,7 @@ export class Hud implements MinimapInput {
     for (const r of rows) inner = Math.max(inner, 9 + measure(font, r.name) + 8 + measure(font, r.ping))
     const w = inner + 10
     const h = 4 + font.h + (rows.length ? 4 + rows.length * (font.h + 3) : 0) + 4
-    const x0 = WORLD_W - 3 - w
+    const x0 = VIEW_W - 3 - w
     const y0 = 3
     rect(ctx, x0, y0, w, h, OUT)
     rect(ctx, x0 + 1, y0 + 1, w - 2, h - 2, BRONZE)
@@ -492,7 +527,7 @@ export class Hud implements MinimapInput {
       drawText(ctx, font, r.ping, x0 + w - 5 - pw, y, !r.ok ? 0xd0362c : slow ? 0xff6a3a : GREY)
       y += font.h + 3
     }
-    let below = y0 + h + 3
+    let right = y0 + h + 3
     if (net.turnLeft != null) {
       const secs = Math.max(0, Math.ceil(net.turnLeft))
       const urgent = secs <= 10
@@ -501,24 +536,26 @@ export class Hud implements MinimapInput {
       const tw = measure(font, text) * scale
       const bw = Math.max(tw + 12, 30)
       const bh = (font.h + 2) * scale + 6
-      const bx = WORLD_W - 3 - bw
-      rect(ctx, bx, below, bw, bh, OUT)
-      rect(ctx, bx + 1, below + 1, bw - 2, bh - 2, urgent ? 0xd0362c : BRONZE)
-      rect(ctx, bx + 2, below + 2, bw - 4, bh - 4, urgent ? 0x3a0e0a : DARK)
-      bigText(ctx, font, text, bx + Math.floor((bw - tw) / 2), below + 3, scale, urgent ? 0xff5a4a : 0xffffff)
-      below += bh + 3
+      const bx = VIEW_W - 3 - bw
+      rect(ctx, bx, right, bw, bh, OUT)
+      rect(ctx, bx + 1, right + 1, bw - 2, bh - 2, urgent ? 0xd0362c : BRONZE)
+      rect(ctx, bx + 2, right + 2, bw - 4, bh - 4, urgent ? 0x3a0e0a : DARK)
+      bigText(ctx, font, text, bx + Math.floor((bw - tw) / 2), right + 3, scale, urgent ? 0xff5a4a : 0xffffff)
+      right += bh + 3
     }
     if (net.waiting) {
       const text = net.waiting.toUpperCase().replace(/…/g, '...')
       const tw = measure(font, text)
-      const sx = Math.round((WORLD_W - tw) / 2)
-      const sy = 44
+      const sx = Math.round((VIEW_W - tw) / 2)
+      const sy = Math.max(44, below + 8)
       rect(ctx, sx - 6, sy - 4, tw + 12, font.h + 8, OUT)
       rect(ctx, sx - 5, sy - 3, tw + 10, font.h + 6, BRONZE)
       rect(ctx, sx - 4, sy - 2, tw + 8, font.h + 4, DARK)
       drawText(ctx, font, text, sx, sy, /RECONECT|DESCONECT/.test(text) ? 0xff8a6a : GOLD)
     }
+    return right - 3
   }
+
   private itemIcon(assets: UiAssets, id: ItemId, x: number, y: number): void {
     const ctx = this.ctx
     const icons = assets.itemIcons
@@ -548,7 +585,7 @@ export class Hud implements MinimapInput {
 }
 
 function barX(): number {
-  return Math.round((WORLD_W - BAR_W) / 2)
+  return Math.round((VIEW_W - BAR_W) / 2)
 }
 
 function rect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, c: number): void {

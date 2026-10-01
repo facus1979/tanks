@@ -1,5 +1,5 @@
-// Menú de partida: 4 casilleros (humano / IA / vacío, nombre, tripulante), rondas, dificultad y bioma.
-import { CREWS, TANK_COLORS, type Biome, type CrewId, type Difficulty, type MatchConfig, type PlayerKind, type SlotConfig } from '../sim/types'
+// Menú de partida: 4 casilleros (humano / IA / vacío, nombre, tripulante), rondas, dificultad, bioma y tamaño del mapa.
+import { CREWS, MAP_SIZE_ORDER, TANK_COLORS, type Biome, type CrewId, type Difficulty, type MapSize, type MatchConfig, type PlayerKind, type SlotConfig } from '../sim/types'
 import { DEFAULT_CONFIG, type MenuView } from './types'
 import { bindNav, button, el, label, portrait, screenRoot, setLabel, setPortrait, type Nav } from './kit'
 
@@ -26,17 +26,22 @@ const BIOME_CHOICES: { id: BiomeChoice; name: string }[] = [
   { id: 'random', name: 'AL AZAR' },
   { id: 'rotate', name: 'ROTATIVO' },
 ]
+// v2: Chico 800 (una pantalla), Mediano 1600 y Grande 2400 de ancho
+export const SIZE_NAMES: Record<MapSize, string> = { small: 'CHICO', medium: 'MEDIANO', large: 'GRANDE' }
+const SIZE_CHOICES: { id: MapSize; name: string }[] = MAP_SIZE_ORDER.map((id) => ({ id, name: SIZE_NAMES[id] }))
 const KIND_NAMES: Record<SlotKind, string> = { human: 'HUMANO', ai: 'IA', empty: 'VACIO' }
 const KIND_CYCLE: SlotKind[] = ['human', 'ai', 'empty']
 const CREW_NAMES: Record<CrewId, string> = { bandana: 'BANDANA', sarge: 'SARGENTO', rookie: 'NOVATO', desert: 'DESIERTO' }
 const NAME_MAX = 10
 const STORE = 'tanks.menu2'
 
-// Filas navegables: 0-3 casilleros (columnas kind/crew/name), 4 rondas, 5 dificultad, 6 bioma, 7 jugar.
+// Filas navegables: 0-3 casilleros (columnas kind/crew/name), 4 rondas, 5 dificultad, 6 bioma, 7 mapa, 8 jugar.
 const ROW_ROUNDS = 4
 const ROW_DIFF = 5
 const ROW_BIOME = 6
-const ROW_PLAY = 7
+const ROW_SIZE = 7
+const ROW_PLAY = 8
+const ROW_COUNT = 9
 
 export function createMenuView(root?: HTMLElement): MenuView & { onOnline(cb: () => void): void } {
   return new MenuScreen(root ?? screenRoot('menu-view'))
@@ -47,6 +52,7 @@ export class MenuScreen implements MenuView {
   private rounds = 3
   private difficulty: Difficulty = 'normal'
   private biome: BiomeChoice = 'rotate'
+  private size: MapSize = DEFAULT_CONFIG.size ?? 'medium'
   private row = 0
   private col = 0
   private editing = false
@@ -57,7 +63,7 @@ export class MenuScreen implements MenuView {
   private onOnlineCb: () => void = () => {}
   private msg!: HTMLElement
   private slotEls: { root: HTMLElement; kind: HTMLElement; crew: HTMLElement; name: HTMLElement; num: HTMLElement; portrait: HTMLCanvasElement; kindLabel: HTMLCanvasElement; nameLabel: HTMLCanvasElement; numLabel: HTMLCanvasElement }[] = []
-  private optionEls: { rounds: HTMLButtonElement[]; diff: HTMLButtonElement[]; biome: HTMLButtonElement[] } = { rounds: [], diff: [], biome: [] }
+  private optionEls: { rounds: HTMLButtonElement[]; diff: HTMLButtonElement[]; biome: HTMLButtonElement[]; size: HTMLButtonElement[] } = { rounds: [], diff: [], biome: [], size: [] }
   private msgLabel!: HTMLCanvasElement
 
   constructor(private root: HTMLElement) {
@@ -95,6 +101,8 @@ export class MenuScreen implements MenuView {
     this.rounds = ROUNDS.includes(config.rounds) ? config.rounds : 3
     this.difficulty = config.difficulty
     this.biome = config.biome ?? 'rotate'
+    // una config guardada antes de v2 no trae size: arranca en el tamaño por defecto
+    this.size = config.size && MAP_SIZE_ORDER.includes(config.size) ? config.size : (DEFAULT_CONFIG.size ?? 'medium')
   }
 
   private saved(): MatchConfig | null {
@@ -115,7 +123,7 @@ export class MenuScreen implements MenuView {
         if (s.name.trim()) out.name = s.name.trim()
         return out
       })
-    return { slots, rounds: this.rounds, difficulty: this.difficulty, biome: this.biome }
+    return { slots, rounds: this.rounds, difficulty: this.difficulty, biome: this.biome, size: this.size }
   }
 
   private occupied(): number {
@@ -158,6 +166,7 @@ export class MenuScreen implements MenuView {
       this.optionRow('RONDAS', ROUNDS.map((n) => ({ key: String(n), text: String(n) })), () => String(this.rounds), (k) => (this.rounds = Number(k)), this.optionEls.rounds = [], ROW_ROUNDS),
       this.optionRow('DIFICULTAD', DIFFICULTIES.map((d) => ({ key: d.id, text: d.name })), () => this.difficulty, (k) => (this.difficulty = k as Difficulty), this.optionEls.diff = [], ROW_DIFF),
       this.optionRow('BIOMA', BIOME_CHOICES.map((b) => ({ key: b.id, text: b.name })), () => this.biome, (k) => (this.biome = k as BiomeChoice), this.optionEls.biome = [], ROW_BIOME),
+      this.optionRow('MAPA', SIZE_CHOICES.map((z) => ({ key: z.id, text: z.name })), () => this.size, (k) => (this.size = k as MapSize), this.optionEls.size = [], ROW_SIZE),
     )
 
     this.msgLabel = label('', 0xff8a6a)
@@ -231,6 +240,7 @@ export class MenuScreen implements MenuView {
     mark(this.optionEls.rounds, String(this.rounds), ROW_ROUNDS)
     mark(this.optionEls.diff, this.difficulty, ROW_DIFF)
     mark(this.optionEls.biome, this.biome, ROW_BIOME)
+    mark(this.optionEls.size, this.size, ROW_SIZE)
     const ok = this.occupied() >= 2
     this.playBtn.classList.toggle('dis', !ok)
     this.playBtn.classList.toggle('sel', this.row === ROW_PLAY && this.col !== 1)
@@ -282,8 +292,8 @@ export class MenuScreen implements MenuView {
     }
     if (nav === 'back') return
     if (nav === 'start') return this.play()
-    if (nav === 'up') this.row = (this.row + 7) % 8
-    else if (nav === 'down') this.row = (this.row + 1) % 8
+    if (nav === 'up') this.row = (this.row + ROW_COUNT - 1) % ROW_COUNT
+    else if (nav === 'down') this.row = (this.row + 1) % ROW_COUNT
     else if (nav === 'ok') return this.activate()
     else {
       const dir = nav === 'left' ? -1 : 1
@@ -296,6 +306,9 @@ export class MenuScreen implements MenuView {
       } else if (this.row === ROW_BIOME) {
         const i = BIOME_CHOICES.findIndex((b) => b.id === this.biome)
         this.biome = BIOME_CHOICES[(i + dir + BIOME_CHOICES.length) % BIOME_CHOICES.length].id
+      } else if (this.row === ROW_SIZE) {
+        const i = SIZE_CHOICES.findIndex((z) => z.id === this.size)
+        this.size = SIZE_CHOICES[(i + dir + SIZE_CHOICES.length) % SIZE_CHOICES.length].id
       }
     }
     if (this.row < 4 && this.slots[this.row].kind === 'empty' && this.col === 2) this.col = 1
