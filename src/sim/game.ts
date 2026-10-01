@@ -21,9 +21,9 @@ import {
   TANK_HALF_W,
   WEAPONS,
   WEAPON_ORDER,
-  WORLD_H,
-  WORLD_W,
+  MAP_SIZES,
   type Biome,
+  type MapSize,
   type Command,
   type CrewId,
   type GameEvent,
@@ -67,6 +67,7 @@ export function createMatch(config: MatchConfig): GameState {
   while (slots.length < 2) slots.push({ kind: 'ai' })
   const rounds = Math.max(1, Math.floor(config.rounds || 1))
   const biomeMode = config.biome ?? BIOMES[0]
+  const size: MapSize = config.size && MAP_SIZES[config.size] ? config.size : 'small'
   const players: Player[] = slots.map((slot, i) => {
     const crew = slot.crew && CREWS.includes(slot.crew) ? slot.crew : CREWS[i % CREWS.length]
     return {
@@ -96,8 +97,9 @@ export function createMatch(config: MatchConfig): GameState {
   const state: GameState = {
     seed,
     rng: 0,
-    width: WORLD_W,
-    height: WORLD_H,
+    size,
+    width: MAP_SIZES[size].w,
+    height: MAP_SIZES[size].h,
     biome: BIOMES[0],
     terrain: undefined as never,
     props: [],
@@ -132,7 +134,7 @@ function setupRound(state: GameState): void {
     p.y = tankFloor(gen.terrain, x, 0)
     p.hp = PLAYER_HP
     p.alive = true
-    p.angle = x < WORLD_W / 2 ? 55 : 125
+    p.angle = x < state.width / 2 ? 55 : 125
     p.power = 60
     p.fuel = FUEL_PER_TURN
     p.shield = 0
@@ -242,7 +244,7 @@ function move(state: GameState, dir: -1 | 1): StepResult {
   const actor = state.players[state.current]
   if (actor.fuel <= 0 || (dir !== 1 && dir !== -1)) return { state, events: [] }
   const nx = actor.x + dir
-  if (nx < TANK_HALF_W || nx > WORLD_W - TANK_HALF_W) return { state, events: [] }
+  if (nx < TANK_HALF_W || nx > state.width - TANK_HALF_W) return { state, events: [] }
   const t = state.terrain
   const edge = dir > 0 ? nx + TANK_HALF_W - 1 : nx - TANK_HALF_W
   for (let y = actor.y - TANK_H; y < actor.y - MAX_CLIMB; y++) if (isSolid(t, edge, y)) return { state, events: [] }

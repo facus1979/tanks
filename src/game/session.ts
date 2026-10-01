@@ -19,7 +19,7 @@ import type {
   WeaponId,
 } from '../sim/types'
 import { FUEL_PER_TURN, ITEM_ORDER, SHOP, WEAPONS } from '../sim/types'
-import type { RenderFrame } from '../render/types'
+import type { Camera, RenderFrame } from '../render/types'
 import type { HudModel, HudSide } from '../ui/hud'
 import type { BannerModel, HudNet, ScoreModel, ShopModel } from '../ui/types'
 import { AiClient } from './ai-client'
@@ -593,6 +593,7 @@ export class Session {
         weapon: pb.weapon,
         freeze: this.frozen,
         aimPreview: null,
+        camera: this.camera(pb.terrain),
       }
     }
     return {
@@ -609,7 +610,13 @@ export class Session {
       weapon: null,
       freeze: this.frozen,
       aimPreview: this.tracerPath(s),
+      camera: this.camera(s.terrain),
     }
+  }
+
+  // v2: stub del contrato, centrado en el mundo. La cámara real (seguimiento, paneo) la hace el área flujo.
+  private camera(t: Terrain): Camera {
+    return { cx: t.w / 2, cy: t.h / 2, zoom: 1 }
   }
 
   hud(): HudModel | null {

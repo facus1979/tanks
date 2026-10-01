@@ -1,7 +1,7 @@
 // Contrato del online P2P. El anfitrión es la autoridad: corre la sim (y la IA) y
 // reparte la lista ordenada de comandos aceptados. Cada cliente aplica esa lista sobre
 // su réplica; como la sim es determinista, todos llegan al mismo estado.
-import type { Biome, Command, CrewId, Difficulty, MatchConfig, PlayerKind } from '../sim'
+import type { Biome, Command, CrewId, Difficulty, MapSize, MatchConfig, PlayerKind } from '../sim'
 
 export const NET_VERSION = 1
 
@@ -39,6 +39,7 @@ export interface LobbyState {
   difficulty: Difficulty
   biome: Biome | 'random' | 'rotate'
   turnSeconds: number // límite por turno humano remoto; 0 = sin límite
+  size?: MapSize // v2; sin size, 'small'
 }
 
 export type NetMessage =

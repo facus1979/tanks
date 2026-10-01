@@ -15,13 +15,13 @@ Broforce: pixel art moderno, personajes con personalidad, explosiones exageradas
 ## Decisiones cerradas
 
 - Cliente: TypeScript + Vite. Render: PixiJS. Física propia, determinista, timestep fijo. Sin motor de cuerpos rígidos.
-- **Resolución lógica 800×450**, una sola pantalla, sin cámara. Se escala con nearest-neighbor al tamaño de la ventana.
+- **Resolución lógica de pantalla 800×450**, escalada con nearest-neighbor al tamaño de la ventana. Hasta v1 el mundo medía lo mismo que la pantalla; desde v2 el mundo es variable (ver v2) y la pantalla es una cámara sobre él.
 - **Terreno por pixel con materiales** (`Terrain.front` y `Terrain.back`, `Uint8Array` de 800×450). `front` colisiona. `back` es lo que había detrás y se dibuja oscuro donde `front` es aire. Esa es la pared de fondo de Broforce.
 - Materiales: tierra, piedra, ladrillo, madera, tabla, viga, poste, metal, roca madre. Cada uno con dureza; ver `MATERIALS`.
 - **Tanque de 28×20** con tripulante de 12×12 asomado por la escotilla. Cada jugador tiene color y tripulante propios.
-- **`POWER_SCALE` 4.03**, gravedad 220: potencia 100 cruza el mapa. Si el proyectil sale por arriba, se muestra una flecha en el borde.
+- **`POWER_SCALE` 4.03**, gravedad 220: potencia 100 cruza el mapa. En v2 los dos se derivan del ancho del mapa para que esto siga valiendo. Si el proyectil sale por arriba, se muestra una flecha en el borde.
 - Biomas: bosque con niebla (el de la referencia), jungla, atardecer industrial.
-- Máximo 4 jugadores. Arte propio generado por código (`scripts/paint-assets.mjs`); sin assets de terceros.
+- Máximo 4 jugadores (8 desde v2). Arte propio generado por código (`scripts/paint-assets.mjs`); sin assets de terceros.
 - Sangre: no. Chispas, humo, escombros y fuego.
 - El online no se construye ahora, pero no puede exigir reescribir las reglas.
 
@@ -180,6 +180,43 @@ Las fases F1 a F4 forman la primera muestra, que tiene que parecerse a la refere
   - Criterio: una partida completa, incluida la tienda, jugable solo con el dedo en un celular de 6" y en una tablet, a 60 fps en un celular de gama media.
 - **Online con servidor** (más adelante, si hace falta): el mismo código del anfitrión corriendo en Node detrás de otro `Transport`.
 - **Online**, como antes: servidor autoritativo que corre el mismo `sim`, sin lockstep.
+
+## v2: mundo grande
+
+Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 4 jugadores".
+
+### Decisiones
+
+- **Tamaño por partida**, elegido en el menú: Chico 800×450 (el mapa de v1), Mediano 1600×450, Grande 2400×450. Alto fijo. El tamaño viaja en el estado (`terrain.w/h`); `WORLD_W/WORLD_H` dejan de usarse fuera de la pantalla.
+- **Alcance**: potencia 100 llega siempre de punta a punta. `POWER_SCALE` y `GRAVITY` se derivan del ancho del mapa de modo que un tiro de lado a lado a 45° dure ~3 s; con 800 dan los valores de v1. `WIND_ACCEL` escala igual. Shift ajusta ángulo y potencia a 1/5 de velocidad.
+- **Muerte súbita**: tras N turnos seguidos sin daño a tanques, la lava sube desde el fondo cada turno. Toda ronda termina.
+- **Hasta 8 jugadores**: 4 colores y 4 tripulantes nuevos; HUD rediseñado para 5-8 placas. Spawns repartidos a lo ancho.
+- **Líquidos que fluyen**: agua y lava son materiales de la grilla. Se asientan con un autómata celular determinista al final de cada `fire`, con tope de iteraciones; los cambios salen como evento para que el render los anime.
+
+### Reglas nuevas
+
+- **Abismo**: tramo sin fondo. Lo que cae por debajo del mapa en un abismo muere (el paracaídas lo evita si se abre antes). Fuera de los abismos, debajo del mapa sigue siendo roca madre.
+- **Agua**: no colisiona. Amortigua caídas (sin daño de caída), frena los proyectiles que entran y reduce a la mitad el radio de las explosiones sumergidas.
+- **Lava**: no colisiona. Un tanque que la toca recibe daño por turno, enciende lo inflamable vecino y derrite los proyectiles (no explotan). La tierra (arma Tierra o derrumbe) sobre lava se vuelve piedra; agua y lava en contacto dan piedra.
+
+### Contratos v2
+
+- `src/sim/types.ts`: `MapSize`, `MAP_SIZES`, `MAP_SIZE_ORDER`, `MatchConfig.size`, `GameState.size` (con `width`/`height`), `Physics` y `physicsFor(width)`. `WORLD_W/WORLD_H` quedan como el tamaño del mapa Chico; nada fuera de `sim` los usa como tamaño del mundo.
+- `src/render/types.ts`: `VIEW_W/VIEW_H` (pantalla lógica 800×450), `Camera { cx, cy, zoom }`, `RenderFrame.camera`, `GameRenderer.screenToWorld`. La cámara la decide el flujo; el renderer la aplica y suma el sacudón.
+- `src/ui/types.ts`: `HudExtras.minimap` (`MinimapModel`, `MinimapTank`), `MinimapInput.minimapAt` (lo implementa `Hud`), `DEFAULT_CONFIG.size` = `'medium'`, `setOption('size')` en el lobby.
+- `src/net/types.ts`: `LobbyState.size`.
+- QA: `?play=...&size=small|medium|large`, `?demo=...&size=...`.
+
+### Fases
+
+- **V1 Mundo variable y cámara.** Tamaño en el estado y en el menú; cámara que sigue al tanque activo y al proyectil (se aleja en vuelos largos) y vuelve; paneo libre (mouse al borde, arrastre, flechas+Shift, stick derecho, dos dedos); minimapa (ver abajo); indicadores de enemigos fuera de pantalla; fondos con parallax. Render del terreno en trozos, solo lo visible o lo que cambió; efectos en buffer de pantalla. Criterio: el mapa Grande a 60 fps con el mismo presupuesto que v1.
+  - **Minimapa**: franja arriba al centro del HUD con el mapa entero a escala 1/10 (160×45 en Mediano, 240×45 en Grande; no aparece en Chico, que no scrollea). Muestra la silueta del terreno (se actualiza con cada deformación), agua y lava con su color, los tanques como puntos de su color (el del turno titila, los muertos como ×), el proyectil en vuelo y la marca del último impacto de cada jugador, y el viewport como un rectángulo.
+  - Click o toque en el minimapa centra la cámara ahí; arrastrar el rectángulo mueve el viewport. Con gamepad, el stick derecho mueve el viewport y se ve en el minimapa.
+  - Mientras apuntás, la cámara se queda donde la dejaste (para mirar al objetivo mientras ajustás); `C`, doble toque en el minimapa o el botón de recentrar la devuelven a tu tanque. Al disparar sigue al proyectil; al terminar el tiro vuelve al tanque del turno siguiente.
+- **V2 Alcance y balance de distancias.** Física derivada del ancho, ajuste fino, IA que apunta a cualquier distancia y decide moverse, muerte súbita. `sim-check` por tamaño.
+- **V3 Geografía por tramos.** El generador arma el mapa como secuencia de tramos por bioma: montaña, valle, meseta, abismo, lago, pozo de lava, más búnker/torre/cuevas.
+- **V4 Agua y lava.** Materiales, flujo, reglas, texturas y animación (superficie, burbujas, vapor al enfriarse), sonido.
+- **V5 Hasta 8 jugadores.** Arte, HUD, lobby local y online.
 
 ## Cómo se agrega algo
 

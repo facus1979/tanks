@@ -2,12 +2,40 @@
 // Coordenadas: x crece a la derecha, y crece hacia ABAJO (igual que la grilla y la pantalla).
 // Ángulo: 0 es horizontal a la derecha, 90 arriba, 180 horizontal a la izquierda.
 
+// Tamaño del mapa Chico (el de v1). Desde v2 el mapa de cada partida mide state.width × state.height
+// (= terrain.w × terrain.h); la pantalla lógica es VIEW_W × VIEW_H en src/render/types.ts.
 export const WORLD_W = 800
 export const WORLD_H = 450
 
+// v2: tamaño de mapa por partida (MatchConfig.size). Alto fijo.
+export type MapSize = 'small' | 'medium' | 'large'
+export const MAP_SIZES: Record<MapSize, { w: number; h: number }> = {
+  small: { w: 800, h: 450 },
+  medium: { w: 1600, h: 450 },
+  large: { w: 2400, h: 450 },
+}
+export const MAP_SIZE_ORDER: MapSize[] = ['small', 'medium', 'large']
+
+// Física del mapa Chico. Para otros anchos usar physicsFor(width).
 export const GRAVITY = 220
 export const POWER_SCALE = 4.03
 export const WIND_ACCEL = 9
+
+export interface Physics {
+  gravity: number
+  powerScale: number
+  windAccel: number
+}
+
+// Física derivada del ancho del mapa (k = width / 800): potencia 100 a 45° cruza el mapa entero
+// (alcance ∝ k), el vuelo de punta a punta dura 2,6 s · k^0,25 y la deriva del viento escala con el mapa.
+// gravedad 220·√k, POWER_SCALE 4,03·k^0,75, viento 9·√k. Con 800 da exactamente los valores de v1.
+export function physicsFor(width: number): Physics {
+  const k = width / WORLD_W
+  if (k === 1) return { gravity: GRAVITY, powerScale: POWER_SCALE, windAccel: WIND_ACCEL }
+  const r = Math.sqrt(k)
+  return { gravity: GRAVITY * r, powerScale: POWER_SCALE * k ** 0.75, windAccel: WIND_ACCEL * r }
+}
 export const SUBSTEP = 1 / 240
 export const MAX_FLIGHT = 14
 
@@ -196,6 +224,7 @@ export interface MatchConfig {
   difficulty: Difficulty
   biome?: Biome | 'random' | 'rotate' // fijo, al azar por ronda, o rotando forest→jungle→industrial
   seed?: number
+  size?: MapSize // v2; sin size, 'small'
 }
 
 export interface Player {
@@ -225,7 +254,8 @@ export interface Player {
 export interface GameState {
   seed: number
   rng: number
-  width: number
+  size: MapSize
+  width: number // = MAP_SIZES[size].w = terrain.w
   height: number
   biome: Biome
   terrain: Terrain

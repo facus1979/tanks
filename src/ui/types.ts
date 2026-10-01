@@ -1,7 +1,7 @@
 // Contrato entre las vistas (src/ui/**, las implementa el área "vistas")
 // y el flujo del juego (src/main.ts + src/game/**, que las crea y las alimenta).
 // Las vistas no conocen a la sesión: reciben modelos y avisan con callbacks.
-import type { Biome, CrewId, Difficulty, ItemId, MatchConfig, ShopId } from '../sim'
+import type { Biome, CrewId, Difficulty, ItemId, MapSize, MatchConfig, ShopId, Terrain, Vec2 } from '../sim'
 import type { LobbyState, Role } from '../net/types'
 
 // ---------- título y menú ----------
@@ -101,6 +101,34 @@ export interface HudExtras {
   shield: number // escudo activo del jugador de turno
   tracer: boolean
   net?: HudNet | null
+  minimap?: MinimapModel | null // v2; null o ausente en mapas que entran en pantalla (Chico)
+}
+
+// ---------- minimapa (v2) ----------
+
+// Lo dibuja el HUD arriba al centro, a escala 1/10 del mundo (ver PROYECTO.md, v2 V1), junto con
+// las flechas en los bordes hacia los tanques vivos que quedan fuera de `view`.
+export interface MinimapTank {
+  id: number
+  x: number // centro del tanque, mundo
+  y: number // piso del tanque, mundo
+  color: number
+  alive: boolean
+  current: boolean // tiene el turno (titila)
+}
+export interface MinimapModel {
+  terrain: Terrain // la grilla actual; el HUD la reduce solo cuando cambia terrainVersion
+  terrainVersion: number
+  view: { x: number; y: number; w: number; h: number } // rectángulo visible, en mundo
+  tanks: MinimapTank[]
+  projectiles: Vec2[]
+  lastImpacts: { playerId: number; x: number; y: number; color: number }[] // último impacto de cada jugador en la ronda
+}
+
+// Lo que el HUD (src/ui/hud.ts, clase Hud) expone al flujo para navegar con el minimapa.
+export interface MinimapInput {
+  // Punto de la ventana → x,y de mundo si cae sobre el minimapa (con un margen táctil de 6 px lógicos); si no, null.
+  minimapAt(clientX: number, clientY: number): Vec2 | null
 }
 
 // ---------- online ----------
@@ -130,7 +158,7 @@ export interface LobbyView {
       claim: (slot: number) => void
       release: () => void
       setSlot: (slot: number, kind: 'human' | 'ai' | 'off') => void // solo anfitrión
-      setOption: (key: 'rounds' | 'difficulty' | 'biome' | 'turnSeconds', value: number | string) => void // solo anfitrión
+      setOption: (key: 'rounds' | 'difficulty' | 'biome' | 'turnSeconds' | 'size', value: number | string) => void // solo anfitrión
       start: () => void // solo anfitrión
       leave: () => void
     },
@@ -155,4 +183,5 @@ export const DEFAULT_CONFIG: MatchConfig = {
   rounds: 3,
   difficulty: 'normal' as Difficulty,
   biome: 'rotate' as Biome | 'rotate',
+  size: 'medium' as MapSize,
 }

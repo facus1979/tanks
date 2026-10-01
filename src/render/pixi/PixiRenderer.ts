@@ -1,5 +1,5 @@
 import { Application, Container, Graphics, Sprite, Texture, TextureStyle } from 'pixi.js'
-import type { Biome, GameEvent, Player, Prop, WeaponId } from '../../sim/types'
+import type { Biome, GameEvent, Player, Prop, Vec2, WeaponId } from '../../sim/types'
 import { BARREL_LEN, PIVOT_X, PIVOT_Y, TANK_H, TANK_W, WEAPONS, WORLD_H, WORLD_W } from '../../sim/types'
 import type { GameRenderer, RenderFrame, Viewport } from '../types'
 import { BUBBLE_HOLD, BUBBLE_TIME, PropView, RECOIL_TIME, TankView } from './actors'
@@ -191,6 +191,12 @@ export class PixiRenderer implements GameRenderer {
 
   setLoop(loop: (dt: number) => void): void {
     this.onFrame = loop
+  }
+
+  // v2: stub del contrato (mundo = pantalla). La cámara real la hace el área render.
+  screenToWorld(clientX: number, clientY: number): Vec2 {
+    const r = this.app.canvas.getBoundingClientRect()
+    return { x: ((clientX - r.left) / (r.width || 1)) * WORLD_W, y: ((clientY - r.top) / (r.height || 1)) * WORLD_H }
   }
 
   resize(): Viewport {
