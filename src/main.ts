@@ -2,6 +2,8 @@ import { PixiRenderer } from './render/pixi/PixiRenderer'
 import { Keyboard, weaponSlot } from './input/keyboard'
 import { Gamepad, type PadState } from './input/gamepad'
 import { TouchControls, fullscreenButton, isTouchDevice, vibrate } from './input/touch'
+import { MousePan } from './input/mouse'
+import type { Viewport } from './render/types'
 import { Sfx } from './audio/sfx'
 import { Session } from './game/session'
 import type { NetSeat } from './game/session'
@@ -21,11 +23,15 @@ import { chooseShot } from './sim'
 import {
   ANGLE_SPEED,
   BIOMES,
+  MAP_SIZE_ORDER,
   POWER_SPEED,
+  TANK_H,
+  TANK_HALF_W,
   WEAPON_ORDER,
   type Biome,
   type GameEvent,
   type ItemId,
+  type MapSize,
   type MatchConfig,
   type SlotConfig,
   type WeaponId,
@@ -36,6 +42,8 @@ const hudRoot = must(document.querySelector<HTMLElement>('#hud'))
 
 const params = new URLSearchParams(location.search)
 const uitest = params.get('uitest')
+// &size=small|medium|large en ?play= y ?demo=; sin size, Chico (las capturas de QA de v1 siguen iguales)
+const sizeParam: MapSize = (MAP_SIZE_ORDER as string[]).includes(params.get('size') ?? '') ? (params.get('size') as MapSize) : 'small'
 const demoParam = uitest ? null : params.get('demo')
 const demo =
   demoParam == null
@@ -51,7 +59,7 @@ const demo =
       }
 
 // ?play=<seed>: QA, entra directo a una partida sin pasar por el título ni el menú.
-// &humans=N (hot-seat), &bots=N, &rounds=N.
+// &humans=N (hot-seat), &bots=N, &rounds=N, &size=.
 const playParam = demo || uitest ? null : params.get('play')
 // &aisync=1: QA, la IA calcula en el hilo principal (para comparar contra el worker)
 const aiSync = params.get('aisync') === '1'
@@ -62,11 +70,18 @@ const netStart = demo || uitest || playParam != null ? null : net.host ? 'host' 
 const AUTO_SHOT = { delay: 0.8 }
 
 const ITEM_KEYS: Record<string, ItemId> = { KeyQ: 'shield', KeyF: 'fuel', KeyR: 'repair', KeyT: 'tracer' }
+// Cámara (v2): Z / X panean a la izquierda / derecha, C recentra en el tanque del turno.
+// También: mouse contra el borde, arrastre con el botón del medio (o el izquierdo fuera del tanque y
+// de la barra de armas), stick derecho del gamepad (R3 recentra), dos dedos en táctil (◎ recentra),
+// click o arrastre sobre el minimapa (doble click o doble toque recentra).
+const PAN_SPEED = 700 // pixels de pantalla por segundo con Z / X, el borde o el stick
+const DOUBLE_TAP = 0.35 // segundos entre dos toques del minimapa para recentrar
 
 const renderer = new PixiRenderer()
 const keys = new Keyboard()
 const pad = new Gamepad()
 const touch = new TouchControls(stage)
+const mouse = new MousePan(stage)
 if (isTouchDevice()) {
   // pantalla completa también fuera de la partida (menú, lobby, tienda)
   const fs = fullscreenButton()
@@ -99,6 +114,10 @@ let shopFor: number | null = null
 let paused = false
 let lastConfig: MatchConfig = DEFAULT_CONFIG
 let lastWind: number | null = null
+let viewport: Viewport | null = null
+// minimapa: puntero que lo está arrastrando y hora del último toque (doble toque recentra)
+let miniDrag: number | null = null
+let miniTapAt = -Infinity
 
 void loadUiAssets().then(() => {
   refreshLabels()
@@ -123,6 +142,57 @@ window.addEventListener('pointerdown', (e) => {
 window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyM') sfx.toggleMute()
 })
+
+// ---------- cámara: minimapa, arrastre y apuntado táctil en mundo ----------
+
+const playing = (): boolean => screen === 'play' && overlay === 'none' && !paused
+const onMinimap = (e: PointerEvent): boolean => playing() && hud.minimapAt(e.clientX, e.clientY) != null
+
+touch.toWorld = (x, y) => renderer.screenToWorld(x, y)
+touch.ignore = onMinimap
+// el click izquierdo arrastra el mundo salvo sobre el tanque del turno, la barra de armas o el minimapa
+mouse.blocked = (e) => onMinimap(e) || hud.weaponAt(e.clientX, e.clientY) != null || onCurrentTank(e.clientX, e.clientY)
+
+// Click o toque en el minimapa: centra la cámara ahí; arrastrar mueve el viewport; doble toque recentra.
+// En captura, antes que el apuntado táctil del #stage.
+window.addEventListener(
+  'pointerdown',
+  (e) => {
+    if (!playing()) return
+    const at = hud.minimapAt(e.clientX, e.clientY)
+    if (!at) return
+    e.preventDefault()
+    const now = performance.now() / 1000
+    if (now - miniTapAt < DOUBLE_TAP) {
+      miniTapAt = -Infinity
+      miniDrag = null
+      session.recenter()
+      return
+    }
+    miniTapAt = now
+    miniDrag = e.pointerId
+    session.panTo(at.x, true)
+  },
+  true,
+)
+window.addEventListener('pointermove', (e) => {
+  if (miniDrag !== e.pointerId || !playing()) return
+  const at = hud.minimapAt(e.clientX, e.clientY)
+  if (at) session.panTo(at.x, false)
+})
+const endMini = (e: PointerEvent): void => {
+  if (miniDrag === e.pointerId) miniDrag = null
+}
+window.addEventListener('pointerup', endMini)
+window.addEventListener('pointercancel', endMini)
+
+function onCurrentTank(clientX: number, clientY: number): boolean {
+  const s = session.state
+  const p = s?.players[s.current]
+  if (!p || !p.alive) return false
+  const w = renderer.screenToWorld(clientX, clientY)
+  return Math.abs(w.x - p.x) <= TANK_HALF_W + 4 && w.y >= p.y - TANK_H - 10 && w.y <= p.y + 4
+}
 
 menu.onOnline(() => {
   if (screen !== 'menu') return
@@ -164,7 +234,10 @@ if (!uitest) {
     window.addEventListener('resize', layout)
     if (demo) {
       const slots: SlotConfig[] = [{ kind: 'ai' }, { kind: 'ai' }, { kind: 'ai' }, { kind: 'ai' }]
-      session.start({ slots, rounds: 1, difficulty: 'hard', biome: demo.biome, seed: demo.seed }, { freeze: demo.freeze, weapon: demo.weapon })
+      session.start(
+        { slots, rounds: 1, difficulty: 'hard', biome: demo.biome, size: sizeParam, seed: demo.seed },
+        { freeze: demo.freeze, weapon: demo.weapon },
+      )
       enterPlay()
       if (demo.freeze) fastForward()
       else if (demo.ff > 0) fastForwardFor(demo.ff)
@@ -175,7 +248,14 @@ if (!uitest) {
       const slots: SlotConfig[] = []
       for (let i = 0; i < humans; i++) slots.push({ kind: 'human' })
       for (let i = 0; i < bots; i++) slots.push({ kind: 'ai' })
-      begin({ slots, rounds: clampInt(params.get('rounds'), 1, 1, 10), difficulty: 'normal', biome, seed: (Number(playParam) >>> 0) || 1 })
+      begin({
+        slots,
+        rounds: clampInt(params.get('rounds'), 1, 1, 10),
+        difficulty: 'normal',
+        biome,
+        size: sizeParam,
+        seed: (Number(playParam) >>> 0) || 1,
+      })
     }
   })
 }
@@ -213,6 +293,7 @@ function enterPlay(): void {
   if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
   keys.consumePressed()
   pad.suppress()
+  touch.setRecenter(session.scrolls)
   layout()
 }
 
@@ -406,6 +487,7 @@ function closeOverlay(): void {
 function layout(): void {
   if (!mounted) return
   const vp = renderer.resize()
+  viewport = vp
   hud.place(vp)
   refreshLabels()
 }
@@ -430,6 +512,8 @@ function fastForwardFor(seconds: number): void {
 function tick(rawDt: number): void {
   lastTick = performance.now()
   touch.setActive(screen === 'play' && overlay === 'none')
+  mouse.active = playing()
+  if (!mouse.active) mouse.cancel()
   step1(Math.min(0.05, Math.max(0, rawDt)), true)
 }
 
@@ -444,7 +528,10 @@ function step1(dt: number, live: boolean, draw = true): void {
       sfx.click()
       sfx.engine(false)
     }
-    if (!paused) handleInput(dt, pressed, padState)
+    if (!paused) {
+      handleCamera(dt, pressed, padState)
+      handleInput(dt, pressed, padState)
+    }
   }
   if (paused) {
     const frame = session.frame()
@@ -504,8 +591,28 @@ function mergePad(a: PadState, b: PadState): PadState {
     angle: clamp1(a.angle + b.angle),
     power: clamp1(a.power + b.power),
     move: a.move || b.move,
+    pan: clamp1(a.pan + b.pan),
     pressed: new Set([...a.pressed, ...b.pressed]),
   }
+}
+
+// Paneo y recentrado de la cámara. Anda en cualquier turno (también mirando a la IA), salvo con un
+// tiro en vuelo; en mapas Chico la cámara es fija y esto no hace nada.
+function handleCamera(dt: number, pressed: Set<string>, padState: PadState | null): void {
+  const dragDx = mouse.pollDrag() + touch.pollPan()
+  if (pressed.has('KeyC') || padState?.pressed.has('recenter')) session.recenter()
+  if (!session.canPan) return
+  const zoom = session.camera.zoom || 1
+  let dir = 0
+  if (keys.isDown('KeyZ')) dir -= 1
+  if (keys.isDown('KeyX')) dir += 1
+  dir += padState?.pan ?? 0
+  dir += mouse.edge()
+  dir = Math.max(-1, Math.min(1, dir))
+  // arrastrar el mundo: la cámara va al revés que el puntero, a la escala de la pantalla
+  const scale = (viewport?.scale || 1) * zoom
+  const dx = (dir * PAN_SPEED * dt) / zoom - dragDx / scale
+  if (dx !== 0) session.panBy(dx)
 }
 
 function handleInput(dt: number, pressed: Set<string>, padState: ReturnType<Gamepad['poll']> | null): void {

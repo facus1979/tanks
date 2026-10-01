@@ -1,15 +1,17 @@
 // Gamepad en partida (mapa estándar). Las vistas (menú, tienda, tabla, cartel) leen el pad por su cuenta.
 // Stick izquierdo o cruceta: ángulo (horizontal) y potencia (vertical). Gatillos o bumpers: mover.
 // A dispara, X/Y arma anterior/siguiente, B usa un ítem, Start pausa.
-export type PadAction = 'fire' | 'prevWeapon' | 'nextWeapon' | 'item' | 'pause'
+// v2: stick derecho panea la cámara (izquierda / derecha); apretarlo (R3) la recentra en tu tanque.
+export type PadAction = 'fire' | 'prevWeapon' | 'nextWeapon' | 'item' | 'pause' | 'recenter'
 
 const DEAD = 0.25
-const BUTTON_ACTION: Record<number, PadAction> = { 0: 'fire', 2: 'prevWeapon', 3: 'nextWeapon', 1: 'item', 9: 'pause' }
+const BUTTON_ACTION: Record<number, PadAction> = { 0: 'fire', 2: 'prevWeapon', 3: 'nextWeapon', 1: 'item', 9: 'pause', 11: 'recenter' }
 
 export interface PadState {
   angle: number // -1..1: positivo sube el ángulo (a la izquierda)
   power: number // -1..1: positivo sube la potencia
   move: -1 | 0 | 1
+  pan: number // -1..1: paneo de la cámara (positivo a la derecha)
   pressed: Set<PadAction>
 }
 
@@ -23,7 +25,7 @@ export class Gamepad {
   }
 
   poll(): PadState {
-    const state: PadState = { angle: 0, power: 0, move: 0, pressed: new Set() }
+    const state: PadState = { angle: 0, power: 0, move: 0, pan: 0, pressed: new Set() }
     const now = new Set<number>()
     let pads: (globalThis.Gamepad | null)[] = []
     try {
@@ -39,6 +41,8 @@ export class Gamepad {
       const ay = pad.axes[1] ?? 0
       state.angle += (Math.abs(ax) > DEAD ? -ax : 0) + b(14) - b(15)
       state.power += (Math.abs(ay) > DEAD ? -ay : 0) + b(12) - b(13)
+      const rx = pad.axes[2] ?? 0
+      if (Math.abs(rx) > DEAD) state.pan += (rx - Math.sign(rx) * DEAD) / (1 - DEAD)
       const left = Math.max(b(4), b(6))
       const right = Math.max(b(5), b(7))
       if (left > 0.4 && right <= 0.4) state.move = -1
@@ -46,6 +50,7 @@ export class Gamepad {
     }
     state.angle = Math.max(-1, Math.min(1, state.angle))
     state.power = Math.max(-1, Math.min(1, state.power))
+    state.pan = Math.max(-1, Math.min(1, state.pan))
     if (this.hold) {
       // espera a que se suelten los botones de acción
       if (![...now].some((i) => i in BUTTON_ACTION)) this.hold = false

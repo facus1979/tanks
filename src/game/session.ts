@@ -19,10 +19,11 @@ import type {
   WeaponId,
 } from '../sim/types'
 import { FUEL_PER_TURN, ITEM_ORDER, SHOP, WEAPONS } from '../sim/types'
-import type { Camera, RenderFrame } from '../render/types'
+import { VIEW_W, type Camera, type RenderFrame } from '../render/types'
 import type { HudModel, HudSide } from '../ui/hud'
-import type { BannerModel, HudNet, ScoreModel, ShopModel } from '../ui/types'
+import type { BannerModel, HudNet, MinimapModel, ScoreModel, ShopModel } from '../ui/types'
 import { AiClient } from './ai-client'
+import { CameraController, shotZoom } from './camera'
 import { pickDemoShot, seededRandom } from './demo'
 
 export interface DemoOptions {
@@ -71,6 +72,8 @@ interface Playback {
   reveal: Map<GameEvent, Int32Array> // pixels que cambia cada impact/burn
   pending: number // pixels todavía sin mostrar
   finisher: GameEvent | null // la muerte que cierra la ronda: arranca la cámara lenta
+  flightsEnd: number // fin del último vuelo
+  zoom: number // zoom de la cámara durante el vuelo (shotZoom)
 }
 
 interface AiDrive {
@@ -91,6 +94,8 @@ const MOVE_SPEED = 36
 const SLOW_SCALE = 0.3
 const SLOW_TIME = 1.2
 const LATE = new Set<GameEvent['type']>(['turn', 'wind', 'gameover', 'roundover', 'round', 'shop'])
+// Anticipación de la cámara sobre el proyectil (segundos de vuelo hacia adelante).
+const LOOKAHEAD = 0.35
 
 export class Session {
   state: GameState | null = null
@@ -120,6 +125,10 @@ export class Session {
   private scale = 1
   private lastHumanId: number | null = null // último humano que tuvo el turno (hot-seat)
   private tracerCache: { key: string; path: Vec2[] } | null = null
+  // v2: cámara y minimapa
+  private cam = new CameraController()
+  private camKey = '' // turno que sigue la cámara; si cambia, vuelve al tanque
+  private lastImpacts = new Map<number, Vec2>() // último impacto de cada jugador en la ronda
   // online
   private mode: SessionMode = 'local'
   private localIds = new Set<number>()
@@ -230,6 +239,7 @@ export class Session {
     this.scale = 1
     this.lastHumanId = null
     this.tracerCache = null
+    this.resetCamera()
     this.demo = demo ? { ...demo, shotDone: false, seed } : null
     this.random = demo ? seededRandom(seed ^ 0x5bd1e995) : Math.random
     if (!demo?.freeze && !this.aiClient && this.mode !== 'client') this.aiClient = new AiClient()
@@ -531,6 +541,11 @@ export class Session {
   }
 
   update(dt: number): void {
+    this.step(dt)
+    if (!this.frozen) this.updateCamera(dt)
+  }
+
+  private step(dt: number): void {
     this.scale = 1
     if (!this.state || this.frozen) return
     if (this.movedT > 0) this.movedT -= dt
@@ -593,7 +608,7 @@ export class Session {
         weapon: pb.weapon,
         freeze: this.frozen,
         aimPreview: null,
-        camera: this.camera(pb.terrain),
+        camera: this.cam.camera,
       }
     }
     return {
@@ -610,13 +625,101 @@ export class Session {
       weapon: null,
       freeze: this.frozen,
       aimPreview: this.tracerPath(s),
-      camera: this.camera(s.terrain),
+      camera: this.cam.camera,
     }
   }
 
-  // v2: stub del contrato, centrado en el mundo. La cámara real (seguimiento, paneo) la hace el área flujo.
-  private camera(t: Terrain): Camera {
-    return { cx: t.w / 2, cy: t.h / 2, zoom: 1 }
+  // ---------- cámara (v2) ----------
+
+  get camera(): Camera {
+    return this.cam.camera
+  }
+
+  // Hay cámara móvil: el mapa es más ancho que la pantalla.
+  get scrolls(): boolean {
+    return !this.cam.fixed
+  }
+
+  // Se puede panear: mapa más ancho que la pantalla y sin tiro en vuelo.
+  get canPan(): boolean {
+    return !!this.state && !this.playback && !this.frozen && !this.cam.fixed
+  }
+
+  // Paneo a mano en px de mundo (Z / X, borde, arrastre, stick derecho, dos dedos).
+  panBy(dx: number): void {
+    if (this.canPan) this.cam.pan(dx)
+  }
+
+  // Minimapa: centra la cámara en x (smooth: con viaje; si no, salta, para el arrastre).
+  panTo(x: number, smooth: boolean): void {
+    if (this.canPan) this.cam.centerOn(x, smooth)
+  }
+
+  // C, doble toque en el minimapa o botón de recentrar: vuelve al tanque del turno.
+  recenter(): void {
+    if (!this.playback) this.cam.recenter()
+  }
+
+  private updateCamera(dt: number): void {
+    const s = this.state
+    if (!s) return
+    const pb = this.playback
+    const t = pb ? pb.terrain : s.terrain
+    if (this.cam.world.w !== t.w || this.cam.world.h !== t.h) this.resetCamera()
+    if (pb) {
+      const now = this.projectiles(pb)
+      if (now.length) {
+        // el grupo de proyectiles (racimo) y dónde van a estar en un rato: la cámara mira adelante
+        const ahead = this.projectiles(pb, pb.t + LOOKAHEAD, true)
+        let x0 = Infinity
+        let x1 = -Infinity
+        let y0 = Infinity
+        let y1 = -Infinity
+        for (const p of [...now, ...ahead]) {
+          x0 = Math.min(x0, p.x)
+          x1 = Math.max(x1, p.x)
+          y0 = Math.min(y0, p.y)
+          y1 = Math.max(y1, p.y)
+        }
+        this.cam.followShot((x0 + x1) / 2, (y0 + y1) / 2, pb.zoom)
+      } else if (pb.t < pb.flightsEnd) {
+        this.cam.holdShot(pb.zoom)
+      } else {
+        const at = this.lastImpact ?? pb.players.find((p) => p.id === pb.shooterId) ?? null
+        if (at) this.cam.settleAt(at.x, at.y)
+        else this.cam.holdShot(1)
+      }
+    } else if (s.phase === 'aiming') {
+      const key = `${this.matchId}:${s.turn}:${s.current}`
+      if (key !== this.camKey) {
+        // turno nuevo: la cámara vuelve al tanque aunque el anterior haya paneado
+        this.camKey = key
+        if (this.cam.mode === 'manual') this.cam.mode = 'tank'
+      }
+      const p = s.players[s.current]
+      if (p) this.cam.followTank(p.x, p.y)
+    } else if (this.cam.mode === 'shot') {
+      this.cam.holdShot(1)
+    }
+    this.cam.update(dt)
+  }
+
+  private minimap(players: Player[], currentIndex: number, terrain: Terrain): MinimapModel | null {
+    if (terrain.w <= VIEW_W) return null
+    const pb = this.playback
+    const lastImpacts: MinimapModel['lastImpacts'] = []
+    for (const [playerId, at] of this.lastImpacts) {
+      const p = players.find((q) => q.id === playerId)
+      if (p) lastImpacts.push({ playerId, x: at.x, y: at.y, color: p.color })
+    }
+    return {
+      terrain,
+      terrainVersion: this.terrainVersion,
+      view: this.cam.view(),
+      tanks: players.map((p, i) => ({ id: p.id, x: p.x, y: p.y, color: p.color, alive: p.alive, current: i === currentIndex })),
+      projectiles: pb ? this.projectiles(pb) : [],
+      lastImpacts,
+    }
   }
 
   hud(): HudModel | null {
@@ -700,6 +803,7 @@ export class Session {
         shield: Math.max(0, shieldOwner?.shield ?? 0),
         tracer: !!ammoOwner?.tracer,
         net: this.netHud,
+        minimap: this.minimap(players, currentIndex, pb ? pb.terrain : s.terrain),
       },
     }
   }
@@ -890,6 +994,17 @@ export class Session {
     this.tracerCache = null
     this.sentReady.clear()
     this.sentNext = false
+    this.resetCamera()
+  }
+
+  // Mapa nuevo: la cámara salta al tanque del turno y se borran las marcas de impacto del minimapa.
+  private resetCamera(): void {
+    const s = this.state
+    this.lastImpacts.clear()
+    this.camKey = ''
+    if (!s) return
+    const p = s.players[s.current]
+    this.cam.reset(s.terrain.w, s.terrain.h, p ? { x: p.x, y: p.y } : null)
   }
 
   private startPlayback(before: GameState, after: GameState, events: GameEvent[], flights: Flight[], shooterId: number): void {
@@ -942,6 +1057,11 @@ export class Session {
       reveal,
       pending,
       finisher,
+      flightsEnd,
+      zoom: shotZoom(
+        flights.map((f) => f.path),
+        before.terrain.h,
+      ),
     }
     if (hasShot) {
       this.shots.push({ playerId: shooterId, weapon })
@@ -971,6 +1091,8 @@ export class Session {
     this.state = pb.after
     this.playback = null
     this.phaseT = 0
+    // al terminar el tiro, la cámara va al tanque del turno siguiente
+    this.cam.mode = 'tank'
   }
 
   private deliver(pb: Playback, event: GameEvent): void {
@@ -989,6 +1111,7 @@ export class Session {
     switch (event.type) {
       case 'impact':
         this.lastImpact = { x: event.x, y: event.y }
+        if (event.source !== 'barrel') this.lastImpacts.set(pb.shooterId, { x: event.x, y: event.y })
         break
       case 'damage': {
         const p = pb.players.find((q) => q.id === event.playerId)
@@ -1034,11 +1157,17 @@ export class Session {
     }
   }
 
-  private projectiles(pb: Playback): Vec2[] {
+  // Proyectiles en vuelo en el tiempo t del tiro. hold: los que siguen en vuelo ahora pero terminan antes
+  // de t quedan en su punto final (la anticipación de la cámara mira hasta dónde llega el vuelo).
+  private projectiles(pb: Playback, t = pb.t, hold = false): Vec2[] {
     const out: Vec2[] = []
     for (const f of pb.flights) {
-      const local = pb.t - f.start
-      if (local < 0 || local > f.dur || f.flight.path.length === 0) continue
+      const local = t - f.start
+      if (f.flight.path.length === 0 || local < 0) continue
+      if (local > f.dur) {
+        if (hold && pb.t - f.start <= f.dur) out.push(f.flight.path[f.flight.path.length - 1])
+        continue
+      }
       out.push(samplePath(f.flight.path, local))
     }
     return out
