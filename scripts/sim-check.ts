@@ -16,6 +16,9 @@ import {
   WOOD,
   WORLD_H,
   WORLD_W,
+  MAP_SIZES,
+  MAP_SIZE_ORDER,
+  physicsFor,
   applyCommand,
   chooseShot,
   cloneState,
@@ -46,6 +49,7 @@ import {
   type GameEvent,
   type GameState,
   type ItemId,
+  type MapSize,
   type ShopId,
   type MatchConfig,
   type SlotConfig,
@@ -54,13 +58,17 @@ import {
   type WeaponId,
 } from '../src/sim'
 import { propSupported, resolveBlast, blastFor } from '../src/sim/physics'
-import { padBounds } from '../src/sim/gen'
+import { skylineOf } from '../src/sim/ballistics'
+import { generate, padBounds } from '../src/sim/gen'
+import { Rng } from '../src/sim/rng'
 import { columnGround, createTerrain, deform, fillRect } from '../src/sim/terrain'
 
-function mk(bots: number, difficulty: Difficulty, biome: MatchConfig['biome'], seed: number, rounds = 1, humans = 0): MatchConfig {
+function mk(bots: number, difficulty: Difficulty, biome: MatchConfig['biome'], seed: number, rounds = 1, humans = 0, size?: MapSize): MatchConfig {
   const slots: SlotConfig[] = []
   for (let i = 0; i <= bots; i++) slots.push({ kind: i < humans ? 'human' : 'ai' })
-  return { slots, rounds, difficulty, biome, seed }
+  const cfg: MatchConfig = { slots, rounds, difficulty, biome, seed }
+  if (size) cfg.size = size
+  return cfg
 }
 
 let failures = 0
@@ -149,22 +157,44 @@ for (const biome of BIOMES) {
 // ---------- 2. generación válida ----------
 const STRUCTURE = new Set([BRICK, WOOD, SLAT, BEAM, POST, METAL])
 const signature: Record<Biome, number[]> = { forest: [STONE, BRICK, SLAT], jungle: [STONE, SLAT], industrial: [BRICK, METAL] }
-for (const biome of BIOMES) {
+// Chico con 20 seeds (los mapas de v1); Mediano y Grande con 10.
+const GEN_SEEDS: Record<MapSize, number> = { small: 20, medium: 10, large: 10 }
+for (const size of MAP_SIZE_ORDER) for (const biome of BIOMES) {
   let mirrored = 0
-  for (let seed = 1; seed <= 20; seed++) {
+  const seeds = GEN_SEEDS[size]
+  for (let seed = 1; seed <= seeds; seed++) {
     for (const bots of [1, 2, 3]) {
-      const s = createMatch(mk(bots, 'normal', biome, seed))
-      const tag = `${biome}/seed ${seed}/bots ${bots}`
+      const s = createMatch(mk(bots, 'normal', biome, seed, 1, 0, size))
+      const tag = `${size}/${biome}/seed ${seed}/bots ${bots}`
       const t = s.terrain
-      check(t.w === WORLD_W && t.h === WORLD_H && t.front.length === WORLD_W * WORLD_H, `grilla mal dimensionada ${tag}`)
+      const W = s.width
+      const H = s.height
+      check(W === MAP_SIZES[size].w && H === MAP_SIZES[size].h && s.size === size, `tamaño del estado ${tag}`)
+      check(t.w === W && t.h === H && t.front.length === W * H && t.back.length === W * H, `grilla mal dimensionada ${tag}`)
       check(s.players.length === bots + 1, `cantidad de jugadores ${tag}`)
       let bed = true
-      for (let x = 0; x < WORLD_W; x++) if (t.front[(WORLD_H - 1) * WORLD_W + x] !== BEDROCK) bed = false
+      for (let x = 0; x < W; x++) if (t.front[(H - 1) * W + x] !== BEDROCK) bed = false
       check(bed, `falta BEDROCK abajo ${tag}`)
       for (const m of signature[biome]) check(count(s, m) > 200, `bioma sin material ${m} ${tag}`)
-      if (bots === 3 && s.players[0].x > WORLD_W / 2) mirrored++
+      if (bots === 3 && s.players[0].x > W / 2) mirrored++
+      // empalmes suaves: en la unión de dos tramos (x0 - 2 .. x0 + 1) la superficie no salta más de 12 px
+      // (el pilar y el dintel de las ruinas de la jungla, a 2 px de la unión o a 3 si está espejado, son a propósito)
+      if (size !== 'small') {
+        for (let x0 = WORLD_W; x0 < W; x0 += WORLD_W) {
+          let jump = 0
+          for (let x = x0 - 2; x < x0 + 1; x++) jump = Math.max(jump, Math.abs(columnGround(t, x) - columnGround(t, x + 1)))
+          check(jump <= 12, `empalme de tramos en x=${x0} con salto de ${jump} px ${tag}`)
+        }
+      }
+      // spawns repartidos: ninguno a menos de un sexto del espacio parejo de otro
+      if (size !== 'small') {
+        const xs = s.players.map((p) => p.x).sort((a, b) => a - b)
+        const span = W / xs.length
+        check(xs[0] < span && xs[xs.length - 1] > W - span, `spawns sin cubrir el ancho (${xs.join(',')}) ${tag}`)
+        for (let i = 1; i < xs.length; i++) check(xs[i] - xs[i - 1] >= span * 0.3, `spawns amontonados (${xs.join(',')}) ${tag}`)
+      }
       for (const p of s.players) {
-        check(p.x >= 20 && p.x <= WORLD_W - 20, `tanque fuera del mapa ${tag} p${p.id}`)
+        check(p.x >= 20 && p.x <= W - 20, `tanque fuera del mapa ${tag} p${p.id}`)
         let support = 0
         for (let x = p.x - TANK_HALF_W; x < p.x + TANK_HALF_W; x++) if (isSolid(t, x, p.y)) support++
         check(support >= 24, `tanque ${p.id} mal apoyado (${support}/28) ${tag}`)
@@ -173,7 +203,7 @@ for (const biome of BIOMES) {
         let inside = 0
         for (let y = p.y - TANK_H - 4; y < p.y; y++) {
           for (let x = p.x - TANK_HALF_W - 4; x < p.x + TANK_HALF_W + 4; x++) {
-            const i = y * WORLD_W + x
+            const i = y * W + x
             const body = y >= p.y - TANK_H && x >= p.x - TANK_HALF_W && x < p.x + TANK_HALF_W
             if (body ? t.front[i] !== AIR || t.back[i] !== AIR : STRUCTURE.has(t.front[i]) || STRUCTURE.has(t.back[i])) inside++
           }
@@ -185,9 +215,9 @@ for (const biome of BIOMES) {
         const from = p.y - TANK_H - 4
         const soil = (x: number) => {
           const g = columnGround(t, x, from)
-          return STRUCTURE.has(t.front[g * WORLD_W + x]) ? -1 : g
+          return STRUCTURE.has(t.front[g * W + x]) ? -1 : g
         }
-        for (let x = Math.max(0, px0 - 8); x < Math.min(WORLD_W - 1, px1 + 8); x++) {
+        for (let x = Math.max(0, px0 - 8); x < Math.min(W - 1, px1 + 8); x++) {
           const a = soil(x)
           const b = soil(x + 1)
           if (a >= 0 && b >= 0) worst = Math.max(worst, Math.abs(a - b))
@@ -200,7 +230,7 @@ for (const biome of BIOMES) {
       for (const k of ['barrel', 'ladder', 'flag', 'windsock'] as const) check(kinds.has(k), `falta utilería ${k} ${tag}`)
       if (biome !== 'industrial') check(kinds.has('lamp') && kinds.has('crate'), `falta foco o caja ${tag}`)
       for (const p of s.props) {
-        check(p.x >= 0 && p.x + p.w <= WORLD_W && p.y >= 0 && p.y + p.h <= WORLD_H, `prop ${p.id} fuera del mapa ${tag}`)
+        check(p.x >= 0 && p.x + p.w <= W && p.y >= 0 && p.y + p.h <= H, `prop ${p.id} fuera del mapa ${tag}`)
         check(propSupported(s, p), `prop ${p.id} (${p.kind}) sin apoyo ${tag}`)
         if (p.kind === 'barrel' || p.kind === 'crate') {
           let solid = 0
@@ -210,26 +240,74 @@ for (const biome of BIOMES) {
       }
     }
   }
-  check(mirrored > 2 && mirrored < 18, `el espejado no varía (${mirrored}/20) ${biome}`)
+  check(mirrored > seeds * 0.1 && mirrored < seeds * 0.9, `el espejado no varía (${mirrored}/${seeds}) ${size}/${biome}`)
+}
+// con 8 jugadores (V5) el generador no se rompe: spawns distintos, separados y apoyados
+for (const size of MAP_SIZE_ORDER) {
+  if (size === 'small') continue
+  for (const biome of BIOMES) {
+    for (const seed of [1, 2, 3]) {
+      const g = generate(biome, new Rng(seed * 7919), 8, MAP_SIZES[size].w, MAP_SIZES[size].h)
+      const xs = g.spawns.slice().sort((a, b) => a - b)
+      check(xs.length === 8 && xs.every((x) => x >= 20 && x <= g.terrain.w - 20), `8 spawns dentro del mapa ${size}/${biome}/${seed}`)
+      for (let i = 1; i < xs.length; i++) check(xs[i] - xs[i - 1] >= 60, `8 spawns: muy cerca (${xs.join(',')}) ${size}/${biome}/${seed}`)
+    }
+  }
 }
 
 // ---------- 3. IA ----------
 // El tiempo depende de la máquina y de la carga: en CI (runners lentos) solo se controla que no se cuelgue.
 const AI_BUDGET_MS = process.env.CI ? 2000 : 250
 let worstMs = 0
-for (const biome of BIOMES) {
-  for (const seed of [2, 5, 9, 14]) {
-    let s = createMatch(mk(3, 'hard', biome, seed))
-    for (let turn = 0; turn < 4 && s.phase === 'aiming'; turn++) {
-      const r = aiTurn(s, 'hard')
-      worstMs = Math.max(worstMs, r.ms)
-      check(r.ms < AI_BUDGET_MS, `la IA tardó ${r.ms.toFixed(0)} ms ${biome}/${seed}`)
-      check(!!r.flights && r.flights.length >= 1 && r.flights[0].path.length > 2, `tiro sin trayectoria ${biome}/${seed}`)
-      const impacts = r.events.filter((e) => e.type === 'impact')
-      check(impacts.length >= 1, `el tiro de la IA (${r.plan.weapon}) no explotó ${biome}/${seed} turno ${turn}`)
-      s = r.state
+const worstBySize: Record<string, number> = {}
+for (const size of MAP_SIZE_ORDER) {
+  for (const biome of BIOMES) {
+    for (const seed of [2, 5, 9, 14]) {
+      let s = createMatch(mk(3, 'hard', biome, seed, 1, 0, size))
+      for (let turn = 0; turn < 4 && s.phase === 'aiming'; turn++) {
+        const r = aiTurn(s, 'hard')
+        const tag = `${size}/${biome}/${seed}`
+        worstMs = Math.max(worstMs, r.ms)
+        worstBySize[size] = Math.max(worstBySize[size] ?? 0, r.ms)
+        check(r.ms < AI_BUDGET_MS, `la IA tardó ${r.ms.toFixed(0)} ms ${tag}`)
+        check(!!r.flights && r.flights.length >= 1 && r.flights[0].path.length > 2, `tiro sin trayectoria ${tag}`)
+        const impacts = r.events.filter((e) => e.type === 'impact')
+        check(impacts.length >= 1, `el tiro de la IA (${r.plan.weapon}) no explotó ${tag} turno ${turn}`)
+        s = r.state
+      }
     }
   }
+}
+console.log(`IA peor caso por tamaño: ${MAP_SIZE_ORDER.map((z) => `${z} ${(worstBySize[z] ?? 0).toFixed(0)} ms`).join(', ')}`)
+
+// Alcance (v2): en un llano de cada tamaño, potencia 100 a 45° sin viento llega a la otra punta.
+for (const size of MAP_SIZE_ORDER) {
+  const s = cloneState(createMatch(mk(1, 'normal', 'forest', 4, 1, 0, size)))
+  const W = s.width
+  s.terrain.front.fill(AIR)
+  s.terrain.back.fill(AIR)
+  fillRect(s.terrain, 0, 400, W - 1, s.height - 1, DIRT, 'both')
+  s.props = []
+  const p = s.players[0]
+  p.x = 30
+  p.y = 400
+  s.players[1].x = W - 30
+  s.players[1].y = 400
+  const f = fly({ terrain: s.terrain, players: s.players, props: [], ownerId: p.id, angle: 45, power: 100, wind: 0, ignoreTanks: true })
+  const reach = f.impact.x - f.path[0].x
+  console.log(`alcance ${size}: potencia 100 a 45° recorre ${reach.toFixed(0)} px de ${W} en ${f.time.toFixed(2)} s`)
+  check(f.impact.kind !== 'out' || f.impact.x > W - 60, `alcance ${size}: el tiro no volvió a caer`)
+  check(reach > W * 0.88 && reach < W * 1.12, `alcance ${size}: ${reach.toFixed(0)} px (esperaba ~${W})`)
+  // la skyline de la IA no cambia el resultado del vuelo
+  const sky = skylineOf(s.terrain, s.players, s.props)
+  for (const angle of [30, 45, 60, 80, 120]) {
+    for (const power of [35, 70, 100]) {
+      const a = fly({ terrain: s.terrain, players: s.players, props: [], ownerId: p.id, angle, power, wind: 4 })
+      const b = fly({ terrain: s.terrain, players: s.players, props: [], ownerId: p.id, angle, power, wind: 4, skyline: sky })
+      check(JSON.stringify(a) === JSON.stringify(b), `skyline cambia el vuelo ${size} ${angle}/${power}`)
+    }
+  }
+  check(physicsFor(W).gravity > 0, 'physicsFor')
 }
 
 // El proyectil sale de la boca del cañón y puede pasar por arriba del mapa.
@@ -307,12 +385,14 @@ for (const biome of BIOMES) {
 }
 
 // ---------- 8. partidas completas ----------
-for (const biome of BIOMES) {
-  let s = createMatch(mk(3, 'easy', biome, 99))
-  const r = playTurns(s, 80)
-  s = r.state
-  check(s.players.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y) && p.hp >= 0), `estado inválido tras partida ${biome}`)
-  console.log(`${biome}: ${s.phase} en turno ${s.turn}, hp ${s.players.map((p) => p.hp).join('/')}`)
+for (const size of MAP_SIZE_ORDER) {
+  for (const biome of BIOMES) {
+    let s = createMatch(mk(3, 'easy', biome, 99, 1, 0, size))
+    const r = playTurns(s, 80)
+    s = r.state
+    check(s.players.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y) && p.hp >= 0 && p.x >= 0 && p.x <= s.width), `estado inválido tras partida ${size}/${biome}`)
+    console.log(`${size}/${biome}: ${s.phase} en turno ${s.turn}, hp ${s.players.map((p) => p.hp).join('/')}`)
+  }
 }
 
 // mover no rompe
@@ -429,9 +509,9 @@ check(WEAPON_ORDER.length === 8, 'WEAPON_ORDER tiene las 8 armas')
 }
 
 // ---------- 10. balance (F9): IA contra IA ----------
-function match(bots: number, seed: number): { shots: number; turns: number; winner: number | null; weapons: Record<string, number> } {
+function match(bots: number, seed: number, size: MapSize = 'small'): { shots: number; turns: number; winner: number | null; weapons: Record<string, number> } {
   const biome = BIOMES[seed % BIOMES.length]
-  let s = createMatch(mk(bots, 'normal', biome, seed))
+  let s = createMatch(mk(bots, 'normal', biome, seed, 1, 0, size))
   let shots = 0
   const weapons: Record<string, number> = {}
   while (s.phase === 'aiming' && shots < 120) {
@@ -444,22 +524,27 @@ function match(bots: number, seed: number): { shots: number; turns: number; winn
   }
   return { shots, turns: s.turn, winner: s.roundWinnerId, weapons }
 }
+// Chico con 20 partidas (el balance de v1); Mediano y Grande con 10 (con --balance, 20).
 {
-  const t0 = performance.now()
-  for (const bots of [1, 3]) {
-    const res = []
-    for (let seed = 1; seed <= 20; seed++) res.push(match(bots, 100 + seed))
-    const shots = res.map((r) => r.shots)
-    const avg = shots.reduce((a, b) => a + b, 0) / shots.length
-    const used: Record<string, number> = {}
-    for (const r of res) for (const k in r.weapons) used[k] = (used[k] ?? 0) + r.weapons[k]
-    console.log(
-      `balance ${bots + 1} tanques: ${avg.toFixed(1)} tiros/partida (min ${Math.min(...shots)}, max ${Math.max(...shots)}), empates ${res.filter((r) => r.winner === null).length}, armas ${JSON.stringify(used)}`,
-    )
-    check(shots.every((n) => n < 120), `partida de ${bots + 1} sin terminar`)
-    if (bots === 1) check(avg >= 8 && avg <= 15, `balance 2 tanques fuera de 8-15 tiros (${avg.toFixed(1)})`)
+  const full = process.argv.includes('--balance')
+  for (const size of MAP_SIZE_ORDER) {
+    const t0 = performance.now()
+    const games = size === 'small' || full ? 20 : 10
+    for (const bots of [1, 3]) {
+      const res = []
+      for (let seed = 1; seed <= games; seed++) res.push(match(bots, 100 + seed, size))
+      const shots = res.map((r) => r.shots)
+      const avg = shots.reduce((a, b) => a + b, 0) / shots.length
+      const used: Record<string, number> = {}
+      for (const r of res) for (const k in r.weapons) used[k] = (used[k] ?? 0) + r.weapons[k]
+      console.log(
+        `balance ${size} ${bots + 1} tanques: ${avg.toFixed(1)} tiros/partida (min ${Math.min(...shots)}, max ${Math.max(...shots)}, ${games} partidas), empates ${res.filter((r) => r.winner === null).length}, armas ${JSON.stringify(used)}`,
+      )
+      check(shots.every((n) => n < 120), `partida de ${bots + 1} sin terminar (${size})`)
+      if (bots === 1) check(avg >= 8 && avg <= (size === 'small' ? 15 : 20), `balance ${size} 2 tanques fuera de rango (${avg.toFixed(1)})`)
+    }
+    console.log(`balance ${size}: ${((performance.now() - t0) / 1000).toFixed(1)} s`)
   }
-  console.log(`balance: ${((performance.now() - t0) / 1000).toFixed(1)} s`)
 }
 
 // ---------- 11. rondas, tienda e ítems (F10) ----------

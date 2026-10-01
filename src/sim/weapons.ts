@@ -4,12 +4,12 @@ import { blastFor, hurt, resolveBlast } from './physics'
 import { columnGround, deform, isSolid } from './terrain'
 import {
   AIR,
-  GRAVITY,
   MATERIALS,
   SUBSTEP,
   TANK_H,
   TANK_HALF_W,
   WEAPONS,
+  physicsFor,
   type Flight,
   type GameEvent,
   type GameState,
@@ -195,6 +195,7 @@ function tankAt(state: GameState, x: number, y: number): Player | undefined {
 
 function roll(state: GameState, shooter: Player, weapon: WeaponId, flight: FlightResult, flights: Flight[]): ShotOutcome {
   const t = state.terrain
+  const gravity = physicsFor(t.w).gravity
   let x = flight.impact.x
   let y = surfaceFrom(state, Math.round(x), Math.floor(flight.impact.y) - 6) - ROLL_R
   const slopeAt = (px: number) => surfaceFrom(state, Math.round(px) + 2, y - 6) - surfaceFrom(state, Math.round(px) - 2, y - 6)
@@ -212,7 +213,7 @@ function roll(state: GameState, shooter: Player, weapon: WeaponId, flight: Fligh
     n++
     if (!air) {
       const s = slopeAt(x) / 4 // >0: baja hacia la derecha
-      vx += (GRAVITY * 0.9 * s) / Math.sqrt(1 + s * s) * SUBSTEP
+      vx += (gravity * 0.9 * s) / Math.sqrt(1 + s * s) * SUBSTEP
       const fr = 70 * SUBSTEP
       vx = Math.abs(vx) <= fr ? 0 : vx - Math.sign(vx) * fr
       const nx = x + vx * SUBSTEP
@@ -224,7 +225,7 @@ function roll(state: GameState, shooter: Player, weapon: WeaponId, flight: Fligh
       still = Math.abs(vx) < 4 ? still + SUBSTEP : 0
       if (still > 0.25) break
     } else {
-      vy += GRAVITY * SUBSTEP
+      vy += gravity * SUBSTEP
       x += vx * SUBSTEP
       y += vy * SUBSTEP
       if (isSolid(t, x, y + ROLL_R)) {

@@ -1,6 +1,10 @@
 // Generación procedural determinista del escenario por bioma.
-// Se arma siempre "sin espejar" (plataforma a la izquierda, búnker a la derecha) y al final
-// se espeja según la seed.
+// El mapa se arma por tramos de 800 px (TRAMO_W). Cada tramo es el escenario de v1: plataforma
+// a la izquierda, valle, cerro, valle y meseta con búnker y torre a la derecha. El mapa Chico es
+// un solo tramo (y da exactamente los mapas de v1); Mediano y Grande encadenan 2 y 3 tramos
+// empalmados a la misma altura. Todo se arma "sin espejar" y al final se espeja según la seed.
+// V3 suma tipos de tramo nuevos (abismo, lago, lava, montaña) con el mismo esquema: cada tipo
+// arma su pedazo de grilla, su utilería y sus lugares de spawn.
 import { Rng, hash2, noise1 } from './rng'
 import { columnGround, createTerrain, fillRect } from './terrain'
 import {
@@ -68,11 +72,29 @@ interface PropSpec {
   h?: number
 }
 
-const W = WORLD_W
-const H = WORLD_H
+// Medidas de un tramo. Las funciones que arman un tramo trabajan sobre una grilla propia de
+// TRAMO_W × TRAMO_H; las que trabajan sobre el mapa entero (spawns, rampas, utilería) usan t.w/t.h.
+export const TRAMO_W = WORLD_W
+const TRAMO_H = WORLD_H
+const W = TRAMO_W
+const H = TRAMO_H
 
-export function generate(biome: Biome, rng: Rng, count: number): Generated {
-  const L = layout(biome, rng)
+// Separación mínima entre spawns en los mapas de varios tramos.
+const SPAWN_GAP = 80
+
+interface Tramo {
+  terrain: Terrain // TRAMO_W × TRAMO_H, sin espejar
+  specs: PropSpec[] // coordenadas del tramo
+}
+
+// width/height: tamaño del mapa (state.width/height). Con 800×450 da los mismos mapas que v1.
+export function generate(biome: Biome, rng: Rng, count: number, width = WORLD_W, height = WORLD_H): Generated {
+  if (width === W && height === H) return single(biome, rng, count)
+  return chain(biome, rng, count, width, height)
+}
+
+// Un tramo: superficie, estructuras del bioma y cráteres.
+function buildTramo(biome: Biome, rng: Rng, L: Layout): Tramo {
   const t = createTerrain(W, H)
   const surf: number[] = []
   for (let x = 0; x < W; x++) surf[x] = surface(L, biome, x)
@@ -84,24 +106,90 @@ export function generate(biome: Biome, rng: Rng, count: number): Generated {
   else buildIndustrial(t, L, rng, specs, surf)
 
   craters(t, L, rng, surf)
+  return { terrain: t, specs }
+}
+
+// Utilería común de un tramo: bandera en la plataforma, manga en el primer valle.
+function tramoSpecs(L: Layout, x0: number): PropSpec[] {
+  return [
+    { kind: 'flag', x: x0 + 20, y: L.platY },
+    { kind: 'windsock', x: x0 + L.platX1 + 58, y: 0 },
+  ]
+}
+
+// Mapa Chico: un tramo, con el orden de sorteos de v1 (mismos mapas para la misma seed).
+function single(biome: Biome, rng: Rng, count: number): Generated {
+  const L = layout(biome, rng)
+  const { terrain: t, specs } = buildTramo(biome, rng, L)
   fillRect(t, 0, H - BEDROCK_ROWS, W - 1, H - 1, BEDROCK, 'both')
 
   const spawnXs = pickSpawns(L, rng, count, biome === 'industrial')
   const targets = spawnXs.map((x) => flatten(t, x))
   ramps(t, spawnXs, targets)
+  specs.push(...tramoSpecs(L, 0))
+  return finish(t, specs, spawnXs, rng)
+}
 
-  // utilería común: bandera en la plataforma, manga en el primer valle
-  specs.push({ kind: 'flag', x: 20, y: L.platY })
-  specs.push({ kind: 'windsock', x: L.platX1 + 58, y: 0 })
+// Mapas de varios tramos: todos con la misma orientación (plataforma ... meseta), así cada
+// empalme junta la meseta de un tramo con la plataforma del siguiente, puestas a la misma altura.
+function chain(biome: Biome, rng: Rng, count: number, width: number, height: number): Generated {
+  const n = Math.max(1, Math.ceil(width / W))
+  const layouts: Layout[] = []
+  for (let i = 0; i < n; i++) layouts.push(layout(biome, rng))
+  for (let i = 0; i + 1 < n; i++) {
+    const y = Math.round((layouts[i].py + layouts[i + 1].platY) / 2)
+    layouts[i].py = y
+    layouts[i + 1].platY = y
+  }
 
+  const t = createTerrain(width, height)
+  const specs: PropSpec[] = []
+  const slots: number[] = []
+  const dy = height - H // los tramos se apoyan en el fondo del mapa
+  for (let i = 0; i < n; i++) {
+    const x0 = i * W
+    const L = layouts[i]
+    const tramo = buildTramo(biome, rng, L)
+    blit(t, tramo.terrain, x0, dy)
+    for (const sp of tramo.specs) specs.push({ ...sp, x: sp.x + x0, y: sp.y + dy })
+    for (const sp of tramoSpecs(L, x0)) specs.push({ ...sp, y: sp.y + dy })
+    for (const x of tramoSlots(L, rng, biome === 'industrial')) if (x + x0 < width - 40) slots.push(x + x0)
+  }
+  fillRect(t, 0, height - BEDROCK_ROWS, width - 1, height - 1, BEDROCK, 'both')
+
+  const spawnXs = spreadSpawns(t, slots, rng, count)
+  const targets = spawnXs.map((x) => flatten(t, x))
+  ramps(t, spawnXs, targets)
+  return finish(t, specs, spawnXs, rng)
+}
+
+// Espejado y utilería, igual para todos los tamaños.
+function finish(t: Terrain, specs: PropSpec[], spawnXs: number[], rng: Rng): Generated {
   const mirror = rng.chance(0.5)
   if (mirror) mirrorTerrain(t)
+  const spawns = spawnXs.map((x) => (mirror ? t.w - x : x))
   const props: Prop[] = []
   for (const s of specs) {
-    const p = placeProp(t, s, mirror, props.length, spawnXs.map((x) => (mirror ? W - x : x)))
+    const p = placeProp(t, s, mirror, props.length, spawns)
     if (p) props.push(p)
   }
-  return { terrain: t, props, spawns: spawnXs.map((x) => (mirror ? W - x : x)) }
+  return { terrain: t, props, spawns }
+}
+
+// Copia la grilla de un tramo al mapa en (x0, dy). Lo que cae afuera se recorta.
+function blit(dst: Terrain, src: Terrain, x0: number, dy: number): void {
+  const x1 = Math.min(dst.w, x0 + src.w)
+  if (x1 <= x0) return
+  for (let y = 0; y < src.h; y++) {
+    const yy = y + dy
+    if (yy < 0 || yy >= dst.h) continue
+    const from = y * src.w
+    const to = yy * dst.w + x0
+    dst.front.set(src.front.subarray(from, from + (x1 - x0)), to)
+    dst.back.set(src.back.subarray(from, from + (x1 - x0)), to)
+  }
+  // si el mapa es más alto que el tramo, lo de abajo es tierra
+  for (let yy = dy + src.h; yy < dst.h; yy++) fillRect(dst, x0, yy, x1 - 1, yy, DIRT, 'both')
 }
 
 function layout(biome: Biome, rng: Rng): Layout {
@@ -352,6 +440,76 @@ function pickSpawns(L: Layout, rng: Rng, count: number, industrial: boolean): nu
   return [slots[0], ...bots].slice(0, Math.max(1, count))
 }
 
+// Lugares seguros para un tanque dentro de un tramo (sin estructuras encima): plataforma, cerro,
+// valles y meseta. Coordenadas del tramo, sin espejar.
+function tramoSlots(L: Layout, rng: Rng, industrial: boolean): number[] {
+  const plat = rng.int(60, Math.max(62, L.platX1 - 64))
+  const plateau = Math.min(L.plateauX0 + 28, L.bx - 16)
+  const slots = [plat, L.hillX + (L.hillKind === 1 ? -20 : 0), L.v2, plateau]
+  if (!industrial) slots.push(L.v1) // en industrial el primer valle tiene el galpón
+  return slots
+}
+
+// Spawns repartidos a lo ancho: cada jugador apunta a una posición pareja (con algo de azar) y
+// toma el lugar seguro libre más cercano. Si no queda ninguno a SPAWN_GAP de los demás (muchos
+// jugadores), busca una columna sin estructuras cerca de la posición ideal. El jugador 0 queda
+// en la punta (la de la plataforma, como en v1) y las IA se mezclan en el resto.
+function spreadSpawns(t: Terrain, slots: number[], rng: Rng, count: number): number[] {
+  const n = Math.max(1, count)
+  const span = t.w / n
+  const taken: number[] = []
+  const free = (x: number) => taken.every((q) => Math.abs(q - x) >= SPAWN_GAP)
+  for (let i = 0; i < n; i++) {
+    const ideal = span * (i + 0.5) + (rng.next() - 0.5) * span * 0.3
+    let best = -1
+    for (const x of slots) {
+      if (!free(x)) continue
+      if (best < 0 || Math.abs(x - ideal) < Math.abs(best - ideal)) best = x
+    }
+    if (best < 0 || Math.abs(best - ideal) > span * 0.75) best = scanSpawn(t, ideal, free) ?? best
+    if (best < 0) best = Math.round(Math.max(40, Math.min(t.w - 40, ideal)))
+    taken.push(best)
+  }
+  taken.sort((a, b) => a - b)
+  const bots = taken.slice(1)
+  for (let i = bots.length - 1; i > 0; i--) {
+    const j = rng.int(0, i)
+    const tmp = bots[i]
+    bots[i] = bots[j]
+    bots[j] = tmp
+  }
+  return [taken[0], ...bots]
+}
+
+// Columna libre de estructuras más cercana a x (de a 6 px hacia los dos lados).
+function scanSpawn(t: Terrain, x: number, free: (x: number) => boolean): number | null {
+  const x0 = Math.round(x)
+  for (let d = 0; d < t.w; d += 6) {
+    for (const c of d === 0 ? [x0] : [x0 - d, x0 + d]) {
+      if (c < 40 || c > t.w - 40 || !free(c)) continue
+      if (openGround(t, c)) return c
+    }
+  }
+  return null
+}
+
+const STRUCTURE = new Set([BRICK, WOOD, SLAT, BEAM, POST, METAL])
+
+// El lugar de un tanque en x: piso por encima de la roca madre y nada de estructura en la caja ni al lado.
+function openGround(t: Terrain, cx: number): boolean {
+  const [x0, x1] = padBounds(cx)
+  let top = t.h
+  for (let x = x0; x <= x1; x++) top = Math.min(top, columnGround(t, x))
+  if (top >= t.h - BEDROCK_ROWS - 4) return false
+  for (let x = x0 - 6; x <= x1 + 6; x++) {
+    for (let y = Math.max(0, top - TANK_H - 16); y < Math.min(t.h, top + 12); y++) {
+      const i = y * t.w + x
+      if (STRUCTURE.has(t.front[i]) || STRUCTURE.has(t.back[i])) return false
+    }
+  }
+  return true
+}
+
 // Aplana el piso bajo un tanque a la mediana y lo empalma con el terreno con rampas de 1:1 como máximo.
 export const PAD_RAMP = 80
 
@@ -392,7 +550,7 @@ function ramps(t: Terrain, spawnXs: number[], targets: number[]): void {
       let blocked = 0
       for (let d = 1; d <= PAD_RAMP; d++) {
         const x = dir < 0 ? b[0] - d : b[1] + d
-        if (x < 0 || x >= W || near(x) !== i) break
+        if (x < 0 || x >= t.w || near(x) !== i) break
         const orig = soilTop(t, x, targets[i])
         // postes y paredes finas: la rampa pasa de largo; una estructura ancha la corta
         if (orig < 0) {
@@ -414,11 +572,11 @@ function ramps(t: Terrain, spawnXs: number[], targets: number[]): void {
 // -1 si la columna arranca con una estructura a la altura del tanque.
 function soilTop(t: Terrain, x: number, target: number): number {
   let y = columnGround(t, x)
-  while (y < H) {
-    const m = t.front[y * W + x]
+  while (y < t.h) {
+    const m = t.front[y * t.w + x]
     if (m === DIRT || m === STONE || m === BEDROCK) return y
     if (y >= target - TANK_H - 4) return -1
-    while (y < H && t.front[y * W + x] !== AIR) y++
+    while (y < t.h && t.front[y * t.w + x] !== AIR) y++
     y = columnGround(t, x, y)
   }
   return -1
@@ -439,7 +597,7 @@ function placeProp(t: Terrain, s: PropSpec, mirror: boolean, id: number, tanks: 
   const h = s.h ?? size.h
   let x = s.x
   // bandera y manga: se espeja el mástil (2 px), no el rectángulo
-  if (mirror) x = s.kind === 'flag' || s.kind === 'windsock' ? W - 2 - s.x : W - s.x - w
+  if (mirror) x = s.kind === 'flag' || s.kind === 'windsock' ? t.w - 2 - s.x : t.w - s.x - w
   let y = s.y
   if (s.kind === 'flag' || s.kind === 'windsock') y = columnGround(t, x) - h
   if (s.kind === 'barrel' || s.kind === 'crate') {
@@ -447,12 +605,12 @@ function placeProp(t: Terrain, s: PropSpec, mirror: boolean, id: number, tanks: 
     for (const tx of tanks) if (x + w > tx - TANK_HALF_W - 2 && x < tx + TANK_HALF_W + 2) return null
     if (!clear(t, x, y, w, h)) return null
   }
-  if (x < 0 || x + w > W) return null
+  if (x < 0 || x + w > t.w) return null
   return { id, kind: s.kind, x, y, w, h, alive: true }
 }
 
 function clear(t: Terrain, x: number, y: number, w: number, h: number): boolean {
-  for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) if (t.front[yy * W + xx] !== AIR) return false
+  for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) if (t.front[yy * t.w + xx] !== AIR) return false
   return true
 }
 
