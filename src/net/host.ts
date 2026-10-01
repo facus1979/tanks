@@ -84,7 +84,7 @@ export class HostRoom {
       owner: i === 0 ? 'host' : null,
       connected: i === 0,
     }))
-    this.state = { code: '', slots, rounds: 3, difficulty: 'normal', biome: 'random', turnSeconds: 30 }
+    this.state = { code: '', slots, rounds: 3, difficulty: 'normal', biome: 'random', turnSeconds: 30, size: 'medium' }
     transport.onPeer((id, s) => (s === 'join' ? undefined : this.peerLeft(id)))
     transport.onMessage((from, msg) => this.message(from, msg))
   }

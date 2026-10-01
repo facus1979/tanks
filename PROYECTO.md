@@ -89,7 +89,11 @@ Balance medido con `npm run sim-check -- --balance` (30 partidas de 3 rondas, 3-
 | M | Silencia / activa el sonido |
 | Q / F / R / T | Ítems: escudo, combustible, reparación, trazador (solo en tu turno; el paracaídas es pasivo) |
 | P | Pausa |
+| Z / X | Mueve la cámara a la izquierda / derecha (mapas Mediano y Grande) |
+| C | Recentra la cámara en el tanque del turno |
 | Esc | En la tabla, vuelve al menú |
+
+Cámara (v2): mouse contra el borde o arrastrando el mundo (botón del medio, o el izquierdo fuera del tanque, la barra y el minimapa); click/toque en el minimapa centra, arrastrarlo mueve la vista, doble click/toque recentra; stick derecho panea y R3 recentra; en táctil, dos dedos y el botón ◎.
 
 Gamepad: stick o cruz = ángulo y potencia, gatillos o bumpers = mover, A dispara, X/Y arma anterior/siguiente, B primer ítem usable (escudo, reparación, combustible, trazador), Start pausa. En las pantallas: A elige/compra, B atrás/vende, Start LISTO/JUGAR.
 
@@ -213,6 +217,12 @@ Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 
   - **Minimapa**: franja arriba al centro del HUD con el mapa entero a escala 1/10 (160×45 en Mediano, 240×45 en Grande; no aparece en Chico, que no scrollea). Muestra la silueta del terreno (se actualiza con cada deformación), agua y lava con su color, los tanques como puntos de su color (el del turno titila, los muertos como ×), el proyectil en vuelo y la marca del último impacto de cada jugador, y el viewport como un rectángulo.
   - Click o toque en el minimapa centra la cámara ahí; arrastrar el rectángulo mueve el viewport. Con gamepad, el stick derecho mueve el viewport y se ve en el minimapa.
   - Mientras apuntás, la cámara se queda donde la dejaste (para mirar al objetivo mientras ajustás); `C`, doble toque en el minimapa o el botón de recentrar la devuelven a tu tanque. Al disparar sigue al proyectil; al terminar el tiro vuelve al tanque del turno siguiente.
+  - Estado: hecha (2026-10-01), repartida en cuatro agentes (sim, render, vistas, flujo) sobre el contrato v2 e integrada en la rama `v2-mundo`.
+    - sim: `generate(biome, rng, count, width, height)` arma el mapa con tramos de `TRAMO_W` = 800 (Chico = 1 tramo, byte a byte igual que v1; Mediano 2, Grande 3, empalmados meseta→plataforma); spawns repartidos a lo ancho (válidos hasta 8). `fly` y la rodadora usan `physicsFor(terrain.w)`. IA: error de puntería dividido por k, búsqueda más fina en mapas anchos, `skylineOf` + `FlyOptions.skyline` para saltear vuelo por encima del terreno. `sim-check` 31645/31645 OK; tiros por partida con 2 / 4 tanques: Chico 11.1 / 20.6, Mediano 12.7 / 31.3, Grande 14.6 / 31.2; alcance de potencia 100 a 45° en llano: 796/800, 1501/1600, 2239/2400 (2.8 / 3.1 / 3.5 s); IA peor caso 71 / 85 / 84 ms.
+    - render: terreno en trozos de 256 px con culling y repintado por trozo; partículas y luces en buffers de pantalla (808×458) con coordenadas de mundo; focos como sprites aditivos; parallax por capa (cielo 0,04 a 0,7), repitiendo cada capa con su copia espejada. CPU de `render()` en Chrome headless: Chico 5,5 ms medio (base 5,9), Grande paneando 3,2 ms. Chico idéntico pixel a pixel a v1.
+    - vistas: `src/ui/minimap.ts` (minimapa y flechas), fila MAPA en menú y lobby, `?uitest=hud&size=`.
+    - flujo: `src/game/camera.ts` (amortiguado crítico: 0,45 s al tanque, 0,2 s al proyectil, 0,55 s el zoom; zoom del tiro `min(1, 640/ancho del vuelo, 450/(alto − apogeo + 30))`, mínimo 0,5), `src/input/mouse.ts`, paneo y recentrar en gamepad y táctil, último impacto por jugador, `&size=` en `?play=` y `?demo=`.
+    - Pendientes: el fondo `forest-4` tiene un pino cortado en el borde derecho que al repetirse espejado se ve doble en la unión (arte: capas repetibles a lo ancho); el pilar con dintel de la jungla queda pegado a cada empalme; las partidas de 4 tanques en Mediano/Grande duran 1,5× (V2); el snapshot de red pesa 705 KB en Chico y ~3× en Grande (comprimir la grilla si el online se resiente). Acuerdo para V4: el minimapa reconoce agua y lava por `MATERIALS[].name` = `'agua'` y `'lava'`.
 - **V2 Alcance y balance de distancias.** Física derivada del ancho, ajuste fino, IA que apunta a cualquier distancia y decide moverse, muerte súbita. `sim-check` por tamaño.
 - **V3 Geografía por tramos.** El generador arma el mapa como secuencia de tramos por bioma: montaña, valle, meseta, abismo, lago, pozo de lava, más búnker/torre/cuevas.
 - **V4 Agua y lava.** Materiales, flujo, reglas, texturas y animación (superficie, burbujas, vapor al enfriarse), sonido.
