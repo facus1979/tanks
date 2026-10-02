@@ -1,5 +1,5 @@
 import { fly, muzzle, skylineOf } from './ballistics'
-import { applyCommand } from './game'
+import { abyssAhead, applyCommand } from './game'
 import { blastDamage } from './physics'
 import { Rng, hashSeed } from './rng'
 import { NAPALM_DPS, NAPALM_SPREAD, resolveShot } from './weapons'
@@ -9,6 +9,7 @@ import {
   PLAYER_HP,
   REPAIR_HP,
   TANK_H,
+  TANK_HALF_W,
   WEAPONS,
   WEAPON_ORDER,
   WORLD_W,
@@ -28,9 +29,10 @@ const ERROR: Record<Difficulty, { angle: number; power: number }> = {
 
 // v2: escala del mapa (k = ancho / 800). Con mapas más anchos la misma potencia cubre más
 // pixels, así que la búsqueda va más fina y el error en grados y potencia se achica para que
-// el error en pixels quede parecido al de v1 (ERROR_SCALE_EXP: 1 = mismo error en pixels).
+// el error en pixels quede parecido al de v1 (ERROR_SCALE_EXP: 1 = mismo error en pixels; v3: 1,15,
+// un poco menos de error en pixels porque con montañas y abismos en el medio hay menos tiros rectos).
 // Con k = 1 todo da igual que en v1.
-const ERROR_SCALE_EXP = 1
+const ERROR_SCALE_EXP = 1.15
 function mapScale(state: GameState): number {
   return state.terrain.w / WORLD_W
 }
@@ -103,7 +105,11 @@ interface Candidate {
   power: number
   weapon: WeaponId
   score: number
+  push?: boolean // v3: la estimación cree que tira a un rival al abismo
 }
+
+// v3: cuántos tiros "al abismo" se verifican con la simulación completa por búsqueda.
+const PUSH_POOL = 6
 
 interface Search {
   best: Candidate
@@ -172,13 +178,18 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
   return plan
 }
 
-// Aplica 'move' hasta |dx| pixels. null si no pudo avanzar.
+// v3: la IA no se acerca a menos de esto (en pasos de 1 px) de quedar colgando sobre un abismo.
+export const AI_ABYSS_MARGIN = 24
+
+// Aplica 'move' hasta |dx| pixels. null si no pudo avanzar. Nunca camina hacia un abismo: frena
+// AI_ABYSS_MARGIN px antes del primer paso que la dejaría sin piso.
 function walk(state: GameState, dx: number): { state: GameState; dx: number } | null {
   let s = state
   const id = s.players[s.current].id
   const dir = dx > 0 ? 1 : -1
   let n = 0
   for (; n < Math.abs(dx); n++) {
+    if (abyssAhead(s, dir, AI_ABYSS_MARGIN)) break
     const r = applyCommand(s, { type: 'move', playerId: id, dir })
     if (r.state === s || r.state.current !== s.current) break
     s = r.state
@@ -195,14 +206,34 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   let total = 0
   let blocked = 0
   const sky = skylineOf(state.terrain, state.players, state.props)
+  // v3: rivales que se sostienen sobre un abismo (ver ledgeOf): la estimación suma el tiro que les
+  // rompe el piso, y la simulación completa confirma si de verdad caen.
+  const ledges = ledgesOf(state.terrain, targets)
+  let aim = { angle: 0, power: 0, d: Infinity } // el tiro que cae más al centro de uno de esos rivales
+  // los mejores tiros (según la estimación) que tiran a alguien al abismo, todos a verificar: la
+  // estimación no sabe de durezas y suele haber pocos que de verdad sirvan
+  const pushes: Candidate[] = []
+  const addPush = (c: Candidate) => {
+    if (pushes.some((q) => q.angle === c.angle && q.power === c.power)) return
+    pushes.push(c)
+    pushes.sort((a, b) => b.score - a.score)
+    if (pushes.length > PUSH_POOL) pushes.pop()
+  }
   const consider = (angle: number, power: number) => {
-    const r = estimate(state, actor, targets, weapons, angle, power, sky)
+    const r = estimate(state, actor, targets, weapons, angle, power, sky, ledges)
     total++
+    if (r.at) {
+      for (const l of ledges) {
+        const d = Math.abs(r.at.x - l.p.x) + Math.max(0, r.at.y - l.p.y)
+        if (d < aim.d) aim = { angle, power, d }
+      }
+    }
     if (r.blocked) blocked++
     for (const c of r.list) {
       const prev = perWeapon.get(c.weapon)
       if (!prev || c.score > prev.score) perWeapon.set(c.weapon, c)
       if (c.score > best.score) best = c
+      if (c.push) addPush(c)
     }
   }
   const k = mapScale(state)
@@ -211,6 +242,11 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   // en mapas anchos la potencia mínima de 24 ya tira lejos: se busca desde más abajo
   const p0 = k > 1 ? 12 : 24
   for (let angle = 6; angle <= 174; angle += da) for (let power = p0; power <= 100; power += dp) consider(angle, power)
+  if (aim.d < 40) {
+    // refina alrededor del tiro que cae más al centro del rival colgado: el que le rompe el piso
+    // suele estar en una ventana chica que la grilla gruesa no ve
+    for (let a = -3; a <= 3; a += 1) for (let p = -2; p <= 2; p += 0.5) consider(clamp(aim.angle + a, 0, 180), clamp(aim.power + p, 10, 100))
+  }
   if (fine) {
     const a0 = best.angle
     const p0 = best.power
@@ -223,7 +259,7 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
     for (let a = -1; a <= 1; a += 0.5) for (let p = -1; p <= 1; p += 0.25) if (a !== 0 || p !== 0) consider(clamp(a1 + a, 0, 180), clamp(p1 + p, 10, 100))
   }
   // verificación con la simulación completa (racimo, rodadora y napalm no se estiman bien)
-  const pool = [...perWeapon.values(), best]
+  const pool = [...perWeapon.values(), best, ...pushes]
   let verified: Candidate = { ...best, score: -Infinity }
   for (const c of pool) {
     const score = simulate(state, c)
@@ -240,7 +276,8 @@ function estimate(
   angle: number,
   power: number,
   skyline?: Int16Array,
-): { list: Candidate[]; blocked: boolean } {
+  ledges: Ledge[] = [],
+): { list: Candidate[]; blocked: boolean; at?: { x: number; y: number } } {
   const flight = fly({
     skyline,
     terrain: state.terrain,
@@ -270,12 +307,66 @@ function estimate(
       if (w.burn && Math.abs(t.x - x) < NAPALM_SPREAD && Math.abs(t.y - y) < 30) d += NAPALM_DPS * w.burn
       dmg += Math.min(t.hp + t.shield, d)
     }
+    // v3: el tiro le rompe el piso a un rival parado sobre el abismo: cae y muere (vale como matarlo)
+    let push = false
+    if (w.terrain === 'destroy') {
+      for (const l of ledges) {
+        if (!dropsInto(l, x, y, w.radius)) continue
+        dmg += l.p.hp + l.p.shield + 25
+        push = true
+      }
+    }
     const self = blastDamage(actor, blast)
     const cost = costOf(state, id)
     const score = dmg > 0 ? 1000 + dmg * 10 - self * SELF_WEIGHT - cost : -near - self * SELF_WEIGHT - cost * 0.01
-    list.push({ angle, power, weapon: id, score })
+    list.push(push ? { angle, power, weapon: id, score, push } : { angle, power, weapon: id, score })
   }
-  return { list, blocked }
+  return { list, blocked, at: flight.impact }
+}
+
+// v3: un rival que se sostiene sobre un abismo. Por cada columna de su caja: si es de abismo y lo
+// que tiene debajo es un puente o un saliente (sólido y después aire hasta el fondo), la fila de
+// abajo de ese sólido (cut, la que hay que romper); si no (piso firme), anchored. Si quedan menos de
+// MIN_SUPPORT columnas firmes, romper los puentes lo tira.
+interface Ledge {
+  p: Player
+  cuts: { x: number; y: number }[]
+  anchored: number
+}
+const MIN_SUPPORT = 3 // como en physics
+
+function ledgesOf(t: Terrain, targets: Player[]): Ledge[] {
+  const out: Ledge[] = []
+  if (!t.pits) return out
+  for (const p of targets) {
+    const cx = Math.round(p.x)
+    let any = false
+    for (let ix = cx - TANK_HALF_W; ix < cx + TANK_HALF_W && !any; ix++) if (ix >= 0 && ix < t.w && t.pits[ix]) any = true
+    if (!any) continue
+    const cuts: { x: number; y: number }[] = []
+    let anchored = 0
+    for (let ix = cx - TANK_HALF_W; ix < cx + TANK_HALF_W; ix++) {
+      if (ix < 0 || ix >= t.w) continue
+      let y = Math.max(0, p.y)
+      if (y >= t.h || t.front[y * t.w + ix] === 0) continue // sin piso en esta columna
+      while (y < t.h && t.front[y * t.w + ix] !== 0) y++
+      let open = t.pits[ix] === 1
+      for (let yy = y; open && yy < t.h; yy++) if (t.front[yy * t.w + ix] !== 0) open = false
+      if (open) cuts.push({ x: ix, y: y - 1 })
+      else anchored++
+    }
+    if (anchored < MIN_SUPPORT && cuts.length > 0) out.push({ p, cuts, anchored })
+  }
+  return out
+}
+
+// La explosión en (x, y) de radio r rompe tantos puentes que el tanque queda con menos de
+// MIN_SUPPORT columnas de apoyo (estimación: sin dureza de materiales).
+function dropsInto(l: Ledge, x: number, y: number, r: number): boolean {
+  let left = l.anchored
+  const r2 = r * r
+  for (const c of l.cuts) if ((c.x - x) ** 2 + (c.y - y) ** 2 > r2) left++
+  return left < MIN_SUPPORT
 }
 
 // Grilla de trabajo para simulate: se reusa entre llamadas para no generar basura (en los mapas
@@ -291,6 +382,8 @@ function scratchCopy(t: Terrain): Terrain {
   scratch.h = t.h
   scratch.front.set(t.front)
   scratch.back.set(t.back)
+  // v3: los abismos no cambian nunca (deform no los toca): alcanza con compartirlos
+  scratch.pits = t.pits
   return scratch
 }
 

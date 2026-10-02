@@ -61,29 +61,37 @@ export function hashState(state: GameState): number {
   h = mixWord(mixWord(h, terrain.w), terrain.h)
   h = mixBytes(h, terrain.front)
   h = mixBytes(h, terrain.back)
+  // v3: columnas de abismo. Sin pits (mapa Chico) el hash queda igual que antes.
+  if (terrain.pits) h = mixBytes(mixWord(h, 0x77), terrain.pits)
   return mixValue(h, rest)
 }
 
-// Formato: u32 largo del JSON | JSON (todo menos las grillas) | front | back.
+// Formato: u32 largo del JSON | JSON (todo menos las grillas) | front | back | pits (v3, w bytes,
+// solo si el JSON trae tp = 1).
 export function encodeState(state: GameState): Uint8Array {
   const { terrain, ...rest } = state
-  const head = new TextEncoder().encode(JSON.stringify({ ...rest, tw: terrain.w, th: terrain.h }))
-  const out = new Uint8Array(4 + head.length + terrain.front.length + terrain.back.length)
+  const pits = terrain.pits
+  const head = new TextEncoder().encode(JSON.stringify({ ...rest, tw: terrain.w, th: terrain.h, ...(pits ? { tp: 1 } : {}) }))
+  const out = new Uint8Array(4 + head.length + terrain.front.length + terrain.back.length + (pits ? pits.length : 0))
   new DataView(out.buffer).setUint32(0, head.length, true)
   out.set(head, 4)
   out.set(terrain.front, 4 + head.length)
   out.set(terrain.back, 4 + head.length + terrain.front.length)
+  if (pits) out.set(pits, 4 + head.length + terrain.front.length + terrain.back.length)
   return out
 }
 
 export function decodeState(bytes: Uint8Array): GameState {
   const len = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true)
-  const { tw, th, ...rest } = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + len)))
+  const { tw, th, tp, ...rest } = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + len)))
   const n = tw * th
   const at = 4 + len
-  if (!(n > 0) || bytes.length !== at + 2 * n) throw new Error('snapshot inválido')
+  const np = tp === 1 ? tw : 0
+  if (!(n > 0) || bytes.length !== at + 2 * n + np) throw new Error('snapshot inválido')
   // copias propias: alineadas y sin depender del buffer de entrada
   const front = bytes.slice(at, at + n)
   const back = bytes.slice(at + n, at + 2 * n)
-  return { ...rest, terrain: { w: tw, h: th, front, back } } as GameState
+  const terrain: GameState['terrain'] = { w: tw, h: th, front, back }
+  if (np > 0) terrain.pits = bytes.slice(at + 2 * n, at + 2 * n + np)
+  return { ...rest, terrain } as GameState
 }

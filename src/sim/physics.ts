@@ -1,5 +1,5 @@
 // Resolución de un impacto: terreno, daño, utilería, barriles en cadena, caída y aplastamiento.
-import { deform, isSolid, solidRunUp } from './terrain'
+import { deform, isPit, isSolid, solidRunUp } from './terrain'
 import {
   FALL_DAMAGE,
   TANK_H,
@@ -20,6 +20,9 @@ export const CHAIN_DELAY = 0.18
 export const CRUSH_DEPTH = 8
 export const CRUSH_DAMAGE = 2 // por pixel pasado de CRUSH_DEPTH
 export const MIN_SUPPORT = 3 // columnas sólidas que sostienen al tanque
+// v3: un tanque que cae a un abismo termina ABYSS_DROP px por debajo del borde inferior del mapa
+// (fall.to = h + ABYSS_DROP): el render lo anima cayendo hasta perderse de vista.
+export const ABYSS_DROP = 60
 
 export interface Blast {
   x: number
@@ -187,8 +190,33 @@ function settleProps(state: GameState, events: GameEvent[]): void {
       y++
       prop.y = y
     }
-    events.push({ type: 'prop', propId: prop.id, kind: prop.kind, x: prop.x, y: prop.y, destroyed: false })
+    // v3: llegó al fondo sin apoyo = cayó a un abismo y se pierde
+    const lost = !rowSupported(state, prop, prop.y + prop.h)
+    if (lost) prop.alive = false
+    events.push({ type: 'prop', propId: prop.id, kind: prop.kind, x: prop.x, y: prop.y, destroyed: lost })
   }
+}
+
+// v3: el tanque en x quedó sin ningún piso (tankFloor dio el borde del mapa) y tiene columnas de
+// abismo debajo: cae y se pierde. Sin pits nunca pasa (debajo del mapa es roca madre).
+export function overAbyss(t: Terrain, x: number, floor: number): boolean {
+  if (floor < t.h || !t.pits) return false
+  const cx = Math.round(x)
+  for (let ix = cx - TANK_HALF_W; ix < cx + TANK_HALF_W; ix++) if (isPit(t, ix)) return true
+  return false
+}
+
+// v3: el tanque cae al abismo. Eventos fall (to = h + ABYSS_DROP) y, si estaba vivo, death con
+// cause 'abyss'. Sin daño de caída (la vida queda en 0 sin evento damage) y el paracaídas no lo salva
+// ni se gasta. La plata la resuelve fire: si lo tiró el tiro de otro cuenta como kill (sin plata por daño).
+export function dropIntoAbyss(t: Terrain, p: Player, events: GameEvent[]): void {
+  const from = p.y
+  p.y = t.h + ABYSS_DROP
+  events.push({ type: 'fall', playerId: p.id, from, to: p.y })
+  if (!p.alive) return
+  p.alive = false
+  p.hp = 0
+  events.push({ type: 'death', playerId: p.id, cause: 'abyss' })
 }
 
 // Fila de apoyo del tanque buscando desde y hacia abajo.
@@ -205,6 +233,10 @@ export function tankFloor(t: Terrain, x: number, y: number): number {
 function settleTanks(state: GameState, coverBefore: number[], events: GameEvent[]): void {
   for (const p of state.players) {
     const floor = tankFloor(state.terrain, p.x, p.y)
+    if (p.y < state.terrain.h && overAbyss(state.terrain, p.x, floor)) {
+      dropIntoAbyss(state.terrain, p, events)
+      continue
+    }
     if (floor > p.y) {
       const from = p.y
       p.y = floor

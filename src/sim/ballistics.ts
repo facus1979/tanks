@@ -144,7 +144,8 @@ export function fly(opts: FlyOptions): FlightResult {
       return { path, impact: { kind: 'out', x, y }, time: elapsed, vel: { x: vx, y: vy }, apex: true }
     }
     if (n % PATH_EVERY === 0) path.push({ x, y })
-    if (x < -OUT_MARGIN || x > terrain.w + OUT_MARGIN) {
+    // v3: por un abismo el proyectil cae por debajo del mapa (en el resto, debajo es roca madre)
+    if (x < -OUT_MARGIN || x > terrain.w + OUT_MARGIN || (y > terrain.h + OUT_MARGIN && x >= 0 && x < terrain.w)) {
       path.push({ x, y })
       return { path, impact: { kind: 'out', x, y }, time: elapsed, vel: { x: vx, y: vy } }
     }

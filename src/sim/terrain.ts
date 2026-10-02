@@ -6,15 +6,24 @@ export function createTerrain(w = WORLD_W, h = WORLD_H): Terrain {
 }
 
 export function cloneTerrain(t: Terrain): Terrain {
-  return { w: t.w, h: t.h, front: t.front.slice(), back: t.back.slice() }
+  const c: Terrain = { w: t.w, h: t.h, front: t.front.slice(), back: t.back.slice() }
+  // v3: las columnas de abismo viajan con la grilla (deform nunca las cambia)
+  if (t.pits) c.pits = t.pits.slice()
+  return c
 }
 
-// Fuera de la grilla: los costados y el cielo son aire; debajo del mapa es sólido.
+// v3: la columna ix es de abismo (sin fondo). Sin pits, ninguna.
+export function isPit(terrain: Terrain, ix: number): boolean {
+  return terrain.pits !== undefined && ix >= 0 && ix < terrain.w && terrain.pits[ix] === 1
+}
+
+// Fuera de la grilla: los costados y el cielo son aire; debajo del mapa es sólido (roca madre),
+// salvo en las columnas de abismo (v3), donde debajo del mapa no hay nada.
 export function isSolid(terrain: Terrain, x: number, y: number): boolean {
   const ix = Math.floor(x)
   const iy = Math.floor(y)
   if (ix < 0 || ix >= terrain.w || iy < 0) return false
-  if (iy >= terrain.h) return true
+  if (iy >= terrain.h) return !isPit(terrain, ix)
   return terrain.front[iy * terrain.w + ix] !== AIR
 }
 
@@ -22,11 +31,13 @@ export function materialAt(terrain: Terrain, x: number, y: number): Material {
   const ix = Math.floor(x)
   const iy = Math.floor(y)
   if (ix < 0 || ix >= terrain.w || iy < 0) return AIR
-  if (iy >= terrain.h) return BEDROCK
+  if (iy >= terrain.h) return isPit(terrain, ix) ? AIR : BEDROCK
   return terrain.front[iy * terrain.w + ix]
 }
 
-// Primera fila sólida de una columna, buscando desde fromY hacia abajo.
+// Primera fila sólida de una columna, buscando desde fromY hacia abajo. Si no hay ninguna devuelve
+// terrain.h: en una columna normal es el borde de la roca madre de abajo; en una de abismo (v3)
+// significa "sin piso" (ver isPit).
 export function columnGround(terrain: Terrain, x: number, fromY = 0): number {
   const ix = Math.floor(x)
   if (ix < 0 || ix >= terrain.w) return terrain.h
@@ -38,7 +49,8 @@ export function columnGround(terrain: Terrain, x: number, fromY = 0): number {
 }
 
 // La y del piso bajo la franja [x - halfW, x + halfW): la fila sólida más alta de esas columnas,
-// buscando desde fromY hacia abajo. Sin fromY busca desde el cielo.
+// buscando desde fromY hacia abajo. Sin fromY busca desde el cielo. terrain.h si ninguna columna
+// tiene piso (solo puede pasar con toda la franja sobre un abismo).
 export function groundAt(terrain: Terrain, x: number, halfW: number, fromY = 0): number {
   const cx = Math.round(x)
   let top = terrain.h
