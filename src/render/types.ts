@@ -5,6 +5,9 @@ import type { Biome, GameEvent, Player, Prop, Terrain, Vec2, WeaponId } from '..
 export const VIEW_W = 800
 export const VIEW_H = 450
 
+// Pulido v2: segundos de vuelo que muestra la guía corta de apuntado (sin trazador).
+export const AIM_PREVIEW_T = 0.35
+
 // Cámara en coordenadas de mundo. La arma el flujo (src/game) y el renderer la aplica tal cual:
 // el centro de la pantalla muestra el punto (cx, cy) del mundo; zoom 1 = 1 px de mundo por px lógico,
 // zoom < 1 se aleja (vuelos largos; mínimo 0,5). El flujo la mantiene dentro del mapa en x; en y puede
@@ -36,7 +39,10 @@ export interface RenderFrame {
   shooterId: number | null // quién disparó el tiro en curso (para el retroceso)
   weapon: WeaponId | null // arma del tiro en curso (del estado antes de disparar); null sin tiro
   freeze: boolean // modo demo: congela partículas y animaciones en el frame actual
-  aimPreview: Vec2[] | null // trazador activo: trayectoria completa del tiro que se está apuntando
+  // Trayectoria del tiro que se está apuntando. Con trazador: completa. Sin trazador (pulido v2): solo el
+  // comienzo, los puntos de los primeros AIM_PREVIEW_T segundos (aimPreviewShort = true).
+  aimPreview: Vec2[] | null
+  aimPreviewShort?: boolean
   camera: Camera // v2; el tamaño del mundo es terrain.w × terrain.h
   lava: number | null // v2: y de la superficie de la lava de muerte súbita (ya animada por la sesión); null = no hay
 }

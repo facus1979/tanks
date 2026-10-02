@@ -251,6 +251,17 @@ Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 
     - Pendientes: vetas en la lava honda (tablas de la banda, ya anotado en V2); no hay derrumbe de tierra en la sim, así que "tierra sobre lava → piedra" solo aplica al `build`; posibles mejoras de contrato: `Impact.water` (explosión sumergida exacta) y salpicaduras en `RenderFrame`.
 - **V5 Hasta 8 jugadores.** Arte, HUD, lobby local y online.
 
+### Pulido v2 (2026-10-02)
+
+Pedido del usuario tras jugar la v2 publicada. Contrato: `fuelFor(width)`, `KNOCKBACK_MAX`, `SLIDE_SLOPE`, `PARACHUTE_MIN_DAMAGE`, evento `slide` (`src/sim/types.ts`); `AIM_PREVIEW_T` y `RenderFrame.aimPreviewShort` (`src/render/types.ts`).
+
+- **Empuje y deslizamiento**: las explosiones empujan a los tanques; un tanque en pendiente fuerte se desliza cuesta abajo. Así se puede caer al vacío, al agua o al abismo.
+- **Paracaídas**: solo se abre en caídas que harían al menos `PARACHUTE_MIN_DAMAGE`; en el abismo sigue sin salvar.
+- **Combustible**: `fuelFor(width)` = 60·√k por turno.
+- **Cruzar líquidos**: el proyectil de Tierra no se derrite en la lava y lo que construye sobre ella es piedra; el napalm sobre agua hace piedra flotante.
+- **Guía de apuntado**: sin trazador se ven los puntos del comienzo de la trayectoria (`AIM_PREVIEW_T` segundos); el trazador sigue mostrando la completa.
+- **HUD**: tres propuestas del área arte para que ángulo, potencia, viento y combustible se lean mejor; el usuario elige una y después se implementa.
+
 ## Cómo se agrega algo
 
 - Arma nueva: un registro en `WEAPONS` y, si el efecto es nuevo, un modo de terreno en `sim` y un `BlastStyle` en el renderer.
