@@ -52,6 +52,9 @@ export interface FlyOptions {
   // donde algo puede frenar al proyectil (terreno, tanque o utilería). Ver skylineOf. El resultado
   // es idéntico con o sin esto; solo saltea los tramos de vuelo que van por arriba de todo.
   skyline?: Int16Array
+  // v2 muerte súbita: y de la superficie de la lava (GameState.lava). El proyectil que llega a
+  // y >= lava se derrite: termina con impacto 'lava' y no explota. Sin esto, no hay lava.
+  lava?: number
 }
 
 // Por columna, la fila más alta con terreno, un tanque vivo o utilería sólida. Sirve mientras
@@ -93,10 +96,15 @@ export function fly(opts: FlyOptions): FlightResult {
   let elapsed = 0
   let n = 0
   const sky = opts.skyline?.length === terrain.w ? opts.skyline : undefined
+  const lava = opts.lava ?? Infinity
 
   // el primer tramo, del pivote a la boca, también puede chocar (cañón metido en una pared)
   if (isSolid(terrain, x, y)) {
     return { path, impact: { kind: 'terrain', x, y }, time: 0, vel: { x: vx, y: vy } }
+  }
+  // tanque hundido en la lava hasta la boca: el proyectil se derrite al salir
+  if (y >= lava) {
+    return { path, impact: { kind: 'lava', x, y }, time: 0, vel: { x: vx, y: vy } }
   }
 
   while (elapsed < MAX_FLIGHT) {
@@ -110,7 +118,8 @@ export function fly(opts: FlyOptions): FlightResult {
     elapsed += SUBSTEP
     n++
 
-    if (sky && clearAbove(sky, terrain, px, py, x, y)) {
+    // el atajo del skyline no sabe de la lava: solo vale si el tramo entero va por arriba de ella
+    if (sky && y < lava && clearAbove(sky, terrain, px, py, x, y)) {
       // todo el tramo va por arriba de lo que puede chocar (y afuera del propio tanque)
       if (owner) armed = true
     } else for (let i = 1, steps = Math.max(1, Math.ceil(Math.hypot(x - px, y - py))); i <= steps; i++) {
@@ -119,6 +128,11 @@ export function fly(opts: FlyOptions): FlightResult {
       const sy = py + (y - py) * f
       const t = elapsed - SUBSTEP * (1 - f)
       if (owner && !armed && !inTank(owner, sx, sy)) armed = true
+      if (sy >= lava) {
+        // tocó la superficie de la lava antes que cualquier otra cosa: se derrite
+        path.push({ x: sx, y: sy })
+        return { path, impact: { kind: 'lava', x: sx, y: sy }, time: t, vel: { x: vx, y: vy } }
+      }
       const hit = hitAt(terrain, tanks, solidProps, ownerId, armed, sx, sy)
       if (hit) {
         path.push({ x: sx, y: sy })

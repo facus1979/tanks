@@ -4,6 +4,8 @@ import { blastDamage } from './physics'
 import { Rng, hashSeed } from './rng'
 import { NAPALM_DPS, NAPALM_SPREAD, resolveShot } from './weapons'
 import {
+  LAVA_DAMAGE,
+  LAVA_RISE,
   PLAYER_HP,
   REPAIR_HP,
   TANK_H,
@@ -43,6 +45,26 @@ const COST: Record<WeaponId, number> = {
   digger: 400,
   roller: 60,
   nuke: 450,
+}
+
+// v2 muerte súbita. Con la lava subiendo la ronda se termina: la munición especial se gasta
+// (el costo de cada arma se multiplica por esto) y la IA pesa el daño de lava que la espera.
+const LAVA_COST_SCALE = 0.25
+const SELF_WEIGHT = 18 // lo mismo que pesa un punto de autodaño en el puntaje
+
+function costOf(state: GameState, id: WeaponId): number {
+  return state.lava !== null ? COST[id] * LAVA_COST_SCALE : COST[id]
+}
+
+// Daño de lava (en puntos de puntaje) que recibiría un tanque con el piso en y antes de su próximo
+// turno: la lava sube una vez al empezar cada turno, así que hasta volver a jugar sube tantas veces
+// como tanques vivos hay. Sin muerte súbita, 0.
+export function lavaRisk(state: GameState, y: number): number {
+  if (state.lava === null) return 0
+  const rises = state.players.filter((p) => p.alive).length
+  let n = 0
+  for (let k = 1; k <= rises; k++) if (y > state.lava - k * LAVA_RISE) n++
+  return n * LAVA_DAMAGE * SELF_WEIGHT
 }
 
 // move: pixels a mover antes de apuntar (signo = dirección). Angle y power ya son para la
@@ -106,16 +128,23 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
   let best = here.best
   let move = 0
 
-  // a veces se mueve: siempre que el tiro esté bloqueado o no llegue, y de vez en cuando igual
+  // a veces se mueve: siempre que el tiro esté bloqueado o no llegue, y de vez en cuando igual.
+  // Con la lava cerca (muerte súbita) también, y cada posición se paga con la lava que la alcanzaría:
+  // así sale de la lava o se aleja de ella (hacia arriba) si puede, y no se mete caminando.
   const wander = rand() < 0.15
-  if (actor.fuel > 0 && (best.score < 1000 || wander)) {
-    const steps = best.score < 1000 ? [-40, -20, 20, 40] : [-20, 20]
+  const risk = lavaRisk(state, actor.y)
+  let total = best.score - risk
+  if (actor.fuel > 0 && (best.score < 1000 || wander || risk > 0)) {
+    const steps = risk > 0 ? [-60, -40, -20, 20, 40, 60] : best.score < 1000 ? [-40, -20, 20, 40] : [-20, 20]
     for (const d of steps) {
       const moved = walk(state, d)
       if (!moved) continue
       const c = search(moved.state, weapons, false).best
-      if (c.score > best.score + 60) {
+      const mp = moved.state.players[moved.state.current]
+      const score = c.score - lavaRisk(state, mp.y)
+      if (score > total + 60) {
         best = c
+        total = score
         move = moved.dx
       }
     }
@@ -221,8 +250,10 @@ function estimate(
     angle,
     power,
     wind: state.wind,
+    lava: state.lava ?? undefined,
   })
-  if (flight.impact.kind === 'out') return { list: [{ angle, power, weapon: weapons[0], score: -1e6 }], blocked: false }
+  // fuera del mapa o derretido en la lava: no sirve
+  if (flight.impact.kind === 'out' || flight.impact.kind === 'lava') return { list: [{ angle, power, weapon: weapons[0], score: -1e6 }], blocked: false }
   const { x, y } = flight.impact
   const m = muzzle(actor.x, actor.y, angle)
   const blocked = Math.hypot(x - m.x, y - m.y) < 30
@@ -240,7 +271,8 @@ function estimate(
       dmg += Math.min(t.hp + t.shield, d)
     }
     const self = blastDamage(actor, blast)
-    const score = dmg > 0 ? 1000 + dmg * 10 - self * 18 - COST[id] : -near - self * 18 - COST[id] * 0.01
+    const cost = costOf(state, id)
+    const score = dmg > 0 ? 1000 + dmg * 10 - self * SELF_WEIGHT - cost : -near - self * SELF_WEIGHT - cost * 0.01
     list.push({ angle, power, weapon: id, score })
   }
   return { list, blocked }
@@ -293,7 +325,8 @@ function simulate(state: GameState, c: Candidate): number {
   const self = before[actor.id].hp - actor.hp
   if (!actor.alive) return -1e5
   if (!Number.isFinite(near)) return -1e6
-  return dmg > 0 ? 1000 + dmg * 10 + kills * 250 - self * 18 - COST[c.weapon] : -near - self * 18 - COST[c.weapon] * 0.01
+  const cost = costOf(state, c.weapon)
+  return dmg > 0 ? 1000 + dmg * 10 + kills * 250 - self * SELF_WEIGHT - cost : -near - self * SELF_WEIGHT - cost * 0.01
 }
 
 function nearest(actor: Player, targets: Player[]): Player {

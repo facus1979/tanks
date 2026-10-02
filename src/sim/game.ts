@@ -1,5 +1,6 @@
+import { PATH_DT } from './ballistics'
 import { generate } from './gen'
-import { tankFloor } from './physics'
+import { hurt, tankFloor } from './physics'
 import { resolveShot } from './weapons'
 import { Rng, hashSeed, irange } from './rng'
 import { aiShop, buyEntry, sellEntry, shopEntry } from './shop'
@@ -11,11 +12,14 @@ import {
   FALL_DAMAGE,
   FUEL_PER_TURN,
   ITEM_ORDER,
+  LAVA_DAMAGE,
+  LAVA_RISE,
   MAX_CLIMB,
   PLAYER_HP,
   REPAIR_HP,
   SHIELD_HP,
   START_MONEY,
+  SUDDEN_DEATH_CALM,
   TANK_COLORS,
   TANK_H,
   TANK_HALF_W,
@@ -26,6 +30,7 @@ import {
   type MapSize,
   type Command,
   type CrewId,
+  type Flight,
   type GameEvent,
   type GameState,
   type ItemId,
@@ -283,7 +288,8 @@ function move(state: GameState, dir: -1 | 1): StepResult {
       if (p.hp <= 0) {
         p.alive = false
         events.push({ type: 'death', playerId: p.id })
-        return advance(next, events)
+        // se mató cayendo: termina el turno como un tiro que dañó a un tanque
+        return endTurn(next, events, [], true)
       }
     }
   } else p.y = floor
@@ -292,7 +298,7 @@ function move(state: GameState, dir: -1 | 1): StepResult {
 
 function fire(state: GameState, actor: Player): StepResult {
   if (actor.ammo[actor.weapon] <= 0) {
-    if (!hasAmmo(actor)) return advance(cloneState(state), [{ type: 'empty', playerId: actor.id }])
+    if (!hasAmmo(actor)) return endTurn(cloneState(state), [{ type: 'empty', playerId: actor.id }], [], false)
     return { state, events: [{ type: 'empty', playerId: actor.id }] }
   }
   const next = cloneState(state)
@@ -304,10 +310,12 @@ function fire(state: GameState, actor: Player): StepResult {
   const { flights, events } = resolveShot(next, shooter, weapon)
   // plata de la ronda: daño a otros, kills y autodaño
   let earned = 0
+  let damaged = false
   for (const p of next.players) {
     const b = before[p.id]
     if (!b.alive) continue
     const dmg = b.hp - (p.hp + p.shield)
+    if (dmg > 0) damaged = true // el escudo cuenta: lo que absorbió también es daño
     if (p.id === shooter.id) earned += dmg * EARN.selfDamage
     else {
       earned += dmg * EARN.perDamage
@@ -322,7 +330,62 @@ function fire(state: GameState, actor: Player): StepResult {
     const fallback = WEAPON_ORDER.find((id) => shooter.ammo[id] > 0)
     if (fallback) shooter.weapon = fallback
   }
-  return { ...advance(next, events), flights }
+  return { ...endTurn(next, events, flights, damaged), flights }
+}
+
+// ---------- muerte súbita (v2) ----------
+
+// Segundos entre el último impacto del tiro y la subida de la lava (el playback la muestra después).
+export const LAVA_DELAY = 0.4
+
+// La muerte súbita ya empezó: la lava sube en cada turno hasta el fin de la ronda.
+export function suddenDeath(state: GameState): boolean {
+  return state.calm >= SUDDEN_DEATH_CALM
+}
+
+// Cierra el turno que termina con este fire (o pase sin munición, o muerte por caída al moverse):
+// 1. cuenta de calma: sin daño a ningún tanque suma 1, con daño vuelve a 0 (salvo muerte súbita ya
+//    empezada, donde queda fija en SUDDEN_DEATH_CALM). Emite 'calm' si cambió lo que falta.
+// 2. si la muerte súbita está activa y la ronda sigue (2+ vivos), empieza el turno siguiente: la lava
+//    aparece en el fondo (la primera vez) o sube LAVA_RISE, y quema LAVA_DAMAGE a cada tanque vivo con
+//    el piso por debajo de la superficie. Esos eventos van al final, LAVA_DELAY s después del último
+//    impacto (o del fin del vuelo).
+// 3. advance: fin de ronda si queda uno o ninguno (todos quemados → empate), si no pasa el turno.
+// La lava no da ni quita plata: el daño no es de nadie y una muerte por lava no cuenta como kill.
+function endTurn(state: GameState, events: GameEvent[], flights: Flight[], damaged: boolean): StepResult {
+  const leftBefore = SUDDEN_DEATH_CALM - state.calm
+  if (!suddenDeath(state)) state.calm = damaged ? 0 : state.calm + 1
+  const left = Math.max(0, SUDDEN_DEATH_CALM - state.calm)
+  if (left !== leftBefore) events.push({ type: 'calm', left })
+  if (suddenDeath(state) && state.players.filter((p) => p.alive).length > 1) riseLava(state, events, shotEnd(events, flights) + LAVA_DELAY)
+  return advance(state, events)
+}
+
+// Momento en que termina lo que se ve del tiro: el último evento con t o el final del último vuelo.
+function shotEnd(events: GameEvent[], flights: Flight[]): number {
+  let end = 0
+  for (const f of flights) end = Math.max(end, (f.startT ?? 0) + Math.max(0, f.path.length - 1) * PATH_DT)
+  for (const e of events) if ('t' in e && typeof e.t === 'number') end = Math.max(end, e.t)
+  return end
+}
+
+function riseLava(state: GameState, events: GameEvent[], t: number): void {
+  const from = state.lava
+  const to = Math.max(0, (from ?? state.height) - LAVA_RISE)
+  state.lava = to
+  events.push({ type: 'lava', from, to, warn: 0 })
+  for (const p of state.players) {
+    if (!p.alive || p.y <= to) continue
+    const mark = events.length
+    hurt(p, LAVA_DAMAGE, events)
+    for (let i = mark; i < events.length; i++) {
+      const e = events[i]
+      if (e.type === 'damage') {
+        e.t = t
+        e.cause = 'lava'
+      } else if (e.type === 'death' || e.type === 'shield') e.t = t
+    }
+  }
 }
 
 function advance(state: GameState, events: GameEvent[]): StepResult {

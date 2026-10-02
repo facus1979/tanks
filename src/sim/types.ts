@@ -55,8 +55,8 @@ export const PLAYER_HP = 100
 // piso por debajo de la superficie (y > lava) pierde LAVA_DAMAGE al empezar cada turno. Un proyectil que toca
 // la lava se derrite: termina el vuelo sin explotar (impacto 'lava'). Una vez que empezó, sigue subiendo
 // hasta el fin de la ronda. En V4 la lava pasa a ser material de la grilla; las constantes quedan.
-export const SUDDEN_DEATH_CALM = 6
-export const LAVA_RISE = 14
+export const SUDDEN_DEATH_CALM = 5
+export const LAVA_RISE = 18
 export const LAVA_DAMAGE = 20
 export const FALL_DAMAGE = 0.45
 export const FUEL_PER_TURN = 60 // pixels que puede avanzar por turno (F6)

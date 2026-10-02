@@ -46,11 +46,12 @@ export function resolveShot(state: GameState, shooter: Player, weapon: WeaponId)
     angle: shooter.angle,
     power: shooter.power,
     wind: state.wind,
+    lava: state.lava ?? undefined, // v2: lo que toca la lava se derrite sin explotar
   }
   if (w.split) return cluster(state, shooter, weapon, fly({ ...base, stopAtApex: true }))
   const flight = fly(base)
   const flights = [toFlight(flight, 0)]
-  if (flight.impact.kind === 'out') return { flights, events: [] }
+  if (flight.impact.kind === 'out' || flight.impact.kind === 'lava') return { flights, events: [] }
   const { x, y, tankId } = flight.impact
   if (w.rolls && flight.impact.kind === 'terrain') return roll(state, shooter, weapon, flight, flights)
   const blast = blastFor(weapon, x, y, flight.time, tankId)
@@ -65,7 +66,7 @@ function cluster(state: GameState, shooter: Player, weapon: WeaponId, main: Flig
   const w = WEAPONS[weapon]
   const flights = [toFlight(main, 0)]
   if (!main.apex) {
-    if (main.impact.kind === 'out') return { flights, events: [] }
+    if (main.impact.kind === 'out' || main.impact.kind === 'lava') return { flights, events: [] }
     const b = blastFor(weapon, main.impact.x, main.impact.y, main.time, main.impact.tankId)
     return { flights, events: resolveBlast(state, b) }
   }
@@ -85,6 +86,7 @@ function cluster(state: GameState, shooter: Player, weapon: WeaponId, main: Flig
         wind: state.wind,
         origin,
         velocity: { x: main.vel.x + k * CLUSTER_SPREAD, y: -18 + Math.abs(k) * 6 },
+        lava: state.lava ?? undefined,
       }),
     )
   }
@@ -93,7 +95,7 @@ function cluster(state: GameState, shooter: Player, weapon: WeaponId, main: Flig
   for (const i of order) {
     const f = bombs[i]
     flights.push(toFlight(f, main.time))
-    if (f.impact.kind === 'out') continue
+    if (f.impact.kind === 'out' || f.impact.kind === 'lava') continue
     const tankId = f.impact.tankId !== undefined && state.players[f.impact.tankId]?.alive ? f.impact.tankId : undefined
     events.push(...resolveBlast(state, blastFor(weapon, f.impact.x, f.impact.y, main.time + f.time, tankId)))
   }
@@ -208,6 +210,7 @@ function roll(state: GameState, shooter: Player, weapon: WeaponId, flight: Fligh
   let n = 0
   let hit: Player | undefined
   const path: Vec2[] = [{ x, y }]
+  const lava = state.lava ?? Infinity
   while (time < ROLL_MAX_T) {
     time += SUBSTEP
     n++
@@ -237,6 +240,12 @@ function roll(state: GameState, shooter: Player, weapon: WeaponId, flight: Fligh
     if (x < -20 || x > t.w + 20 || y > t.h) {
       path.push({ x, y })
       flights.push({ path, impact: { kind: 'out', x, y }, startT: flight.time })
+      return { flights, events: [] }
+    }
+    if (y + ROLL_R >= lava) {
+      // la bola rodó (o cayó) hasta la lava: se derrite sin explotar
+      path.push({ x, y })
+      flights.push({ path, impact: { kind: 'lava', x, y }, startT: flight.time })
       return { flights, events: [] }
     }
     hit = tankAt(state, x, y)
