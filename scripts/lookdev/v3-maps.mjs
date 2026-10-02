@@ -1,6 +1,8 @@
 // QA de V3 (descartable, no es código del juego): pinta mapas generados por el sim con colores
 // planos por material, para mirar la geografía por tramos sin levantar el juego.
-// Uso: node scripts/lookdev/v3-maps.mjs [size=large] [n=3] [seed0=1]  → preview/v3-maps.png
+// Uso: node scripts/lookdev/v3-maps.mjs [size=large] [n=3] [seed0=1]  → preview/v4-maps.png
+// V4: agua y lava con su color plano (las cuencas ya vienen llenas; el resto de la cuenca que quede
+// seca se marca semitransparente como antes).
 // Por bioma, n mapas (un renglón cada uno). Referencias: back oscurecido, abismo con franja roja
 // abajo, cuencas con su nivel (agua celeste, lava naranja, semitransparentes), tanques como cajas
 // del color del jugador, utilería en amarillo y cortes de tramo como marcas arriba.
@@ -45,6 +47,8 @@ const COLORS = {
   7: [100, 70, 40], // poste
   8: [120, 136, 150], // chapa
   9: [40, 36, 40], // roca madre
+  10: [70, 150, 220], // agua (v4)
+  11: [255, 120, 20], // lava (v4)
 }
 const SKY = { forest: [226, 212, 188], jungle: [196, 222, 196], industrial: [232, 190, 160] }
 const PLAYER = [
@@ -106,7 +110,7 @@ for (const biome of sim.BIOMES) {
   }
 }
 
-const out = path.join(root, 'preview', 'v3-maps.png')
+const out = path.join(root, 'preview', 'v4-maps.png')
 fs.mkdirSync(path.dirname(out), { recursive: true })
 fs.writeFileSync(out, encodePng(W, IH, px))
 console.log(`→ ${path.relative(root, out)} (${W}×${IH})`)
