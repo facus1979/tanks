@@ -400,6 +400,103 @@ export class Sfx {
     this.noise({ dur: 0.08, type: 'lowpass', freq: 500, gain: 0.15 })
   }
 
+  // ---------- agua y lava (v4) ----------
+
+  // Proyectil que entra al agua: chasquido de superficie, "plop" grave y gotas que caen.
+  splash(): void {
+    if (!this.ready) return
+    const r = Math.random
+    const j = 0.85 + r() * 0.3
+    this.noise({ dur: 0.18, type: 'bandpass', freq: 2400 * j, to: 700, q: 0.9, gain: 0.3 })
+    this.tone({ freq: 420 * j, to: 140, dur: 0.12, type: 'sine', gain: 0.22 })
+    this.noise({ dur: 0.4, type: 'lowpass', freq: 900, to: 200, gain: 0.14, attack: 0.02, delay: 0.03 })
+    for (let i = 0; i < 6; i++) {
+      const f = 900 + r() * 1400
+      this.tone({ freq: f, to: f * 1.4, dur: 0.03 + r() * 0.03, type: 'sine', gain: 0.03 + r() * 0.03, delay: 0.12 + r() * 0.4 })
+    }
+  }
+
+  // Explosión con el centro bajo el agua: golpe grave y apagado (sin el estallido agudo), columna de
+  // agua que cae y burbujeo que sube. radius: el del evento (ya reducido por el agua).
+  boomUnder(radius = 14): void {
+    if (!this.ready) return
+    const r = Math.random
+    const k = Math.max(0.6, Math.min(1.6, radius / 10))
+    this.tone({ freq: 62, to: 24, dur: 0.6 * k, type: 'sine', gain: 0.85 })
+    this.noise({ dur: 0.7 * k, type: 'lowpass', freq: 420, to: 70, gain: 0.6, attack: 0.01 })
+    this.tone({ freq: 120, to: 55, dur: 0.25, type: 'triangle', gain: 0.25 })
+    // el agua que salta y vuelve a caer
+    this.noise({ dur: 0.5, type: 'bandpass', freq: 1300, to: 500, q: 0.8, gain: 0.18, attack: 0.05, delay: 0.12 })
+    this.noise({ dur: 0.6, type: 'lowpass', freq: 1400, to: 300, gain: 0.14, attack: 0.1, delay: 0.35 })
+    // burbujas: blups que suben de tono
+    const bubbles = Math.round(10 * k)
+    for (let i = 0; i < bubbles; i++) {
+      const f = 180 + r() * 380
+      this.tone({ freq: f, to: f * 2.1, dur: 0.05 + r() * 0.05, type: 'sine', gain: 0.05 + r() * 0.05, delay: 0.15 + r() * 0.9 })
+    }
+  }
+
+  // Agua y lava que se tocan y hacen piedra: siseo de vapor. n: celdas que se enfriaron.
+  steam(n = 20): void {
+    if (!this.ready) return
+    const r = Math.random
+    const k = Math.max(0.4, Math.min(1.3, Math.sqrt(n / 60)))
+    this.noise({ dur: 0.9 * k + 0.3, type: 'highpass', freq: 3200, to: 6000, gain: 0.22 * k, attack: 0.04 })
+    this.noise({ dur: 0.6 * k + 0.2, type: 'bandpass', freq: 1800, to: 900, q: 0.7, gain: 0.12 * k, attack: 0.06 })
+    for (let i = 0; i < 6; i++) {
+      this.noise({ dur: 0.015 + r() * 0.02, type: 'highpass', freq: 2800 + r() * 2500, gain: (0.05 + r() * 0.07) * k, delay: r() * 0.8 * k })
+    }
+  }
+
+  // Líquido corriendo durante un flujo (dur segundos): rumor de agua con gorgoteo, o, si lo que corre es
+  // lava, un rumor más grave y espeso con burbujas lentas que revientan. cells: celdas que cambiaron
+  // (escala el volumen); lava: la lava pesa más que el agua en lo que se movió.
+  flow(dur: number, cells: number, lava: boolean): void {
+    if (!this.ready) return
+    const r = Math.random
+    const d = Math.max(0.5, Math.min(4, dur + 0.3))
+    const k = Math.max(0.35, Math.min(1, Math.sqrt(cells / 1500)))
+    // cuerpo sostenido: tramos solapados de ruido filtrado que cambian de color, con rampa al final
+    const step = 0.25
+    for (let t = 0; t < d; t += step) {
+      const fade = Math.min(1, (d - t) / 0.6, (t + step) / 0.4)
+      if (lava) {
+        this.noise({ dur: 0.55, type: 'lowpass', freq: 150 + r() * 60, to: 80, gain: 0.32 * k * fade, attack: 0.15, delay: t })
+      } else {
+        this.noise({ dur: 0.5, type: 'bandpass', freq: 550 + r() * 500, q: 0.7, gain: 0.16 * k * fade, attack: 0.12, delay: t })
+        this.noise({ dur: 0.45, type: 'lowpass', freq: 320, gain: 0.1 * k * fade, attack: 0.12, delay: t })
+      }
+    }
+    if (lava) this.tone({ freq: 40, to: 32, dur: d, type: 'triangle', gain: 0.22 * k })
+    // gorgoteo (agua) o burbujas gordas que revientan (lava)
+    const n = Math.round(d * (lava ? 5 : 9) * (0.6 + k * 0.4))
+    for (let i = 0; i < n; i++) {
+      const at = r() * (d - 0.15)
+      if (lava) {
+        const f = 70 + r() * 110
+        this.tone({ freq: f, to: f * 1.7, dur: 0.1 + r() * 0.08, type: 'sine', gain: (0.08 + r() * 0.06) * k, delay: at })
+        this.noise({ dur: 0.03, type: 'lowpass', freq: 700, gain: 0.08 * k, delay: at + 0.1 })
+      } else {
+        const f = 260 + r() * 520
+        this.tone({ freq: f, to: f * (1.5 + r() * 0.6), dur: 0.04 + r() * 0.05, type: 'sine', gain: (0.04 + r() * 0.04) * k, delay: at })
+      }
+    }
+  }
+
+  // Tanque que cae al agua: chapuzón grande (sin golpe de chapa), con la ola que vuelve. distance: de la caída.
+  plunge(distance: number): void {
+    if (!this.ready) return
+    const r = Math.random
+    const k = Math.max(0.5, Math.min(1, distance / 40))
+    this.tone({ freq: 160, to: 50, dur: 0.3, type: 'sine', gain: 0.55 * k })
+    this.noise({ dur: 0.35, type: 'bandpass', freq: 1800, to: 450, q: 0.7, gain: 0.4 * k })
+    this.noise({ dur: 0.9, type: 'lowpass', freq: 1200, to: 180, gain: 0.25 * k, attack: 0.05, delay: 0.05 })
+    for (let i = 0; i < 9; i++) {
+      const f = 500 + r() * 1300
+      this.tone({ freq: f, to: f * 1.5, dur: 0.03 + r() * 0.04, type: 'sine', gain: (0.03 + r() * 0.04) * k, delay: 0.2 + r() * 0.7 })
+    }
+  }
+
   // Cartel de turno en hot-seat: corneta corta.
   banner(): void {
     if (!this.ready) return
