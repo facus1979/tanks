@@ -1,13 +1,13 @@
 // F10/F11: escudo, trazador, tripulante eyectado y cortina entre rondas. Todo con el dt que recibe el renderer.
 import { Container, Graphics, Sprite, Texture } from 'pixi.js'
 import type { GameEvent, Player, Terrain, Vec2 } from '../../sim/types'
-import { SHIELD_HP } from '../../sim/types'
+import { PIVOT_X, PIVOT_Y, SHIELD_HP } from '../../sim/types'
 import { solidCell } from './liquids'
 import type { RenderFrame } from '../types'
 import { VIEW_H, VIEW_W } from '../types'
 import type { Art } from './assets'
 import type { Fx } from './fx'
-import { Rng } from './raster'
+import { mix, Rng } from './raster'
 
 const SHIELD_RX = 21
 const SHIELD_RY = 19
@@ -21,6 +21,24 @@ const TRACER_STEP = 3.5
 // Pulido v2: guía corta de apuntado (sin trazador). Puntos más espaciados que el trazador, con contorno
 // oscuro para leerse sobre cielo claro, terreno oscuro y agua; se desvanecen en escalones hacia el final.
 const GUIDE_STEP = 5
+// HUD C (pulido v2): arco graduado alrededor del cañón del tanque del turno mientras un humano apunta.
+const ARC_R = 22
+const ARC_BRONZE = 0xc8964e
+const ARC_ANGLES = ((): number[] => {
+  // pixels del arco 0..180 (sin repetir), como ángulos en grados con su (dx, dy) redondeado
+  const seen = new Set<string>()
+  const out: number[] = []
+  for (let a = 0; a <= 180; a += 0.5) {
+    const r = (a * Math.PI) / 180
+    const dx = Math.round(Math.cos(r) * ARC_R)
+    const dy = -Math.round(Math.sin(r) * ARC_R)
+    const k = `${dx},${dy}`
+    if (seen.has(k)) continue
+    seen.add(k)
+    out.push(dx, dy)
+  }
+  return out
+})()
 const GUIDE_FADE = [1, 1, 0.85, 0.7, 0.55, 0.42, 0.3, 0.2] // alfa por tramo (del comienzo al final)
 
 interface ShieldState {
@@ -110,6 +128,7 @@ export class Extras {
   private shards: Shard[] = []
   private shardG = new Graphics()
   private tracerG = new Graphics()
+  private aimArc = new Graphics() // HUD C: arco graduado del ángulo
   private crews: Crew[] = []
   private curtainT = 0
   private rng = new Rng(4242)
@@ -119,7 +138,7 @@ export class Extras {
   darkAt: (x: number, y: number) => number = () => 0
 
   constructor(private fx: Fx) {
-    this.layer.addChild(this.tracerG, this.shardG)
+    this.layer.addChild(this.aimArc, this.tracerG, this.shardG)
     this.curtain.visible = false
   }
 
@@ -131,6 +150,7 @@ export class Extras {
     this.shards = []
     this.shardG.clear()
     this.tracerG.clear()
+    this.aimArc.clear()
   }
 
   // Cortina que barre de izquierda a derecha mostrando el mapa nuevo (cubre la pantalla, no el mundo).
@@ -192,6 +212,8 @@ export class Extras {
     this.updateShards(dt)
     this.updateCrews(frame.terrain, dt)
     const path = frame.aimPreview ?? null
+    this.aimArc.clear()
+    if (path) this.drawArc(frame.players[frame.current] ?? null)
     if (frame.aimPreviewShort) this.drawGuide(path, time, frame.terrain, frame.players[frame.current] ?? null)
     else this.drawTracer(path, time, frame.terrain)
     this.updateCurtain(dt)
@@ -375,6 +397,39 @@ export class Extras {
       g.rect(ex, ey - r, 1, r * 2 + 1).fill(0xff5a3c)
       g.rect(ex, ey, 1, 1).fill(0xffffff)
     }
+  }
+
+  // HUD C: arco de 0 a 180° de radio ARC_R centrado en el pivote del cañón (el del sim, que es el que manda
+  // el tiro), de 1 px y alfa baja en el color del jugador mezclado con bronce; marcas de 2 px hacia afuera
+  // cada 15° (las de 0, 90 y 180 un poco más marcadas) y una marca de 4 px más clara en el ángulo actual.
+  // Sin número. Todo en pixels enteros del mundo (pixel perfect con zoom 1).
+  private drawArc(p: Player | null): void {
+    if (!p || !p.alive) return
+    const g = this.aimArc
+    const facing = p.angle > 90 ? -1 : 1
+    const px = Math.round(p.x) + facing * PIVOT_X
+    const py = Math.round(p.y) - PIVOT_Y
+    const col = mix(p.color, ARC_BRONZE, 0.5)
+    const pts = ARC_ANGLES
+    for (let i = 0; i < pts.length; i += 2) g.rect(px + pts[i], py + pts[i + 1], 1, 1).fill({ color: col, alpha: 0.3 })
+    const tick = (deg: number, r0: number, r1: number, color: number, alpha: number): void => {
+      const r = (deg * Math.PI) / 180
+      const c = Math.cos(r)
+      const s = Math.sin(r)
+      let lx = NaN
+      let ly = NaN
+      for (let k = r0; k <= r1; k += 0.5) {
+        const x = px + Math.round(c * k)
+        const y = py - Math.round(s * k)
+        if (x === lx && y === ly) continue
+        lx = x
+        ly = y
+        g.rect(x, y, 1, 1).fill({ color, alpha })
+      }
+    }
+    for (let a = 0; a <= 180; a += 15) tick(a, ARC_R + 1, ARC_R + 2, col, a % 90 === 0 ? 0.7 : 0.5)
+    const ang = Math.max(0, Math.min(180, p.angle))
+    tick(ang, ARC_R - 2, ARC_R + 2, mix(col, 0xfff3c0, 0.6), 0.9)
   }
 
   // Pulido v2: guía corta. Puntos de 2×2 cada GUIDE_STEP px sobre el comienzo del vuelo, con sombra de
