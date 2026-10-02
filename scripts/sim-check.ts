@@ -54,6 +54,11 @@ import {
   materialAt,
   ABYSS_DROP,
   tankFloor,
+  KNOCKBACK_MAX,
+  SLIDE_SLOPE,
+  PARACHUTE_MIN_DAMAGE,
+  PATH_DT,
+  fuelFor,
   type Biome,
   type Command,
   type Difficulty,
@@ -78,6 +83,7 @@ import { cloneTerrain, columnGround, createTerrain, deform, fillRect, hasLiquid 
 import { applyPatch, flowLiquids, liquidVolume } from '../src/sim/flow'
 import { flowStats } from '../src/sim/game'
 import { inLava, inWater } from '../src/sim/physics'
+import { slopeAt } from '../src/sim/slide'
 
 function mk(bots: number, difficulty: Difficulty, biome: MatchConfig['biome'], seed: number, rounds = 1, humans = 0, size?: MapSize): MatchConfig {
   const slots: SlotConfig[] = []
@@ -1489,12 +1495,20 @@ type DeathEv = Extract<GameEvent, { type: 'death' }>
   // un tanque muerto que ya cayó no vuelve a caer ni a morir
   const again = resolveBlast(s, blastFor('normal', 5, 5, 1))
   check(!again.some((e) => (e.type === 'fall' || e.type === 'death') && e.playerId === 1), 'abismo: el que cayó no genera más eventos')
-  // un tanque con la mayor parte afuera del borde se sostiene (3 columnas alcanzan) y no cae
+  // Pulido v2: un tanque con la mayor parte afuera del borde (4 columnas de apoyo) ya no se sostiene:
+  // la pendiente lo desliza hacia el abismo y cae; con 20 columnas de apoyo se queda
   const h = pitMap()
   fillRect(h.terrain, PIT0, 300, PIT1, 307, AIR)
   h.players[1].x = PIT0 - TANK_HALF_W + 4
   const ev = resolveBlast(h, blastFor('normal', 5, 5, 1))
-  check(h.players[1].alive && !ev.some((e) => e.type === 'death'), 'abismo: colgando del borde con apoyo no cae')
+  const sl = ev.findIndex((e) => e.type === 'slide' && e.playerId === 1 && e.cause === 'slope')
+  const dt = ev.findIndex((e) => e.type === 'death' && e.playerId === 1 && e.cause === 'abyss')
+  check(!h.players[1].alive && sl >= 0 && dt > sl, `abismo: colgando del borde se desliza y cae (${JSON.stringify(ev.map((e) => e.type))})`)
+  const h2 = pitMap()
+  fillRect(h2.terrain, PIT0, 300, PIT1, 307, AIR)
+  h2.players[1].x = PIT0 - TANK_HALF_W - 6
+  const ev2 = resolveBlast(h2, blastFor('normal', 5, 5, 1))
+  check(h2.players[1].alive && !ev2.some((e) => e.type === 'death' || e.type === 'slide'), 'abismo: apoyado en el borde con 20 columnas no se mueve')
 }
 {
   // un tiro de otro que lo tira al abismo: cuenta como kill, sin plata por daño (solo por lo que pegó antes)
@@ -2062,6 +2076,383 @@ function breakWall(m: number): { before: GameState; r: StepResult } {
     }
     check(diverged === 0 && netHash(a) === netHash(b), `réplicas ${size}/${biome} con líquidos: ${diverged} pasos distintos`)
   }
+}
+// ---------- 16. Pulido v2: empuje, deslizamiento, paracaídas, combustible y cruzar líquidos ----------
+type SlideEv = Extract<GameEvent, { type: 'slide' }>
+const slidesOf = (ev: GameEvent[], id?: number, cause?: 'blast' | 'slope') =>
+  ev.filter((e): e is SlideEv => e.type === 'slide' && (id === undefined || e.playerId === id) && (cause === undefined || e.cause === cause))
+// llano de Chico (flat) con el jugador 1 en x 600; explosión de prueba en (x, y)
+// (por defecto a 270, arriba del tanque, para no volarle el piso: sin piso no hay empuje, cae)
+function pushAt(weapon: WeaponId, x: number, y = 270, prep?: (s: GameState) => void, damage?: number): { s: GameState; ev: GameEvent[]; x0: number } {
+  const s = flat()
+  prep?.(s)
+  const x0 = s.players[1].x
+  const b = blastFor(weapon, x, y, 1)
+  if (damage !== undefined) b.damage = damage
+  const ev = resolveBlast(s, b)
+  return { s, ev, x0 }
+}
+{
+  // dirección: se aleja del centro; path con el piso cada PATH_DT, t del impacto, sin gastar combustible
+  const r = pushAt('normal', 590, 299)
+  const sl = slidesOf(r.ev, 1, 'blast')
+  const p = r.s.players[1]
+  check(sl.length === 1 && p.x > r.x0, `empuje: se aleja hacia la derecha (${r.x0} → ${p.x})`)
+  if (sl[0]) {
+    const path = sl[0].path
+    check(sl[0].t === 1, `empuje: t del impacto (${sl[0].t})`)
+    check(path[0].x === r.x0 && path[path.length - 1].x === p.x && path.every((q, i) => i === 0 || q.x > path[i - 1].x), 'empuje: path monótono desde la posición inicial')
+    check(path.every((q) => q.y === 300), 'empuje: el path va por el piso')
+    check(r.ev.findIndex((e) => e.type === 'impact') < r.ev.indexOf(sl[0]) && r.ev.findIndex((e) => e.type === 'damage' && e.playerId === 1) < r.ev.indexOf(sl[0]), 'empuje: después del impacto y del daño')
+  }
+  check(p.fuel === fuelFor(WORLD_W), 'empuje: no gasta combustible')
+  const l = pushAt('normal', 610, 299)
+  check(l.s.players[1].x < l.x0, `empuje: desde la derecha va a la izquierda (${l.x0} → ${l.s.players[1].x})`)
+  // magnitud: más cerca y más fuerte empuja más; nunca más de KNOCKBACK_MAX
+  const near = pushAt('normal', 590, 275).s.players[1].x - 600
+  const far = pushAt('normal', 590, 270).s.players[1].x - 600
+  const heavy = pushAt('heavy', 590, 270).s.players[1].x - 600
+  const huge = pushAt('heavy', 590, 270, (s) => (s.players[1].shield = 500), 200).s.players[1].x - 600
+  console.log(`empuje: normal a 5 px ${near}, a 10 px ${far}, pesada a 10 px ${heavy}, golpe de 200 ${huge} (tope ${KNOCKBACK_MAX})`)
+  check(near > far && far > 0 && heavy > far, `empuje: más cerca y más fuerte empuja más (${near}, ${far}, ${heavy})`)
+  check(huge === KNOCKBACK_MAX && heavy <= KNOCKBACK_MAX, `empuje: tope KNOCKBACK_MAX (${huge})`)
+  check(pushAt('normal', 540, 299).s.players[1].x === 600, 'empuje: fuera del radio no empuja')
+  // la Tierra no empuja
+  check(slidesOf(pushAt('dirt', 590, 270).ev, 1, 'blast').length === 0, 'empuje: la Tierra no empuja')
+  // sin piso (la explosión se lo voló) no hay empuje: cae al cráter
+  const under = pushAt('heavy', 595, 299)
+  check(slidesOf(under.ev, 1, 'blast').length === 0 && under.s.players[1].y > 300, 'empuje: sin piso no empuja, cae')
+  // pared: se frena contra ella
+  const w = pushAt('heavy', 590, 270, (s) => fillRect(s.terrain, 624, 240, 640, 299, STONE, 'both'))
+  check(w.s.players[1].x + TANK_HALF_W <= 624 && w.s.players[1].x > 600, `empuje: frena contra la pared (x ${w.s.players[1].x})`)
+  // otro tanque: se frena contra él (y no lo atraviesa)
+  const o = pushAt('heavy', 590, 270, (s) => {
+    s.players[0].x = 640
+  })
+  check(o.s.players[1].x <= 640 - 2 * TANK_HALF_W && o.s.players[1].x > 600, `empuje: frena contra otro tanque (x ${o.s.players[1].x})`)
+  // escalones: sube los de MAX_CLIMB, frena en uno más alto
+  const st = pushAt('heavy', 590, 270, (s) => fillRect(s.terrain, 616, 300 - MAX_CLIMB, 700, 299, DIRT, 'both'))
+  check(st.s.players[1].y === 300 - MAX_CLIMB && st.s.players[1].x > 610, `empuje: sube un escalón de ${MAX_CLIMB} px (x ${st.s.players[1].x}, y ${st.s.players[1].y})`)
+  const hi = pushAt('heavy', 590, 270, (s) => fillRect(s.terrain, 616, 290, 700, 299, DIRT, 'both'))
+  check(hi.s.players[1].y === 300 && hi.s.players[1].x + TANK_HALF_W <= 616, `empuje: frena en un escalón de 10 px (x ${hi.s.players[1].x})`)
+  // barril en cadena: también empuja (con el t de esa explosión)
+  const b = pushAt('normal', 565, 299, (s) => {
+    s.props = [{ id: 0, kind: 'barrel', x: 570, y: 288, w: 10, h: 12, alive: true }]
+  })
+  const bi = b.ev.filter((e): e is Extract<GameEvent, { type: 'impact' }> => e.type === 'impact' && e.source === 'barrel')
+  const bs = slidesOf(b.ev, 1, 'blast')
+  check(bi.length === 1 && bs.length === 1 && bs[0].t === bi[0].t && b.s.players[1].x > 600, `empuje: el barril en cadena empuja (${JSON.stringify(bs.map((e) => e.t))})`)
+  // racimo, rodadora y nuke empujan con un tiro real (fire)
+  for (const weapon of ['cluster', 'nuke', 'roller'] as WeaponId[]) {
+    let pushed = false
+    for (let power = 40; power <= 90 && !pushed; power += 0.5) {
+      const r2 = shoot(flat(), weapon, 60, power)
+      pushed = slidesOf(r2.events, 1, 'blast').length > 0
+    }
+    check(pushed, `empuje: ${weapon} empuja con un tiro`)
+  }
+}
+{
+  // empuje al abismo: parado a 6 px del borde, una explosión del otro lado lo tira (slide → fall → death)
+  const s = pitMap()
+  fillRect(s.terrain, PIT0, 300, PIT1, 307, AIR)
+  s.players[1].x = PIT0 - TANK_HALF_W - 6
+  s.players[1].items.parachute = 1
+  const ev = resolveBlast(s, blastFor('heavy', s.players[1].x - 18, 299, 2))
+  const sl = slidesOf(ev, 1, 'blast')
+  const fall = ev.find((e): e is FallEv => e.type === 'fall' && e.playerId === 1)
+  const death = ev.find((e): e is DeathEv => e.type === 'death' && e.playerId === 1)
+  check(sl.length === 1 && !!fall && !!death && death.cause === 'abyss', `empuje: lo tira al abismo (${JSON.stringify(ev.map((e) => e.type))})`)
+  if (sl[0] && fall && death) {
+    const end = sl[0].t! + (sl[0].path.length - 1) * PATH_DT
+    check(ev.indexOf(sl[0]) < ev.indexOf(fall) && ev.indexOf(fall) < ev.indexOf(death), 'empuje al abismo: slide → fall → death')
+    check(fall.t !== undefined && fall.t >= end - 1e-9 && fall.to > s.height, `empuje al abismo: la caída va al terminar el empuje (${fall.t} ≥ ${end})`)
+    check(s.players[1].items.parachute === 1, 'empuje al abismo: el paracaídas no se gasta')
+  }
+  // con un tiro de otro: cuenta como kill
+  const k = pitMap()
+  fillRect(k.terrain, PIT0, 300, PIT1, 307, AIR)
+  k.players[1].x = PIT0 - TANK_HALF_W - 6
+  let killed = false
+  for (let a = 30; a <= 70 && !killed; a += 2) {
+    for (let pw = 30; pw <= 100 && !killed; pw += 1) {
+      const f = fly({ terrain: k.terrain, players: k.players, props: [], ownerId: 0, angle: a, power: pw, wind: k.wind })
+      if (f.impact.kind !== 'terrain' || Math.abs(f.impact.x - (k.players[1].x - 20)) > 3) continue
+      const r = shoot(k, 'heavy', a, pw)
+      if (r.events.some((e) => e.type === 'death' && e.playerId === 1 && e.cause === 'abyss')) {
+        killed = true
+        check(r.state.players[0].kills === 1 && r.state.phase === 'roundover', 'empuje al abismo con un tiro: kill del tirador')
+      }
+    }
+  }
+  check(killed, 'empuje al abismo: encontré el tiro que lo tira')
+  // al agua: sin daño de caída
+  const wsm = poolMap(WATER)
+  const q = wsm.players[0]
+  q.x = 600
+  q.items.parachute = 1
+  const wev = resolveBlast(wsm, blastFor('heavy', q.x - 18, 270, 1))
+  const wf = wev.find((e): e is FallEv => e.type === 'fall' && e.playerId === 0)
+  check(slidesOf(wev, 0, 'blast').length === 1 && !!wf && wf.water === true && q.items.parachute === 1, `empuje: cae al agua sin daño (${JSON.stringify(wf)})`)
+  check(wev.filter((e) => e.type === 'damage' && e.playerId === 0).length === 1, 'empuje al agua: solo el daño de la explosión')
+}
+{
+  // deslizamiento: los spawns de todos los tamaños son planos y caminar por las rampas de los pads no resbala
+  let pads = 0
+  let rampSlides = 0
+  let rampSteps = 0
+  for (const size of MAP_SIZE_ORDER) for (const biome of BIOMES) for (const seed of [1, 2, 3, 4]) {
+    const s = createMatch(mk(3, 'normal', biome, seed, 1, 0, size))
+    for (const p of s.players) if (Math.abs(slopeAt(s, p.x, p.y)) > SLIDE_SLOPE) pads++
+    // una explosión lejos de todos asienta a los tanques: nadie se mueve
+    const c = cloneState(s)
+    const ev = resolveBlast(c, blastFor('normal', 5, 5, 1))
+    check(slidesOf(ev).length === 0 && c.players.every((p, i) => p.x === s.players[i].x && p.y === s.players[i].y), `deslizamiento: un mapa recién generado no resbala ${size}/${biome}/${seed}`)
+    // cada tanque camina hasta 30 px a cada lado de su pad (las rampas son 1:1 como máximo)
+    for (const p of s.players) {
+      for (const dir of [-1, 1] as const) {
+        let m = cloneState(s)
+        m.current = p.id
+        for (let i = 0; i < 30; i++) {
+          if (abyssAhead(m, dir)) break
+          const r = applyCommand(m, { type: 'move', playerId: p.id, dir })
+          if (r.state === m || r.state.current !== p.id) break
+          rampSteps++
+          rampSlides += slidesOf(r.events).length
+          m = r.state
+        }
+      }
+    }
+  }
+  console.log(`deslizamiento: ${rampSteps} pasos alrededor de los pads, ${rampSlides} deslizamientos`)
+  check(pads === 0, `deslizamiento: ${pads} spawns en pendiente`)
+  check(rampSlides === 0, `deslizamiento: ${rampSlides} deslizamientos en las rampas de los pads`)
+  // pendientes construidas a mano: 1:1 y 2:1 (las de cerros y rampas) no resbalan; 3:1 sí
+  const ramp = (run: number) => {
+    const s = flat()
+    for (let x = 500; x < 700; x++) fillRect(s.terrain, x, Math.max(200, 300 - Math.floor((x - 500) / run)), x, 299, DIRT, 'both')
+    return s
+  }
+  const r1 = ramp(1)
+  r1.players[1].x = 560
+  r1.players[1].y = tankFloor(r1.terrain, 560, 0)
+  check(Math.abs(slopeAt(r1, 560, r1.players[1].y)) <= SLIDE_SLOPE && slidesOf(resolveBlast(r1, blastFor('normal', 5, 5, 1))).length === 0, `deslizamiento: una rampa 1:1 no resbala (${slopeAt(r1, 560, r1.players[1].y).toFixed(2)})`)
+  const h2 = ramp(0.5)
+  h2.players[1].x = 540
+  h2.players[1].y = tankFloor(h2.terrain, 540, 0)
+  check(slidesOf(resolveBlast(h2, blastFor('normal', 5, 5, 1))).length === 0, `deslizamiento: una pendiente 2:1 no resbala (${slopeAt(h2, 540, h2.players[1].y).toFixed(2)})`)
+  const r2 = ramp(1 / 3)
+  r2.players[1].x = 520
+  r2.players[1].y = tankFloor(r2.terrain, 520, 0)
+  const y0 = r2.players[1].y
+  const ev2 = resolveBlast(r2, blastFor('normal', 5, 5, 1))
+  check(slidesOf(ev2, 1, 'slope').length === 1 && r2.players[1].x < 520 && r2.players[1].y > y0, `deslizamiento: una pendiente 3:1 resbala cuesta abajo (x ${r2.players[1].x}, y ${y0} → ${r2.players[1].y})`)
+  // borde de cráter: un cráter hondo al costado del tanque lo hace resbalar adentro y queda estable
+  const c = flat()
+  for (const y of [300, 330, 360]) deform(c.terrain, 628, y, 26, 'destroy')
+  const cy0 = c.players[1].y
+  const cev = resolveBlast(c, blastFor('normal', 5, 5, 1))
+  const cs = slidesOf(cev, 1, 'slope')
+  const cp = c.players[1]
+  check(cs.length >= 1 && cp.x > 600 && cp.y > cy0, `deslizamiento: resbala al cráter (x ${cp.x}, y ${cp.y}, ${JSON.stringify(cev.map((e) => e.type))})`)
+  check(Math.abs(slopeAt(c, cp.x, cp.y)) <= SLIDE_SLOPE, `deslizamiento: termina estable (pendiente ${slopeAt(c, cp.x, cp.y).toFixed(2)})`)
+  if (cs[0]) check(cs[0].t !== undefined && cs[0].path.every((q, i) => i === 0 || q.x >= cs[0].path[i - 1].x), 'deslizamiento: con t y cuesta abajo')
+  // move: caminar cuesta abajo por una pendiente 3:1 desliza; cuesta arriba no puede subir
+  const d = ramp(1 / 3)
+  d.players[0].x = 560
+  d.players[0].y = tankFloor(d.terrain, 560, 0)
+  let down = d
+  const dev: GameEvent[] = []
+  const ok = d.players[0].y === 200 && Math.abs(slopeAt(d, 560, d.players[0].y)) <= SLIDE_SLOPE
+  for (let i = 0; i < 40; i++) {
+    const r = applyCommand(down, { type: 'move', playerId: 0, dir: -1 })
+    dev.push(...r.events)
+    down = r.state
+  }
+  check(ok && slidesOf(dev, 0, 'slope').length >= 1 && down.players[0].y > 240 && down.players[0].x < 520, `move: bajar una pendiente 3:1 desliza hasta donde apoya estable (x ${down.players[0].x}, y ${down.players[0].y})`)
+  const fuelUsed = d.players[0].fuel - down.players[0].fuel
+  check(560 - down.players[0].x > fuelUsed + 10, `move: el deslizamiento no gasta combustible (${fuelUsed} para ${560 - down.players[0].x} px)`)
+  let up = down
+  for (let i = 0; i < 40; i++) up = applyCommand(up, { type: 'move', playerId: 0, dir: 1 }).state
+  check(up.players[0].y >= down.players[0].y - 6, `move: no sube una pendiente 3:1 (y ${down.players[0].y} → ${up.players[0].y})`)
+  const u1 = ramp(1)
+  u1.players[0].x = 470
+  u1.players[0].y = 300
+  let climb = u1
+  for (let i = 0; i < 50; i++) climb = applyCommand(climb, { type: 'move', playerId: 0, dir: 1 }).state
+  check(climb.players[0].y < 280, `move: sube una rampa 1:1 (y ${climb.players[0].y})`)
+}
+{
+  // paracaídas: solo se abre si la caída haría al menos PARACHUTE_MIN_DAMAGE
+  const fallBy = (drop: number) => {
+    const s = flat()
+    const p = s.players[1]
+    p.items.parachute = 1
+    fillRect(s.terrain, p.x - 20, 300, p.x + 20, 300 + drop - 1, AIR)
+    const ev = resolveBlast(s, blastFor('normal', 5, 5, 1))
+    const fall = ev.find((e): e is FallEv => e.type === 'fall' && e.playerId === 1)
+    const dmg = ev.filter((e): e is Extract<GameEvent, { type: 'damage' }> => e.type === 'damage' && e.playerId === 1).reduce((a, e) => a + e.amount, 0)
+    return { fall, dmg, left: p.items.parachute }
+  }
+  const small = fallBy(15)
+  check(!!small.fall && !small.fall.parachute && small.dmg === Math.round(15 * 0.45) && small.left === 1, `paracaídas: caída chica (${small.dmg}) sin abrirlo`)
+  const big = fallBy(40)
+  check(!!big.fall && big.fall.parachute === true && big.dmg === 0 && big.left === 0, `paracaídas: caída grande lo abre (${JSON.stringify(big)})`)
+  const edge = fallBy(Math.ceil(PARACHUTE_MIN_DAMAGE / 0.45))
+  check(edge.fall?.parachute === true && edge.left === 0, 'paracaídas: en el umbral se abre')
+  // al caminar (los primeros 12 px no hacen daño): bajar 30 px hace 8 y no lo abre
+  const m = flat()
+  fillRect(m.terrain, 150, 270, 214, 299, DIRT)
+  m.players[0].y = 270
+  m.players[0].items.parachute = 1
+  let c = m
+  const ev: GameEvent[] = []
+  for (let i = 0; i < 40; i++) {
+    const r = applyCommand(c, { type: 'move', playerId: 0, dir: 1 })
+    ev.push(...r.events)
+    c = r.state
+  }
+  const md = ev.filter((e): e is Extract<GameEvent, { type: 'damage' }> => e.type === 'damage').reduce((a, e) => a + e.amount, 0)
+  check(ev.some((e) => e.type === 'fall') && c.players[0].items.parachute === 1 && md === Math.round(18 * 0.45), `paracaídas: bajar 30 px caminando (daño ${md}) no lo abre`)
+}
+{
+  // combustible por ancho
+  for (const size of MAP_SIZE_ORDER) {
+    const w = MAP_SIZES[size].w
+    const s = createMatch(mk(1, 'normal', 'forest', 5, 1, 1, size))
+    check(s.players.every((p) => p.fuel === fuelFor(w)), `combustible ${size}: arranca con fuelFor (${s.players[0].fuel})`)
+    const t = applyCommand(s, { type: 'fire', playerId: s.players[s.current].id }).state
+    check(t.players[t.current].fuel === fuelFor(w), `combustible ${size}: el turno repone fuelFor`)
+    const a = cloneState(s)
+    a.players[a.current].items.fuel = 1
+    const before = a.players[a.current].fuel
+    const r = applyCommand(a, { type: 'useItem', playerId: a.players[a.current].id, item: 'fuel' }).state
+    check(r.players[r.current].fuel === before + fuelFor(w), `combustible ${size}: el ítem suma fuelFor`)
+  }
+  check(fuelFor(800) === 60 && fuelFor(800) === FUEL_PER_TURN, 'combustible: Chico queda en 60')
+  console.log(`combustible: ${MAP_SIZE_ORDER.map((z) => `${z} ${fuelFor(MAP_SIZES[z].w)}`).join(', ')}`)
+}
+{
+  // Tierra sobre la lava de la grilla: no se derrite, construye en el contacto; lo que cae sobre lava es piedra
+  const s = poolMap(LAVA)
+  s.players[0].x = 560
+  const lava0 = countT(s.terrain, LAVA)
+  const stone0 = countT(s.terrain, STONE)
+  let r: StepResult | null = null
+  for (let pw = 20; pw <= 60 && !r; pw += 0.5) {
+    const f = fly({ terrain: s.terrain, players: s.players, props: [], ownerId: 0, angle: 60, power: pw, wind: 0 })
+    if (f.impact.kind === 'lava' && f.impact.x > 630 && f.impact.x < 670) r = shoot(s, 'dirt', 60, pw)
+  }
+  check(!!r, 'Tierra sobre lava: encontré el tiro')
+  if (r) {
+    const imp = impactsOf(r)[0]
+    check(r.flights![0].impact.kind === 'terrain' && !!imp && imp.weapon === 'dirt' && Math.abs(imp.y - 300) <= 2, `Tierra sobre lava: impacto en la superficie (${JSON.stringify(r.flights![0].impact)})`)
+    const t = r.state.terrain
+    check(countT(t, LAVA) < lava0 && countT(t, STONE) > stone0 + 100, `Tierra sobre lava: piedra (${countT(t, STONE) - stone0} celdas)`)
+    let below = 0
+    for (let x = imp.x - 8; x <= imp.x + 8; x++) if (t.front[302 * t.w + Math.round(x)] === STONE) below++
+    let above = 0
+    for (let x = imp.x - 5; x <= imp.x + 5; x++) if (t.front[294 * t.w + Math.round(x)] === DIRT) above++
+    check(below >= 15 && above >= 9, `Tierra sobre lava: piedra abajo de la superficie y tierra arriba (${below}, ${above})`)
+    // el flujo posterior respeta la piedra: sigue ahí después de otro fire
+    const after = shoot(r.state, 'normal', 178, 100).state
+    check(after.terrain.front[302 * t.w + Math.round(imp.x)] === STONE, 'Tierra sobre lava: el flujo respeta la piedra')
+  }
+  // banda de muerte súbita: tampoco se derrite; lo que construye debajo de la superficie es piedra
+  const b = flat()
+  b.lava = 290
+  b.players[0].y = 300
+  let rb: StepResult | null = null
+  for (let pw = 30; pw <= 80 && !rb; pw += 1) {
+    const f = fly({ terrain: b.terrain, players: b.players, props: [], ownerId: 0, angle: 60, power: pw, wind: 0, lava: 290 })
+    if (f.impact.kind === 'lava' && f.impact.x > 330 && f.impact.x < 500) rb = shoot(b, 'dirt', 60, pw)
+  }
+  check(!!rb && rb.flights![0].impact.kind === 'terrain' && impactsOf(rb).length === 1, 'Tierra en la banda de lava: construye en vez de derretirse')
+  if (rb) {
+    const imp = impactsOf(rb)[0]
+    const t = rb.state.terrain
+    check(t.front[295 * t.w + Math.round(imp.x)] === STONE && t.front[285 * t.w + Math.round(imp.x)] === DIRT, 'Tierra en la banda: piedra debajo de la superficie, tierra arriba')
+  }
+  // las otras armas se siguen derritiendo en la lava
+  const n = poolMap(LAVA)
+  n.players[0].x = 560
+  for (let pw = 20; pw <= 60; pw += 0.5) {
+    const f = fly({ terrain: n.terrain, players: n.players, props: [], ownerId: 0, angle: 60, power: pw, wind: 0 })
+    if (f.impact.kind === 'lava' && f.impact.x > 630 && f.impact.x < 670) {
+      const r2 = shoot(n, 'normal', 60, pw)
+      check(r2.flights![0].impact.kind === 'lava' && impactsOf(r2).length === 0, 'lava: la normal se sigue derritiendo')
+      break
+    }
+  }
+}
+{
+  // napalm sobre agua: piedra flotante en la superficie, con steam, que se puede cruzar
+  const s = poolMap(WATER)
+  s.players[0].x = 560
+  const water0 = countT(s.terrain, WATER)
+  let r: StepResult | null = null
+  for (let pw = 20; pw <= 60 && !r; pw += 0.5) {
+    const f = fly({ terrain: s.terrain, players: s.players, props: [], ownerId: 0, angle: 60, power: pw, wind: 0 })
+    const sp = f.splashes?.[0]
+    if (sp && sp.x > 640 && sp.x < 660) r = shoot(s, 'napalm', 60, pw)
+  }
+  check(!!r, 'napalm sobre agua: encontré el tiro')
+  if (r) {
+    const t = r.state.terrain
+    const steam = r.events.filter((e): e is SteamEv => e.type === 'steam')
+    check(steam.length >= 3 && steam.every((e) => e.t !== undefined && e.n > 0), `napalm sobre agua: eventos steam (${steam.length})`)
+    let crust = 0
+    for (let x = 600; x < 700; x++) {
+      let n = 0
+      for (let y = 300; y < 306; y++) if (t.front[y * t.w + x] === STONE) n++
+      if (n >= 3 && n <= 4 && t.front[306 * t.w + x] === WATER) crust++
+    }
+    check(crust >= 60, `napalm sobre agua: capa de piedra de 3-4 px sobre el agua (${crust} columnas)`)
+    check(countT(t, WATER) < water0 && countT(t, WATER) > water0 * 0.8, 'napalm sobre agua: el agua de abajo queda')
+    // un tanque la cruza por arriba: se apoya en la piedra, sin caer al agua
+    const c = cloneState(r.state)
+    c.current = 0
+    const cx = Math.round(steam[Math.floor(steam.length / 2)].x)
+    c.players[0].x = cx
+    c.players[0].y = tankFloor(c.terrain, cx, 0)
+    c.players[0].fuel = 60
+    check(c.players[0].y === 300, `napalm sobre agua: el tanque se apoya en la piedra (y ${c.players[0].y})`)
+    let m = c
+    const ev: GameEvent[] = []
+    for (let i = 0; i < 20; i++) {
+      const rr = applyCommand(m, { type: 'move', playerId: 0, dir: 1 })
+      ev.push(...rr.events)
+      m = rr.state
+    }
+    check(m.players[0].x > cx + 10 && !ev.some((e) => e.type === 'fall'), 'napalm sobre agua: se puede andar por arriba')
+    // el flujo posterior respeta la piedra
+    const after = shoot(r.state, 'normal', 178, 100).state
+    check(countT(after.terrain, STONE) === countT(t, STONE), 'napalm sobre agua: el flujo respeta la piedra')
+  }
+  // napalm en tierra firme sigue quemando como antes (sin steam)
+  const d = flat()
+  const rd = shoot(d, 'napalm', 90, 1)
+  check(rd.events.some((e) => e.type === 'burn') && !rd.events.some((e) => e.type === 'steam'), 'napalm en tierra: burn sin steam')
+}
+{
+  // determinismo del empuje y el deslizamiento
+  const a = pushAt('heavy', 585)
+  const b = pushAt('heavy', 585)
+  check(JSON.stringify(a.ev) === JSON.stringify(b.ev) && hashState(a.s) === hashState(b.s), 'empuje: determinista')
+  // la IA usa el empuje: rival a 6 px del abismo con 100 de vida, solo normal y pesada → lo tira
+  let pushed = 0
+  for (let i = 0; i < 6; i++) {
+    const q = pitMap()
+    fillRect(q.terrain, PIT0, 300, PIT1, 307, AIR)
+    q.players[1].x = PIT0 - TANK_HALF_W - 6
+    q.wind = (i * 5) % 13 - 6
+    for (const id of WEAPON_ORDER) q.players[0].ammo[id] = id === 'normal' ? 99 : id === 'heavy' ? 2 : 0
+    const plan = chooseShot(q, 'hard', () => 0.5)
+    const r = shoot(q, plan.weapon, plan.angle, plan.power)
+    if (r.events.some((e) => e.type === 'death' && e.playerId === 1 && e.cause === 'abyss')) pushed++
+  }
+  console.log(`IA: empuja al rival al abismo ${pushed}/6`)
+  check(pushed >= 3, `IA: no usa el empuje (${pushed}/6)`)
 }
 console.log(`IA peor caso: ${worstMs.toFixed(0)} ms`)
 console.log(`${checks - failures}/${checks} chequeos OK`)

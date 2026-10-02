@@ -71,7 +71,7 @@ export function fuelFor(width: number): number {
 // abajo hasta quedar estable. Los dos pueden terminar en una caída (al vacío, al agua o al abismo).
 // El paracaídas solo se abre (y se gasta) si la caída haría al menos PARACHUTE_MIN_DAMAGE de daño.
 export const KNOCKBACK_MAX = 24
-export const SLIDE_SLOPE = 0.45
+export const SLIDE_SLOPE = 2.2
 export const PARACHUTE_MIN_DAMAGE = 10
 export const MAX_CLIMB = 3 // escalón máximo que sube sin frenarse
 
