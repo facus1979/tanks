@@ -102,6 +102,8 @@ export interface HudExtras {
   tracer: boolean
   net?: HudNet | null
   minimap?: MinimapModel | null // v2; null o ausente en mapas que entran en pantalla (Chico)
+  // v2 muerte súbita: calmLeft = tiros sin daño que faltan (se muestra cuando es <= 3); active = la lava ya sube.
+  suddenDeath?: { active: boolean; calmLeft: number } | null
 }
 
 // ---------- minimapa (v2) ----------
@@ -123,6 +125,7 @@ export interface MinimapModel {
   tanks: MinimapTank[]
   projectiles: Vec2[]
   lastImpacts: { playerId: number; x: number; y: number; color: number }[] // último impacto de cada jugador en la ronda
+  lava?: number | null // v2: y de la superficie de la lava de muerte súbita
 }
 
 // Lo que el HUD (src/ui/hud.ts, clase Hud) expone al flujo para navegar con el minimapa.

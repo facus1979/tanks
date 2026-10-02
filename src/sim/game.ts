@@ -115,6 +115,8 @@ export function createMatch(config: MatchConfig): GameState {
     difficulty: config.difficulty ?? 'normal',
     biomeMode,
     earnings: {},
+    calm: 0,
+    lava: null,
   }
   setupRound(state)
   return state
@@ -150,6 +152,8 @@ function setupRound(state: GameState): void {
   state.phase = 'aiming'
   state.roundWinnerId = null
   state.turn = 1
+  state.calm = 0
+  state.lava = null
   state.earnings = Object.fromEntries(state.players.map((p) => [p.id, 0]))
 }
 

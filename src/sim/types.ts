@@ -49,6 +49,15 @@ export const PIVOT_Y = 17 // desde el piso hacia arriba
 export const BARREL_LEN = 14 // del pivote a la boca, incluido el freno
 
 export const PLAYER_HP = 100
+
+// v2 muerte súbita: tras SUDDEN_DEATH_CALM tiros seguidos sin daño a ningún tanque, al empezar cada turno
+// la lava sube LAVA_RISE px desde el fondo del mapa (GameState.lava = y de su superficie). Un tanque con el
+// piso por debajo de la superficie (y > lava) pierde LAVA_DAMAGE al empezar cada turno. Un proyectil que toca
+// la lava se derrite: termina el vuelo sin explotar (impacto 'lava'). Una vez que empezó, sigue subiendo
+// hasta el fin de la ronda. En V4 la lava pasa a ser material de la grilla; las constantes quedan.
+export const SUDDEN_DEATH_CALM = 6
+export const LAVA_RISE = 14
+export const LAVA_DAMAGE = 20
 export const FALL_DAMAGE = 0.45
 export const FUEL_PER_TURN = 60 // pixels que puede avanzar por turno (F6)
 export const MAX_CLIMB = 3 // escalón máximo que sube sin frenarse
@@ -272,6 +281,8 @@ export interface GameState {
   difficulty: Difficulty
   biomeMode: Biome | 'random' | 'rotate'
   earnings: Record<number, number> // plata ganada en la última ronda, por id de jugador
+  calm: number // v2: tiros seguidos sin daño a ningún tanque en la ronda
+  lava: number | null // v2: y de la superficie de la lava de muerte súbita; null = todavía no apareció
 }
 
 export type Command =
@@ -292,7 +303,7 @@ export interface Vec2 {
   y: number
 }
 
-export type ImpactKind = 'terrain' | 'tank' | 'prop' | 'out'
+export type ImpactKind = 'terrain' | 'tank' | 'prop' | 'out' | 'lava' // lava: se derritió, sin explosión
 
 export interface Impact {
   kind: ImpactKind
@@ -323,7 +334,7 @@ export type GameEvent =
       source?: 'shot' | 'barrel' // 'barrel': explosión en cadena de un barril
     }
   // t opcional: momento de playback. Sin t, el evento va con el impacto anterior de la lista.
-  | { type: 'damage'; playerId: number; amount: number; hp: number; t?: number }
+  | { type: 'damage'; playerId: number; amount: number; hp: number; t?: number; cause?: 'lava' } // cause: v2, quemado por la lava
   | { type: 'death'; playerId: number; t?: number }
   | { type: 'fall'; playerId: number; from: number; to: number; parachute?: boolean; t?: number }
   | { type: 'prop'; propId: number; kind: PropKind; x: number; y: number; destroyed: boolean; t?: number }
@@ -332,6 +343,8 @@ export type GameEvent =
   | { type: 'item'; playerId: number; item: ItemId } // useItem aplicado
   | { type: 'turn'; playerId: number }
   | { type: 'wind'; value: number }
+  | { type: 'lava'; from: number | null; to: number; warn: number } // v2: la lava subió (from null = apareció); warn = tiros sin daño que faltan para la muerte súbita (0 si ya empezó)
+  | { type: 'calm'; left: number } // v2: tiros sin daño que faltan para que empiece la muerte súbita (se emite al cambiar, 0 = empezó)
   | { type: 'roundover'; winnerId: number | null; earnings: Record<number, number>; last: boolean }
   | { type: 'round'; round: number; biome: Biome } // arrancó una ronda nueva (mapa nuevo)
   | { type: 'shop' }

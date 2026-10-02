@@ -210,6 +210,7 @@ Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 
 - `src/ui/types.ts`: `HudExtras.minimap` (`MinimapModel`, `MinimapTank`), `MinimapInput.minimapAt` (lo implementa `Hud`), `DEFAULT_CONFIG.size` = `'medium'`, `setOption('size')` en el lobby.
 - `src/net/types.ts`: `LobbyState.size`.
 - QA: `?play=...&size=small|medium|large`, `?demo=...&size=...`.
+- V2 muerte súbita (`src/sim/types.ts`): `SUDDEN_DEATH_CALM` (6), `LAVA_RISE` (14 px por turno), `LAVA_DAMAGE` (20 por turno), `GameState.calm` y `GameState.lava` (y de la superficie o null), `ImpactKind` `'lava'` (proyectil derretido, sin explosión), eventos `lava` y `calm`, `damage.cause = 'lava'`. `RenderFrame.lava`, `HudExtras.suddenDeath`, `MinimapModel.lava`.
 
 ### Fases
 

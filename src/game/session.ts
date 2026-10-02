@@ -609,6 +609,7 @@ export class Session {
         freeze: this.frozen,
         aimPreview: null,
         camera: this.cam.camera,
+        lava: pb.before.lava ?? null, // v2: stub; la animación de la subida la hace el área flujo
       }
     }
     return {
@@ -626,6 +627,7 @@ export class Session {
       freeze: this.frozen,
       aimPreview: this.tracerPath(s),
       camera: this.cam.camera,
+      lava: s.lava ?? null,
     }
   }
 
