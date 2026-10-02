@@ -280,6 +280,13 @@ Pedido del usuario tras jugar la v2 publicada. Contrato: `fuelFor(width)`, `KNOC
   - `vite.config.ts` ignora `.claude/` (worktrees de los agentes): con varios worktrees adentro, vite los recorría y la pestaña cliente de `net-test` no llegaba a conectarse.
   - Pendientes: muertes por abismo (generador); al caer al abismo el tanque se pierde detrás del tablero; el arco del cañón es muy sutil sobre el cielo claro (alfa 0,3); la IA no usa Tierra/napalm para cruzar líquidos.
 
+### V5 integrada (2026-10-02)
+
+En la rama `v2-8jugadores` (sale de `v2-pulido`). `sim-check` 38308/38308; `net-test` OK (3 tanques en Mediano; el modo `--players 8` con 2 humanos y 6 IA en Grande pasó en la rama de red). Tiros por partida con IA normal: 2 tanques 10,7 / 10,5 / 11,5, 4 tanques 17,7 / 21,0 / 20,6 (Chico / Mediano / Grande), 6 en Mediano 27,7 (máx 38), 8 en Grande 34,1 (máx 41). Muerte súbita en ~70% (6) y ~95% (8) de las rondas, 0 empates.
+- Antes de V5 la IA tenía un sesgo de posición (la punta izquierda ganaba 2 de cada 3 rondas): desempataba por el menor ángulo. Se arregló con un desempate simétrico (`flatTie`); el error de la IA normal subió a ±7° / ±8 para mantener el ritmo.
+- Reglas nuevas: tope de calma `máx(30, 4 · tanques)` (desde ese turno el daño no reinicia la calma) y la lava quema primero al más hundido y, a igual altura, al de menos vida, para que no termine en empate cuando quedan pocos.
+- Pendientes: en el menú local los casilleros que no entran al achicar el mapa se vacían y en la sala online se reacomodan (unificar); la prueba de la IA sobre la montaña bajó a 4/6, justo en el mínimo; el jugador 0 gana ~40% en Mediano con 6 a 1 ronda porque nace en la punta y abre la ronda; con 8 tanques las flechas de borde y las 7 placas de rivales llenan el costado derecho; snapshot de red de ~2,1 MB con 8 en Grande.
+
 ## Cómo se agrega algo
 
 - Arma nueva: un registro en `WEAPONS` y, si el efecto es nuevo, un modo de terreno en `sim` y un `BlastStyle` en el renderer.
