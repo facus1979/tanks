@@ -16,6 +16,7 @@ import { Extras } from './extras'
 import { Fx } from './fx'
 import { LavaView } from './lava'
 import { LiquidView, solidCell } from './liquids'
+import { DMG_BIG, DMG_COLOR, DMG_LAVA, DMG_SHIELD, DamageNumbers } from './numbers'
 import { Raster, Rng } from './raster'
 import { CHUNK_W, TerrainPainter } from './terrain'
 import type { Rect } from './terrain'
@@ -107,6 +108,7 @@ export class PixiRenderer implements GameRenderer {
   private lava = new LavaView()
   // v4: superficie animada del agua y la lava material, resplandor de los pozos y efectos de entrada
   private liquids = new LiquidView()
+  private numbers = new DamageNumbers()
   // v3: tanques que se perdieron en el abismo (los dibuja AbyssFalls mientras caen)
   private lost = new Set<number>()
   private lastAlive = new Map<number, { x: number; y: number }>()
@@ -217,6 +219,7 @@ export class PixiRenderer implements GameRenderer {
       this.lightSprite,
       this.fxSprite,
       this.extras.layer,
+      this.numbers.root,
       this.overlayLayer,
     )
     this.app.stage.addChild(this.bg, this.world, this.warmG, this.glowG, this.arrowLayer, this.flashG, this.extras.curtain)
@@ -349,6 +352,8 @@ export class PixiRenderer implements GameRenderer {
     this.abyss.update(frame.terrain, step)
     this.syncTanks(art, frame, step)
     this.extras.update(art, frame, step, this.time, (id) => this.tanks.get(id)?.dropOff ?? 0)
+    this.numbers.font = art.font
+    this.numbers.update(step)
     this.syncProps(art, frame.props, frame.wind)
     this.syncLamps(frame.props)
     this.upload()
@@ -405,6 +410,7 @@ export class PixiRenderer implements GameRenderer {
   }
 
   private reset(): void {
+    this.numbers.clear()
     this.lava.reset()
     this.liquids.reset()
     this.flowRect = null
@@ -615,7 +621,17 @@ export class PixiRenderer implements GameRenderer {
         }
         this.hitThisShot.add(ev.playerId)
         this.view(ev.playerId).alert = BUBBLE_TIME
+        {
+          const p = frame.players.find((q) => q.id === ev.playerId)
+          const color = ev.cause === 'lava' ? DMG_LAVA : ev.amount >= 30 ? DMG_BIG : DMG_COLOR
+          if (p && ev.amount > 0) this.numbers.spawn(ev.playerId, p.x, p.y - TANK_H - 14, `-${ev.amount}`, color)
+        }
         break
+      case 'shield': {
+        const p = frame.players.find((q) => q.id === ev.playerId)
+        if (p && ev.absorbed > 0) this.numbers.spawn(ev.playerId, p.x, p.y - TANK_H - 14, `-${ev.absorbed}`, DMG_SHIELD)
+        break
+      }
       case 'death': {
         if (this.lost.has(ev.playerId)) break // se perdió en el abismo: sin explosión ni restos en llamas
         const p = frame.players.find((q) => q.id === ev.playerId)

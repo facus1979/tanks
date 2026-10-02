@@ -32,7 +32,6 @@ import {
   POW_MID,
   SHIELD,
   SHIELD_HI,
-  SLOT_BG,
   WHITE,
   bigText,
   button,
@@ -83,6 +82,10 @@ export interface HudModel {
 }
 
 const PIPS = 6
+// vida: verde, amarilla y roja
+const HP_HI = 0x5ec46a
+const HP_MID = 0xf0c040
+const HP_LO = 0xe0483a
 // Orden de la tira weaponIcons del manifiesto (el de WeaponId en types.ts). También es el de las teclas 1-8.
 export const WEAPON_SLOTS: WeaponId[] = ['normal', 'heavy', 'dirt', 'cluster', 'napalm', 'digger', 'roller', 'nuke']
 const BLINK_MS = 280 // titileo del tanque del turno en el minimapa
@@ -285,7 +288,7 @@ export class Hud implements MinimapInput {
     }
     const nx = 46
     drawText(ctx, font, clip(font, who.name.toUpperCase(), DIV[0] - nx - 4), nx, top + 1, who.alive ? WHITE : GREY)
-    this.pips(assets, nx, top + 11, who.alive ? Math.ceil((Math.max(0, who.hp) / 100) * PIPS) : 0, 2)
+    this.hpBar(assets, nx, top + 12, DIV[0] - nx - 6, 10, who.alive ? who.hp : 0, 2)
     this.shieldBar(assets, nx, top + 32, DIV[0] - nx - 6, who.alive ? shield : 0)
 
     // --- ÁNG: número ×3 y el dial chico a la derecha
@@ -376,6 +379,20 @@ export class Hud implements MinimapInput {
   }
 
   // Escudo: ícono, barra azul de SHIELD_HP y el número.
+  // Vida de 0 a 100: barra continua (verde, amarilla bajo 60, roja bajo 30) y el número a la derecha (×sc).
+  private hpBar(assets: UiAssets, x: number, y: number, w: number, h: number, hp: number, sc: number): void {
+    const font = assets.font
+    const v = Math.max(0, Math.min(100, Math.ceil(hp)))
+    const c = v > 60 ? HP_HI : v > 30 ? HP_MID : HP_LO
+    const n = `${v}`
+    const nw = measure(font, n) * sc
+    const ny = y + Math.floor((h - font.h * sc) / 2)
+    // segmentos solo en la barra grande; en las placas, con 5 px de alto, quedarían como rayitas
+    segBar(this.ctx, x, y, w - nw - 4, h, v / 100, [mix(c, OUT, 0.35), c, mix(c, WHITE, 0.45)], sc > 1 ? 10 : 0)
+    if (sc > 1) bigText(this.ctx, font, n, x + w - nw, ny, v > 0 ? c : GREY, sc)
+    else drawText(this.ctx, font, n, x + w - nw, ny, v > 0 ? c : GREY)
+  }
+
   private shieldBar(assets: UiAssets, x: number, y: number, w: number, sh: number): void {
     const font = assets.font
     const n = `${Math.ceil(Math.max(0, sh))}`
@@ -511,7 +528,7 @@ export class Hud implements MinimapInput {
       const bx = right - (PLATE_H - 1) - bw
       panel(ctx, bx, y, bw, PLATE_H, col)
       drawText(ctx, font, name, bx + 5, y + 4, side.alive ? WHITE : GREY)
-      this.pips(assets, bx + 5, y + PLATE_H - 9, side.alive ? Math.ceil((Math.max(0, side.hp) / 100) * PIPS) : 0, 1)
+      this.hpBar(assets, bx + 5, y + PLATE_H - 8, bw - 10, 5, side.alive ? side.hp : 0, 1)
       this.portrait(assets, side, bx + bw - 1, y, PLATE_H, true)
       if (side.active && side.alive) {
         rect(ctx, bx + 2, y - 2, bw - 4, 1, OUT)
@@ -611,25 +628,6 @@ export class Hud implements MinimapInput {
       silhouette(ctx, x + 2, y + 2, ps, side.color)
     }
     ctx.restore()
-  }
-
-  // Seis pips de vida, ×sc. Devuelve el ancho.
-  private pips(assets: UiAssets, x: number, y: number, on: number, sc: number): number {
-    const ctx = this.ctx
-    const pip = assets.pip
-    const pw = pip ? pip.w : 4
-    const step = (pw + 2) * sc
-    for (let i = 0; i < PIPS; i++) {
-      const lit = i < on
-      if (pip) {
-        const frame = lit ? 0 : Math.min(1, pip.frames - 1)
-        ctx.drawImage(pip.img, frame * pip.w, 0, pip.w, pip.h, x + i * step, y, pip.w * sc, pip.h * sc)
-        continue
-      }
-      rect(ctx, x + i * step, y, 4 * sc, 5 * sc, OUT)
-      rect(ctx, x + i * step + sc, y + sc, 2 * sc, 3 * sc, lit ? 0xd0362c : SLOT_BG)
-    }
-    return PIPS * step - 2 * sc
   }
 
   private itemIcon(assets: UiAssets, id: ItemId, x: number, y: number, off = false): void {

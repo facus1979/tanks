@@ -352,7 +352,7 @@ function tagTexture(label: string, fill: number, font: Font | null): Texture {
   return t
 }
 
-function glyph(ch: string, font: Font | null): { w: number; px: [number, number][] } {
+export function glyph(ch: string, font: Font | null): { w: number; px: [number, number][] } {
   if (font) {
     const i = font.chars.indexOf(ch)
     if (i >= 0) {
