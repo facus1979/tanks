@@ -122,11 +122,12 @@ function composite(layers) {
   return cv
 }
 
-// El bosque tiene que ser el fondo de la referencia pixel por pixel.
+// El bosque tiene que ser el fondo de la referencia pixel por pixel, en su variante repetible (v2: los pinos
+// de los bordes centrados en el borde o metidos enteros y la torre de agua en x = 60; ver paintForestBackground).
 {
   const flat = new Canvas(BG_W, BG_H)
   const R = makeRand(42)
-  paintForestBackground(flatTarget(flat), R.next)
+  paintForestBackground(flatTarget(flat), R.next, { tileable: true })
   const comp = composite(bgLayers.forest)
   let diff = 0
   for (let i = 0; i < flat.px.length; i++) if (Math.abs(flat.px[i] - comp.px[i]) > 1) diff++

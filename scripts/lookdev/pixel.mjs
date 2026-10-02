@@ -340,34 +340,55 @@ export function waterTower(cv, x0, base, c, h = 150) {
   cv.rect(x0 + 16, top - 8, 2, 6, c)
 }
 
+// Fondos repetibles (v2): el renderer repite cada capa a lo ancho alternando copia y copia espejada, así que
+// los bordes x = 0 y x = W se juntan siempre consigo mismos en espejo. Un elemento que asoma por un borde se
+// ve "doble" (él y su reflejo pegados), salvo que quede centrado justo en el borde: ahí el espejo lo completa
+// y se lee como uno solo. edgeSafe(x, hw) devuelve el centro corregido para un elemento de medio ancho hw:
+// si cruza un borde, lo centra en el borde (si ya estaba cerca) o lo mete entero (si no).
+export function edgeSafe(x, hw, W = 800) {
+  if (x - hw < 0) return x < hw / 2 ? 0 : Math.ceil(hw)
+  if (x + hw > W) return W - x < hw / 2 ? W : Math.floor(W - hw)
+  return x
+}
+// medio ancho de un pino de alto h (copa más ancha más el temblor del borde)
+export const pineHalfW = (h) => Math.ceil(h * 0.23 + 2)
+
 // Fondo del bosque de la referencia. Capas: 0 cielo, 1 pinos lejanos, 2 torre + pinos medios,
 // 3 pinos grises cercanos, 4 pinos verdes. rand con la semilla que dejó el llamador (42 en look-test).
-export function paintForestBackground(target, rand) {
+// Con `tileable` (las capas del juego) los pinos que asoman por los bordes se centran en el borde o se meten
+// enteros (edgeSafe), y la torre de agua queda en x = 60: su reflejo no entra en cámara con zoom 1 en ningún
+// tamaño de mapa (en Grande la capa 2 llega hasta x = 1480 y el reflejo empieza en ~1495). Las tiradas de
+// rand son las mismas que sin `tileable`: la composición es la de la referencia, corrida solo en los bordes.
+export function paintForestBackground(target, rand, { tileable = false } = {}) {
   const W = target.w
-  const H = target.h
+  const fit = (x, h) => (tileable ? edgeSafe(x, pineHalfW(h), W) : x)
   paintForestSky(target.layer(0))
   let L = target.layer(1)
   for (let i = 0; i < 25; i++) {
     const x = Math.round(i * 33 + rand() * 20)
-    pine(L, x, 417, 233 + rand() * 150, { dark: 0xc8b193 }, 100 + i, rand() < 0.4 ? 0.3 : 0)
+    const h = 233 + rand() * 150
+    pine(L, fit(x, h), 417, h, { dark: 0xc8b193 }, 100 + i, rand() < 0.4 ? 0.3 : 0)
   }
   target.fog(() => 0.35, FOG)
   L = target.layer(2)
-  waterTower(L, 75, 422, 0xb29c7e, 208)
+  waterTower(L, tileable ? 60 : 75, 422, 0xb29c7e, 208)
   for (let i = 0; i < 20; i++) {
     const x = Math.round(20 + i * 42 + rand() * 18)
-    pine(L, x, 421, 175 + rand() * 125, { dark: 0xa8957a }, 200 + i, rand() < 0.3 ? 0.35 : 0)
+    const h = 175 + rand() * 125
+    pine(L, fit(x, h), 421, h, { dark: 0xa8957a }, 200 + i, rand() < 0.3 ? 0.35 : 0)
   }
   target.fog(() => 0.3, FOG)
   L = target.layer(3)
   for (let i = 0; i < 16; i++) {
     const x = Math.round(i * 52 + rand() * 24)
-    pine(L, x, 425, 125 + rand() * 92, { dark: 0x7d7660, light: 0x8e8770 }, 300 + i)
+    const h = 125 + rand() * 92
+    pine(L, fit(x, h), 425, h, { dark: 0x7d7660, light: 0x8e8770 }, 300 + i)
   }
   target.fog(() => 0.18, FOG)
   // niebla de suelo entre capas
   target.fog((x, y) => (y < 242 ? 0 : Math.floor(Math.min(1, (y - 242) / 142) * 0.6 * 10 + bayer(x, y)) / 10), FOG)
-  // capa cercana, pinos verdes oscuros
+  // capa cercana, pinos verdes oscuros. Repetible: el pino chico de la izquierda queda centrado en x = 0 y el
+  // gigante de la derecha en x = W, así cada uno aparece una sola vez cada 2·W, completado por su reflejo.
   L = target.layer(4)
   const near = [
     [25, 217],
@@ -379,10 +400,8 @@ export function paintForestBackground(target, rand) {
     [587, 125],
     [783, 467],
   ]
-  near.forEach(([x, h], i) => pine(L, x, 437, h, { dark: 0x3c4a38, light: 0x5a6c4c, shade: 0x2c3629, trunk: 0x3a2e24 }, 400 + i))
+  near.forEach(([x, h], i) => pine(L, fit(x, h), 437, h, { dark: 0x3c4a38, light: 0x5a6c4c, shade: 0x2c3629, trunk: 0x3a2e24 }, 400 + i))
   target.fog((x, y) => (y < 287 ? 0 : Math.floor(Math.min(1, (y - 287) / 108) * 0.35 * 8 + bayer(x, y)) / 8), FOG)
-  void W
-  void H
 }
 
 // Adaptador de una sola capa opaca (look-test).
