@@ -1,5 +1,6 @@
 import { Application, Container, Graphics, Sprite, Texture, TextureStyle } from 'pixi.js'
 import type { Biome, GameEvent, Player, Prop, Vec2, WeaponId } from '../../sim/types'
+import { PATH_DT } from '../../sim'
 import { BARREL_LEN, PIVOT_X, PIVOT_Y, TANK_H, TANK_W, WEAPONS } from '../../sim/types'
 import type { Terrain } from '../../sim/types'
 import type { GameRenderer, RenderFrame, Viewport } from '../types'
@@ -15,6 +16,7 @@ import { Extras } from './extras'
 import { Fx } from './fx'
 import { LavaView } from './lava'
 import { LiquidView, solidCell } from './liquids'
+import { DMG_BIG, DMG_COLOR, DMG_LAVA, DMG_SHIELD, DamageNumbers } from './numbers'
 import { Raster, Rng } from './raster'
 import { CHUNK_W, TerrainPainter } from './terrain'
 import type { Rect } from './terrain'
@@ -106,6 +108,7 @@ export class PixiRenderer implements GameRenderer {
   private lava = new LavaView()
   // v4: superficie animada del agua y la lava material, resplandor de los pozos y efectos de entrada
   private liquids = new LiquidView()
+  private numbers = new DamageNumbers()
   // v3: tanques que se perdieron en el abismo (los dibuja AbyssFalls mientras caen)
   private lost = new Set<number>()
   private lastAlive = new Map<number, { x: number; y: number }>()
@@ -216,6 +219,7 @@ export class PixiRenderer implements GameRenderer {
       this.lightSprite,
       this.fxSprite,
       this.extras.layer,
+      this.numbers.root,
       this.overlayLayer,
     )
     this.app.stage.addChild(this.bg, this.world, this.warmG, this.glowG, this.arrowLayer, this.flashG, this.extras.curtain)
@@ -348,6 +352,8 @@ export class PixiRenderer implements GameRenderer {
     this.abyss.update(frame.terrain, step)
     this.syncTanks(art, frame, step)
     this.extras.update(art, frame, step, this.time, (id) => this.tanks.get(id)?.dropOff ?? 0)
+    this.numbers.font = art.font
+    this.numbers.update(step)
     this.syncProps(art, frame.props, frame.wind)
     this.syncLamps(frame.props)
     this.upload()
@@ -388,6 +394,9 @@ export class PixiRenderer implements GameRenderer {
     const y0 = -(this.camY + this.shakeY) / z
     const x1 = x0 + VIEW_W / z
     const y1 = y0 + VIEW_H / z
+    // pulido v2: piedra recién enfriada (vapor un rato y grietas que se apagan)
+    if (p.cooledFresh.length) this.liquids.cool(p.cooledFresh)
+    this.liquids.vent(this.fx, dt)
     if (!p.liqChunk.some((v) => v === 1)) {
       this.liquids.idle()
       return
@@ -401,6 +410,7 @@ export class PixiRenderer implements GameRenderer {
   }
 
   private reset(): void {
+    this.numbers.clear()
     this.lava.reset()
     this.liquids.reset()
     this.flowRect = null
@@ -611,7 +621,17 @@ export class PixiRenderer implements GameRenderer {
         }
         this.hitThisShot.add(ev.playerId)
         this.view(ev.playerId).alert = BUBBLE_TIME
+        {
+          const p = frame.players.find((q) => q.id === ev.playerId)
+          const color = ev.cause === 'lava' ? DMG_LAVA : ev.amount >= 30 ? DMG_BIG : DMG_COLOR
+          if (p && ev.amount > 0) this.numbers.spawn(ev.playerId, p.x, p.y - TANK_H - 14, `-${ev.amount}`, color)
+        }
         break
+      case 'shield': {
+        const p = frame.players.find((q) => q.id === ev.playerId)
+        if (p && ev.absorbed > 0) this.numbers.spawn(ev.playerId, p.x, p.y - TANK_H - 14, `-${ev.absorbed}`, DMG_SHIELD)
+        break
+      }
       case 'death': {
         if (this.lost.has(ev.playerId)) break // se perdió en el abismo: sin explosión ni restos en llamas
         const p = frame.players.find((q) => q.id === ev.playerId)
@@ -625,6 +645,14 @@ export class PixiRenderer implements GameRenderer {
         if (ev.parachute) this.view(ev.playerId).startChute(ev.from - ev.to)
         else if (p && ev.water) this.liquids.tankSplash(this.fx, p.x, ev.to) // v4: cayó al agua
         else if (p) this.fx.dust(p.x, ev.to, 12, TANK_W)
+        break
+      }
+      case 'slide': {
+        // pulido v2: la sesión mueve al tanque por el path; acá solo se anima (orugas, terrones, sacudón)
+        if (ev.path.length < 2 || this.lost.has(ev.playerId)) break
+        const dir = Math.sign(ev.path[ev.path.length - 1].x - ev.path[0].x) || 1
+        this.view(ev.playerId).startSlide(ev.cause, ev.path.length * PATH_DT, dir)
+        if (ev.cause === 'blast') this.fx.dust(ev.path[0].x, ev.path[0].y, 6, TANK_W)
         break
       }
       case 'steam':
@@ -906,8 +934,16 @@ export class PixiRenderer implements GameRenderer {
       if (v.moved !== 0 && dt > 0) {
         v.dustAcc += Math.abs(v.moved)
         const dir = Math.sign(v.moved)
-        for (; v.dustAcc >= 3; v.dustAcc -= 3) this.fx.treadDust(p.x - dir * (TANK_W / 2 - 2), p.y, -dir)
+        if (v.sliding) {
+          // pulido v2: deslizándose, terrones desde la oruga del lado de avance (y polvo atrás, más espaciado)
+          const strong = v.slideCause === 'blast'
+          for (; v.dustAcc >= 2; v.dustAcc -= 2) {
+            this.fx.slideClods(p.x + dir * (TANK_W / 2 - 1), p.y, dir, strong)
+            if (this.rng.next() < 0.35) this.fx.treadDust(p.x - dir * (TANK_W / 2 - 2), p.y, -dir)
+          }
+        } else for (; v.dustAcc >= 3; v.dustAcc -= 3) this.fx.treadDust(p.x - dir * (TANK_W / 2 - 2), p.y, -dir)
       }
+      v.stepSlide(dt)
       if (!p.alive) this.fx.wreck(p.id)
     }
     for (const [id, v] of this.tanks) {

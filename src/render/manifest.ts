@@ -14,13 +14,13 @@ export interface AssetManifest {
   version: 2
 
   // Cuerpo del tanque mirando a la derecha: casco + torreta + orugas, TANK_W × TANK_H.
-  // Una variante por color de jugador (índice = player.id % 4). Franja y banderín ya pintados.
+  // Una variante por color de jugador (índice = player.id, en el orden de TANK_COLORS; v5: 8). Franja y banderín ya pintados.
   tank: {
-    bodies: string[] // 4 archivos, TANK_W × TANK_H
+    bodies: string[] // 8 archivos (v5), TANK_W × TANK_H
     wreck: string // tanque destruido, mismo tamaño
     // Cañón por ángulo local (0 = horizontal adelante, 90 = vertical), paso de 5°: 19 frames.
     // Pivote del cañón en (pivot.x, pivot.y) dentro de cada celda.
-    barrels: Strip[] // 4 tiras, una por color de casco
+    barrels: Strip[] // 8 tiras (v5), una por color de casco
     barrelPivot: { x: number; y: number }
     // Desde la esquina superior izquierda del cuerpo: dónde va el pivote del cañón y el tripulante.
     pivotInBody: { x: number; y: number }

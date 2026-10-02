@@ -31,6 +31,10 @@ const LAVA_MARGIN = 48 // repintado extra alrededor de la lava al terminar un fl
 const BAKE_MARGIN = BAKE + 2 // repintado extra alrededor de la lava que cambió, durante el flujo (cocido)
 const FRESH_MAX = 96 // celdas de frente de flujo que se juntan por cambio (espuma, chispas)
 const LIQ_QUIET = 6 // frames sin cambios que cierran un flujo (repintado final de lo que tocó: pasto)
+// Pulido v2: agua bajo un techo sólido (piedra flotante del napalm, salientes): sin línea de superficie; el
+// cuerpo arranca con esta profundidad, como si el agua siguiera por encima.
+const CEIL_D = 3
+const COOLED_MAX = 600 // celdas recién enfriadas que se juntan por cambio (vapor, grietas)
 
 export interface Rect {
   x0: number
@@ -79,7 +83,8 @@ export class ChunkLayer {
 // v4: pixel del cuerpo del líquido m a d filas bajo su superficie (agua translúcida, lava opaca).
 const A_LIGHT = Math.round(W_LIGHT_ALPHA * 255)
 const A_BODY = Math.round(W_ALPHA * 255)
-function liquidPixel(d: Uint8ClampedArray, o: number, m: number, x: number, y: number, depth: number, fog: number): void {
+// shade (pulido v2): sombra de la primera fila de agua bajo un techo sólido (piedra flotante).
+function liquidPixel(d: Uint8ClampedArray, o: number, m: number, x: number, y: number, depth: number, fog: number, shade = false): void {
   let c: number
   let a = 255
   if (m === WATER) {
@@ -92,10 +97,28 @@ function liquidPixel(d: Uint8ClampedArray, o: number, m: number, x: number, y: n
       a = A_BODY
     }
   } else c = lavaBody(x, depth)
+  if (shade) c = mix(c, 0x0a161c, 0.35)
   d[o] = (c >> 16) & 255
   d[o + 1] = (c >> 8) & 255
   d[o + 2] = c & 255
   d[o + 3] = a
+}
+
+// Pulido v2: ¿la celda es sólida (techo de un líquido)? Fuera de la grilla, no.
+function ceilAt(front: Uint8Array, k: number): boolean {
+  if (k < 0) return false
+  const m = front[k]
+  return m !== AIR && LIQ[m] === 0
+}
+
+// Pulido v2: piedra recién enfriada sobre el agua (napalm) o donde se tocaron agua y lava: basalto oscuro y
+// frío, con poros y el canto de arriba mojado (un brillo gris azulado).
+function cooledStone(c: number, x: number, y: number, top: boolean): number {
+  let o = mix(mul(c, 0.42), 0x24222c, 0.4)
+  if (rnd(x, y, 95) > 0.82) o = mul(o, 0.62) // poros
+  else if (rnd(x >> 1, y, 96) > 0.9) o = mix(o, 0x5a5660, 0.35) // vetas más claras
+  if (top) o = mix(o, 0x9aaab0, rnd(x, y, 97) > 0.5 ? 0.42 : 0.3)
+  return o
 }
 
 export class TerrainPainter {
@@ -111,6 +134,10 @@ export class TerrainPainter {
   surfStamp = 0 // sube cada vez que cambian las superficies de algún trozo
   // v4: celdas que se volvieron líquido en el último cambio de la grilla (x, y, material): frente del flujo
   readonly fresh: number[] = []
+  // Pulido v2: piedra que se formó sobre un líquido (napalm sobre agua, agua y lava): máscara por celda (null
+  // hasta la primera) para pintarla como piedra recién enfriada, y las celdas nuevas del último cambio (x, y)
+  cooled: Uint8Array | null = null
+  readonly cooledFresh: number[] = []
   private lavaB: Uint8Array | null = null // bloques de LB×LB con lava (null = el mapa no tiene lava)
   private lbW: number
   private lbH: number
@@ -162,6 +189,8 @@ export class TerrainPainter {
     this.lavaB = null
     this.liqUnion = null
     this.fresh.length = 0
+    this.cooled = null
+    this.cooledFresh.length = 0
   }
 
   // Celdas de superficie de lava de todos los trozos (resplandor de los pozos).
@@ -222,6 +251,7 @@ export class TerrainPainter {
   update(terrain: Terrain, art: Art, pal: BiomePalette, changed: boolean, viewX0 = 0, viewX1 = Infinity, focus: Rect | null = null): number[] {
     if (this.pits.sync(terrain)) this.markDirty({ x0: 0, y0: 0, x1: this.w, y1: this.h })
     this.fresh.length = 0
+    this.cooledFresh.length = 0
     this.liqFlushed.fill(0)
     this.bfFlushed.fill(0)
     if (changed) {
@@ -311,7 +341,8 @@ export class TerrainPainter {
       const row = y * W
       for (let x = x0; x < x1; x++) {
         const m = f[row + x]
-        if (LIQ[m] && (y === 0 || f[row - W + x] !== m)) tmp.push(row + x)
+        // (bajo un techo sólido no hay superficie que animar: pulido v2, piedra flotante)
+        if (LIQ[m] && (y === 0 || (f[row - W + x] !== m && !ceilAt(f, row - W + x)))) tmp.push(row + x)
       }
     }
     if (!tmp.length) return null
@@ -412,6 +443,12 @@ export class TerrainPainter {
         // frente del flujo: celdas que recién se mojaron (una de cada cuatro, más o menos)
         if (LIQ[nf] && !LIQ[of] && fresh.length < FRESH_MAX * 3 && (fresh.length === 0 || ((x * 7 + y * 13) & 3) === 0)) fresh.push(x, y, nf)
       }
+      // pulido v2: piedra que reemplazó a un líquido (recién enfriada); se olvida si esa celda cambia otra vez
+      if (nf === STONE && LIQ[of]) {
+        if (!this.cooled) this.cooled = new Uint8Array(f.length)
+        this.cooled[k] = 1
+        if (this.cooledFresh.length < COOLED_MAX * 2) this.cooledFresh.push(x, y)
+      } else if (this.cooled && this.cooled[k] && nf !== STONE) this.cooled[k] = 0
     }
     if (focus) {
       const fx0 = Math.max(0, focus.x0)
@@ -471,9 +508,10 @@ export class TerrainPainter {
         }
         found = true
         const di = x - r.x0
-        const d = y === r.y0 ? depth[di] : front[i - W] === m ? depth[di] + 1 : 0
+        const ceil = y > 0 && front[i - W] !== m && ceilAt(front, i - W)
+        const d = ceil ? CEIL_D : y === r.y0 ? depth[di] : front[i - W] === m ? depth[di] + 1 : 0
         depth[di] = d
-        liquidPixel(ld, i * 4, m, x, y, d, fog)
+        liquidPixel(ld, i * 4, m, x, y, d, fog, ceil)
       }
     }
     return found
@@ -488,7 +526,9 @@ export class TerrainPainter {
       const m = front[r.y0 * W + x]
       if (!LIQ[m]) continue
       let d = 0
-      for (let y = r.y0 - 1; y >= 0 && front[y * W + x] === m; y--) d++
+      let y = r.y0 - 1
+      for (; y >= 0 && front[y * W + x] === m; y--) d++
+      if (y >= 0 && ceilAt(front, y * W + x)) d += CEIL_D
       depth[x - r.x0] = d
     }
     return depth
@@ -558,6 +598,7 @@ export class TerrainPainter {
     const lavaHere = this.lavaIn(r.x0 - 48, r.y0 - 48, r.x1 + 48, r.y1 + 48)
     const near = (x: number, y: number, dx: number, up: number, down: number): boolean => lavaHere && this.lavaIn(x - dx, y - up, x + dx, y + down)
     const depth = this.depths(t, r)
+    const cooled = this.cooled
     let found = false
 
     for (let y = r.y0; y < r.y1; y++) {
@@ -573,9 +614,10 @@ export class TerrainPainter {
           // cuerpo del líquido: d = filas del mismo líquido por encima
           found = true
           const di = x - r.x0
-          const d = y === r.y0 ? depth[di] : front[i - W] === m ? depth[di] + 1 : 0
+          const ceil = y > 0 && front[i - W] !== m && ceilAt(front, i - W)
+          const d = ceil ? CEIL_D : y === r.y0 ? depth[di] : front[i - W] === m ? depth[di] + 1 : 0
           depth[di] = d
-          liquidPixel(ld, pi, m, x, y, d, fog)
+          liquidPixel(ld, pi, m, x, y, d, fog, ceil)
         }
         if (m === AIR || lk) {
           let bm = back[i]
@@ -624,6 +666,7 @@ export class TerrainPainter {
         const down = !S(x, y + 1)
         const left = !S(x - 1, y)
         const right = !S(x + 1, y)
+        if (cooled && cooled[i]) c = cooledStone(c, x, y, up)
         if (WOODISH.has(m) && (up || down || left || right)) {
           c = OUT
         } else if (m === DIRT) {
@@ -666,7 +709,7 @@ export class TerrainPainter {
       for (let y = Math.max(1, r.y0 - 4); y < Math.min(H, r.y1 + 4); y++) {
         const m = front[y * W + x]
         if (m === AIR || LIQ[m]) continue
-        if (front[(y - 1) * W + x] === AIR && (m === DIRT || m === STONE)) {
+        if (front[(y - 1) * W + x] === AIR && (m === DIRT || m === STONE) && !(cooled && cooled[y * W + x])) {
           // sin pasto junto a cráteres ni cerca de la lava (v4)
           let burnt = near(x, y, 40, 30, 30)
           for (const c of craters) {

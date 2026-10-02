@@ -1,7 +1,17 @@
 // Cámara del flujo (v2): sigue al tanque del turno y al proyectil en vuelo, y respeta el paneo a mano.
 // Trabaja en coordenadas de mundo (ver Camera en src/render/types.ts). El sacudón lo suma el renderer.
-// En mapas que entran en pantalla (Chico) queda fija y centrada, como en v1.
-import { VIEW_H, VIEW_W, type Camera } from '../render/types'
+// En mapas que entran en pantalla a lo ancho (Chico) queda fija: centrada en x y con el piso apoyado en el
+// tablero del HUD.
+//
+// HUD C (pulido v2): durante la partida el HUD tapa las últimas `bar` (= HUD_BAR_H) filas de la pantalla.
+// La cámara apoya el piso del mundo (y = h) justo arriba del tablero: en pantalla queda en VIEW_H − bar
+// con zoom 1, y con zoom < 1 igual (el mundo se achica, el piso sigue sobre el tablero). Lo que se recorta
+// es cielo de arriba (bar / zoom px de mundo). En Chico (800×450) también: el mapa entra a lo ancho, así
+// que queda con zoom 1 (pixel art nítido) y corrido hacia arriba, sin los 62 px de cielo más altos; un tiro
+// que sube por encima se ve con la flecha del borde, como siempre. Un zoom fijo de 388/450 para que entre
+// entero se descartó: escala fraccional (pixels desparejos) y franjas fuera del mundo a los costados.
+// Con bar = 0 (demo congelado de QA, sin tablero) todo queda como antes.
+import { HUD_BAR_H, VIEW_H, VIEW_W, type Camera } from '../render/types'
 import type { Vec2 } from '../sim/types'
 
 export const MIN_ZOOM = 0.5
@@ -11,6 +21,7 @@ const TANK_TIME = 0.45 // siguiendo al tanque del turno
 const SHOT_TIME = 0.2 // siguiendo al proyectil
 const IMPACT_TIME = 0.35 // después del último impacto, mientras se asienta el tiro
 const FALL_TIME = 0.25 // acompañando a un tanque que cae al abismo (v3)
+const SLIDE_TIME = 0.35 // acompañando a un tanque que se desliza (pulido v2)
 const WATCH_TIME = 0.5 // mirando un flujo de líquido (v4): viaje tranquilo, el agua corre despacio
 const ZOOM_TIME = 0.55
 const MAX_SPEED = 4000 // px de mundo por segundo
@@ -19,6 +30,11 @@ const TANK_LIFT = 40
 
 // manual: el jugador paneó; la cámara se queda donde la dejó hasta recentrar o cambiar de turno.
 export type CameraMode = 'tank' | 'manual' | 'shot'
+
+// HUD C: margen de arriba que ocupan el minimapa y los carteles (px lógicos) y cuánto puede subir la cámara
+// por encima del encuadre normal para no tapar un objetivo alto.
+const TOP_SAFE = 100
+const MAX_RISE = 160
 
 export class CameraController {
   mode: CameraMode = 'tank'
@@ -34,6 +50,8 @@ export class CameraController {
   private ty = VIEW_H / 2
   private tz = 1
   private time = TANK_TIME
+  // Filas de abajo de la pantalla que tapa el tablero del HUD (px lógicos). Lo fija la sesión al empezar.
+  bar = HUD_BAR_H
 
   // El mapa entra en pantalla: cámara fija, sin paneo ni zoom.
   get fixed(): boolean {
@@ -41,7 +59,7 @@ export class CameraController {
   }
 
   get camera(): Camera {
-    if (this.fixed) return { cx: this.w / 2, cy: this.h / 2, zoom: 1 }
+    if (this.fixed) return { cx: this.w / 2, cy: this.floorY(1), zoom: 1 }
     return { cx: this.cx, cy: this.cy, zoom: this.zoom }
   }
 
@@ -50,11 +68,16 @@ export class CameraController {
     return { w: this.w, h: this.h }
   }
 
-  // Rectángulo de mundo visible (sin sacudón).
+  // Alto de pantalla útil (px lógicos): lo que no tapa el tablero del HUD.
+  get usableH(): number {
+    return VIEW_H - this.bar
+  }
+
+  // Rectángulo de mundo que realmente se ve (sin sacudón ni lo que tapa el tablero).
   view(): { x: number; y: number; w: number; h: number } {
     const c = this.camera
     const w = VIEW_W / c.zoom
-    const h = VIEW_H / c.zoom
+    const h = this.usableH / c.zoom
     return { x: c.cx - w / 2, y: c.cy - h / 2, w, h }
   }
 
@@ -121,13 +144,23 @@ export class CameraController {
   }
 
   // v3: un tanque cae al abismo. La cámara lo acompaña rápido y vuelve a zoom 1; clampY la frena con el
-  // borde de abajo del mundo en el borde de abajo de la pantalla (nunca muestra lo que hay debajo).
+  // borde de abajo del mundo apoyado sobre el tablero del HUD (nunca muestra lo que hay debajo).
   followFall(x: number, y: number): void {
     this.mode = 'shot'
     this.tx = x
     this.ty = y
     this.tz = 1
     this.time = FALL_TIME
+  }
+
+  // Pulido v2: un tanque se desliza (empuje o pendiente). La cámara lo acompaña con suavizado y vuelve a
+  // zoom 1, sin saltos.
+  followSlide(x: number, y: number): void {
+    this.mode = 'shot'
+    this.tx = x
+    this.ty = y
+    this.tz = 1
+    this.time = SLIDE_TIME
   }
 
   // Paneo a mano (dx en px de mundo), sin retraso: la cámara va pegada al dedo o al mouse.
@@ -179,17 +212,27 @@ export class CameraController {
     return clamp(x, half, this.w - half)
   }
 
-  // En y, el piso del mundo queda abajo de la pantalla; con zoom < 1 se ve más cielo arriba.
+  // En y, el piso del mundo queda apoyado sobre el tablero (como en v1 quedaba en el borde de abajo); con
+  // zoom < 1 se ve más cielo arriba. Si el objetivo queda tan alto que lo taparían el minimapa y los carteles
+  // de arriba (una cima de montaña en Mediano/Grande), la cámara sube lo justo para dejarlo a TOP_SAFE px del
+  // borde de arriba, hasta MAX_RISE px de mundo; lo de abajo del mundo queda detrás del tablero.
   private clampY(y: number, zoom: number): number {
-    const half = VIEW_H / (2 * zoom)
-    if (this.h <= half * 2) return this.h - half
-    return clamp(y, half, this.h - half)
+    const floor = this.floorY(zoom)
+    if (this.bar <= 0) return floor
+    const need = y + (VIEW_H / 2 - TOP_SAFE) / zoom
+    return clamp(need, floor - MAX_RISE / zoom, floor)
+  }
+
+  // Centro en y que deja el piso del mundo (h) en la fila VIEW_H − bar de la pantalla.
+  private floorY(zoom: number): number {
+    return this.h - (VIEW_H / 2 - this.bar) / zoom
   }
 }
 
 // Zoom de un tiro, calculado una vez con el recorrido completo: se aleja si el vuelo es más ancho que
-// la pantalla o si sube por encima de lo que se ve con zoom 1 (el piso queda siempre abajo).
-export function shotZoom(paths: Vec2[][], worldH: number): number {
+// la pantalla o si sube por encima de lo que se ve con zoom 1 (el piso queda siempre abajo, sobre el
+// tablero del HUD: el alto útil es VIEW_H − bar).
+export function shotZoom(paths: Vec2[][], worldH: number, bar = HUD_BAR_H): number {
   let minX = Infinity
   let maxX = -Infinity
   let minY = Infinity
@@ -203,9 +246,9 @@ export function shotZoom(paths: Vec2[][], worldH: number): number {
   if (!Number.isFinite(minX)) return 1
   const span = maxX - minX
   const bySpan = span > 0 ? (VIEW_W * 0.8) / span : 1
-  // el tope de lo visible es worldH - VIEW_H / zoom; 30 px de aire sobre el apogeo
+  // el tope de lo visible es worldH - (VIEW_H - bar) / zoom; 30 px de aire sobre el apogeo
   const rise = worldH - minY + 30
-  const byTop = rise > 0 ? VIEW_H / rise : 1
+  const byTop = rise > 0 ? (VIEW_H - bar) / rise : 1
   return clamp(Math.min(1, bySpan, byTop), MIN_ZOOM, 1)
 }
 

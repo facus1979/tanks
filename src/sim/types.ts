@@ -59,7 +59,20 @@ export const SUDDEN_DEATH_CALM = 5
 export const LAVA_RISE = 18
 export const LAVA_DAMAGE = 20
 export const FALL_DAMAGE = 0.45
-export const FUEL_PER_TURN = 60 // pixels que puede avanzar por turno (F6)
+export const FUEL_PER_TURN = 60 // pixels que puede avanzar por turno (F6), en el mapa Chico
+// Pulido v2: combustible por turno según el ancho del mapa (60·√k, k = width/800). Lo usan el turno y el ítem.
+export function fuelFor(width: number): number {
+  return Math.round(FUEL_PER_TURN * Math.sqrt(width / WORLD_W))
+}
+
+// Pulido v2: empuje y deslizamiento. Una explosión empuja a los tanques que alcanza en sentido contrario
+// al centro (hasta KNOCKBACK_MAX px, más cuanto más cerca y más fuerte); un tanque cuyo piso queda más
+// inclinado que SLIDE_SLOPE (diferencia de altura entre los bordes de las orugas / TANK_W) se desliza cuesta
+// abajo hasta quedar estable. Los dos pueden terminar en una caída (al vacío, al agua o al abismo).
+// El paracaídas solo se abre (y se gasta) si la caída haría al menos PARACHUTE_MIN_DAMAGE de daño.
+export const KNOCKBACK_MAX = 24
+export const SLIDE_SLOPE = 2.2
+export const PARACHUTE_MIN_DAMAGE = 10
 export const MAX_CLIMB = 3 // escalón máximo que sube sin frenarse
 
 export const ANGLE_SPEED = 70
@@ -117,6 +130,8 @@ export const MATERIALS: MaterialDef[] = [
 //   cada turno (damage.cause 'lava'); el proyectil que la toca se derrite (impacto 'lava'); enciende lo
 //   inflamable que toca al fluir.
 // - Tierra (arma Tierra o derrumbe) que cae sobre lava → piedra. Agua que toca lava → piedra (evento 'steam').
+// - Pulido v2: el proyectil de Tierra no se derrite en la lava: construye y lo que cae sobre lava es piedra.
+//   Napalm sobre agua → la superficie alcanzada se vuelve piedra flotante (puente o isla), con 'steam'.
 // - Flujo: al final de cada fire que cambió el terreno, hasta FLOW_MAX_ITERS iteraciones; cada FLOW_FRAME_ITERS
 //   se emite un parche para animar (evento 'flow').
 export const WATER_DRAG = 0.25
@@ -210,14 +225,20 @@ export type Difficulty = 'easy' | 'normal' | 'hard'
 export type Phase = 'aiming' | 'roundover' | 'shop' | 'gameover'
 
 // Tripulantes con cara propia. El renderer mapea crew -> sprite y retrato.
-export type CrewId = 'bandana' | 'sarge' | 'rookie' | 'desert'
-export const CREWS: CrewId[] = ['bandana', 'sarge', 'rookie', 'desert']
+// v5: cuatro más (comando con boina negra, tanquista con casco de cuero y antiparras, piloto con casco y
+// pelo recogido, coronel de bigote blanco). El orden fija el tripulante por defecto de cada casillero.
+export type CrewId = 'bandana' | 'sarge' | 'rookie' | 'desert' | 'commando' | 'goggles' | 'pilot' | 'colonel'
+export const CREWS: CrewId[] = ['bandana', 'sarge', 'rookie', 'desert', 'commando', 'goggles', 'pilot', 'colonel']
+
+// v5: hasta 8 jugadores, limitado por el tamaño del mapa (en Chico no entran más de 4 con lugar para moverse).
+export const MAX_PLAYERS = 8
+export const MAX_PLAYERS_BY_SIZE: Record<MapSize, number> = { small: 4, medium: 6, large: 8 }
 
 // ---------- tienda e ítems ----------
 
 // shield: absorbe SHIELD_HP de daño hasta agotarse (se activa con useItem).
-// parachute: pasivo; anula el próximo daño de caída y se consume.
-// fuel: suma FUEL_PER_TURN al combustible del turno (useItem).
+// parachute: pasivo; anula el próximo daño de caída de al menos PARACHUTE_MIN_DAMAGE y se consume.
+// fuel: suma fuelFor(width) al combustible del turno (useItem).
 // repair: cura REPAIR_HP (useItem, no gasta el turno).
 // tracer: el próximo tiro muestra la trayectoria completa al apuntar (useItem).
 export type ItemId = 'shield' | 'parachute' | 'fuel' | 'repair' | 'tracer'
@@ -265,7 +286,7 @@ export interface SlotConfig {
 }
 
 export interface MatchConfig {
-  slots: SlotConfig[] // 2 a 4 casilleros ocupados; hot-seat = varios 'human'
+  slots: SlotConfig[] // 2 a MAX_PLAYERS_BY_SIZE[size] casilleros ocupados (v5: hasta 8); hot-seat = varios 'human'
   rounds: number // 1, 3, 5 o 10
   difficulty: Difficulty
   biome?: Biome | 'random' | 'rotate' // fijo, al azar por ronda, o rotando forest→jungle→industrial
@@ -381,6 +402,9 @@ export type GameEvent =
   | { type: 'item'; playerId: number; item: ItemId } // useItem aplicado
   | { type: 'turn'; playerId: number }
   | { type: 'wind'; value: number }
+  // Pulido v2: el tanque se corrió por el piso (empuje de una explosión o pendiente). path: piso del tanque cada
+  // PATH_DT segundos desde t. Si termina sin piso, después viene un 'fall'.
+  | { type: 'slide'; playerId: number; cause: 'blast' | 'slope'; path: Vec2[]; t?: number }
   // v4: los líquidos se asentaron. patches[i] se aplica a la grilla en t + i * dt (el último deja el estado final).
   | { type: 'flow'; t: number; dt: number; patches: TerrainPatch[] }
   | { type: 'steam'; x: number; y: number; n: number; t?: number } // v4: agua y lava hicieron piedra (n celdas)
@@ -398,4 +422,5 @@ export interface StepResult {
   flights?: Flight[]
 }
 
-export const TANK_COLORS = [0x3d8cf0, 0xe23d3d, 0xe2c13d, 0x3dbe5a]
+// Azul, rojo, amarillo, verde y (v5) violeta, naranja, turquesa y rosa. El índice es player.id.
+export const TANK_COLORS = [0x3d8cf0, 0xe23d3d, 0xe2c13d, 0x3dbe5a, 0xa65ae0, 0xf0903a, 0x3ad0c8, 0xe85aa0]

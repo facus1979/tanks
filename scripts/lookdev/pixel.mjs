@@ -628,18 +628,32 @@ export const BARREL_LEN = 11
 export const CREW_W = 12
 export const CREW_X = 8
 
-// Cascos y franjas de la referencia, en el orden de TANK_COLORS (azul, rojo, amarillo, verde).
+// Cascos y franjas en el orden de TANK_COLORS: los 4 de la referencia (azul, rojo, amarillo, verde) y los 4
+// de v5 (violeta, naranja, turquesa, rosa). El casco no lleva el color del jugador (eso lo hacen la franja y el
+// banderín), pero son 8 distintos para que cada tanque se reconozca de lejos aunque dos franjas se parezcan.
 export const HULLS = [
   { D: 0x2c341e, d: 0x434d2a, m: 0x5c6836, l: 0x7c8a48, h: 0xa2ae66 }, // oliva
   { D: 0x4a3a24, d: 0x6a5636, m: 0x8c7650, l: 0xae9468, h: 0xcdb488 }, // desierto
   { D: 0x2a3038, d: 0x3e4854, m: 0x56626e, l: 0x74808a, h: 0x9aa4ac }, // gris
   { D: 0x3a2a30, d: 0x54404a, m: 0x705866, l: 0x8e7482, h: 0xb096a2 }, // malva
+  // v5: invierno (gris claro casi blanco) bajo el violeta, azul marino bajo el naranja (complementarios),
+  // óxido bajo el turquesa (lo separa del verde y el azul, que van sobre oliva y malva) y carbón bajo el rosa
+  // (frío, para no confundirse con los restos quemados, que son marrón negruzco)
+  { D: 0x4a5058, d: 0x6c747c, m: 0x949ca2, l: 0xb8bec2, h: 0xdce0e2 }, // invierno
+  { D: 0x1a2436, d: 0x2a3850, m: 0x3a4c68, l: 0x546a8a, h: 0x7890b0 }, // marino
+  { D: 0x3e1e14, d: 0x5c2e1e, m: 0x7c422c, l: 0x9e5a3c, h: 0xc07a56 }, // óxido
+  { D: 0x121214, d: 0x1e1e20, m: 0x2c2c2e, l: 0x404042, h: 0x5e5e60 }, // carbón
 ]
 export const STRIPES = [
   [0x1f58b8, 0x3d8cf0],
   [0x9a1e1a, 0xe23d3d],
   [0xa88a14, 0xe2c13d],
   [0x2a8a4a, 0x3dbe5a],
+  // v5: el claro es el de TANK_COLORS; el oscuro, la sombra de la franja
+  [0x6a2a9a, 0xa65ae0],
+  [0xb0581a, 0xf0903a],
+  [0x15888a, 0x3ad0c8],
+  [0xa82a6a, 0xe85aa0],
 ]
 
 export const tankPal = (hull, stripe) => ({ k: OUT, ...hull, R: stripe[1], r: stripe[0], y: 0xfff1a8, Y: 0xffffff, v: 0x2a2a24 })

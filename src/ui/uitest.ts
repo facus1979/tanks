@@ -1,6 +1,6 @@
 // Página de prueba de las vistas: ?uitest=online|lobby|title|menu|banner|score|final|shop|hud con modelos falsos.
 // index.html la carga solo si la query trae uitest; main.ts puede llamar mountUiTest(name) si prefiere.
-import { BEDROCK, BRICK, DIRT, ITEM_ORDER, MAP_SIZES, SHOP, STONE, WOOD, type MapSize, type ShopId, type Terrain } from '../sim/types'
+import { BEDROCK, BRICK, CREWS, DIRT, ITEM_ORDER, MAP_SIZES, SHOP, STONE, TANK_COLORS, WOOD, type MapSize, type MatchConfig, type ShopId, type Terrain } from '../sim/types'
 import { loadUiAssets } from './assets'
 import { Hud } from './hud'
 import { refreshLabels } from './kit'
@@ -13,18 +13,31 @@ import { createShopView } from './shop'
 import { createTitleView } from './title'
 import type { LobbyModel, MinimapModel, ScoreModel, ShopModel } from './types'
 
-const ROWS = [
+// v5: hasta 8 filas (&players=N, por defecto 8) con los tripulantes y colores nuevos
+const ALL_ROWS = [
   { id: 0, name: 'BANDANA', color: 0x3d8cf0, crew: 'bandana' as const, alive: true, roundsWon: 2, kills: 3, earned: 1150, money: 1750 },
   { id: 1, name: 'SARGENTO', color: 0xe23d3d, crew: 'sarge' as const, alive: false, roundsWon: 1, kills: 1, earned: 420, money: 900 },
   { id: 2, name: 'NOVATO', color: 0xe2c13d, crew: 'rookie' as const, alive: false, roundsWon: 0, kills: 0, earned: 80, money: 300 },
+  { id: 3, name: 'DESIERTO', color: 0x3dbe5a, crew: 'desert' as const, alive: true, roundsWon: 1, kills: 2, earned: 640, money: 1210 },
+  { id: 4, name: 'COMANDO', color: 0xa65ae0, crew: 'commando' as const, alive: false, roundsWon: 0, kills: 1, earned: 260, money: 540 },
+  { id: 5, name: 'TANQUISTA', color: 0xf0903a, crew: 'goggles' as const, alive: true, roundsWon: 0, kills: 0, earned: 150, money: 420 },
+  { id: 6, name: 'PILOTO', color: 0x3ad0c8, crew: 'pilot' as const, alive: false, roundsWon: 0, kills: 2, earned: 330, money: 610 },
+  { id: 7, name: 'CORONEL', color: 0xe85aa0, crew: 'colonel' as const, alive: false, roundsWon: 0, kills: 0, earned: 0, money: 150 },
 ]
 
+// Cartel y tienda: &p=N (1..8) elige el jugador de ALL_ROWS; por defecto P5 (Comando, violeta), uno de los nuevos.
+function who(): (typeof ALL_ROWS)[number] {
+  const p = Number(new URLSearchParams(location.search).get('p')) || 5
+  return ALL_ROWS[Math.max(1, Math.min(8, p)) - 1]
+}
+
 function shopModel(money: number, owned: Record<string, number>): ShopModel {
+  const w = who()
   return {
-    playerId: 0,
-    name: 'Bandana',
-    color: 0x3d8cf0,
-    crew: 'bandana',
+    playerId: w.id,
+    name: w.name.charAt(0) + w.name.slice(1).toLowerCase(),
+    color: w.color,
+    crew: w.crew,
     money,
     round: 2,
     rounds: 3,
@@ -55,11 +68,16 @@ function lobbyModel(role: 'host' | 'client'): LobbyModel {
       turnSeconds: 45,
       // sin &size= el lobby no trae size (como un anfitrión anterior a v2): se ve CHICO
       ...(params.get('size') ? { size: params.get('size') as MapSize } : {}),
+      // v5: siempre 8 casilleros; &size= decide cuántos están habilitados (Chico 4, Mediano 6, Grande 8)
       slots: [
         { kind: 'human', name: 'Facu', crew: 'bandana', owner: 'host', connected: true },
         { kind: 'human', name: 'Sargento', crew: 'sarge', owner: 'peer1', connected: true },
         { kind: 'human', name: '', crew: 'rookie', owner: null, connected: false },
         { kind: 'ai', name: 'IA', crew: 'desert', owner: null, connected: true },
+        { kind: 'human', name: 'Coman2', crew: 'commando', owner: 'peer2', connected: false },
+        { kind: 'ai', name: 'IA', crew: 'goggles', owner: null, connected: true },
+        { kind: 'off', name: '', crew: 'pilot', owner: null, connected: false },
+        { kind: 'ai', name: 'IA', crew: 'colonel', owner: null, connected: true },
       ],
     },
   }
@@ -68,13 +86,37 @@ function lobbyModel(role: 'host' | 'client'): LobbyModel {
 export async function mountUiTest(name: string): Promise<boolean> {
   const forced = Number(new URLSearchParams(location.search).get('s'))
   if (forced) (window as unknown as { __uiScale?: number }).__uiScale = forced
+  // &touch=1 simula un dispositivo táctil (la clase que pone TouchControls en el juego)
+  if (params.has('touch')) document.documentElement.classList.add('touch')
   await loadUiAssets()
   refreshLabels()
   if (name === 'title') createTitleView().show(() => console.log('start'))
-  else if (name === 'menu') createMenuView().show(null, (c) => console.log('play', JSON.stringify(c)))
-  else if (name === 'banner') createBannerView().show({ name: 'Sargento', color: 0xe23d3d, crew: 'sarge', round: 2, rounds: 3 }, () => console.log('go'))
+  else if (name === 'menu') {
+    // v5: &players=N (2..8) arma una config de N casilleros (P1 humano, el resto IA, P3 con nombre) en el mapa
+    // de &size= (por defecto grande); sin &players usa la config guardada o la de fábrica, como el juego.
+    const n = Number(params.get('players'))
+    const initial: MatchConfig | null = n
+      ? {
+          slots: Array.from({ length: Math.max(2, Math.min(8, n)) }, (_, i) => ({ kind: i === 0 ? ('human' as const) : ('ai' as const), crew: CREWS[i], ...(i === 2 ? { name: 'RULO' } : {}) })),
+          rounds: 3,
+          difficulty: 'normal',
+          biome: 'rotate',
+          size: (params.get('size') as MapSize) ?? 'large',
+        }
+      : null
+    createMenuView().show(initial, (c) => console.log('play', JSON.stringify(c)))
+    // &pick=small (o cualquier data-key de un botón de opción) lo toca después de abrir: prueba achicar el mapa
+    const pick = params.get('pick')
+    if (pick) document.querySelector<HTMLButtonElement>(`#menu-view [data-key="${pick}"]`)?.click()
+    pressKeys()
+  }
+  else if (name === 'banner') {
+    const w = who()
+    createBannerView().show({ name: w.name, color: w.color, crew: w.crew, round: 2, rounds: 3 }, () => console.log('go'))
+  }
   else if (name === 'score' || name === 'final') {
-    const model: ScoreModel = { round: 3, rounds: 3, roundWinnerId: 0, final: name === 'final', winnerId: 0, rows: ROWS }
+    const n = Math.max(2, Math.min(8, Number(params.get('players')) || 8))
+    const model: ScoreModel = { round: 3, rounds: 3, roundWinnerId: 0, final: name === 'final', winnerId: 0, rows: ALL_ROWS.slice(0, n) }
     createScoreboardView().show(model, () => console.log('continue'), () => console.log('menu'))
   } else if (name === 'shop') {
     let money = 1250
@@ -107,27 +149,37 @@ export async function mountUiTest(name: string): Promise<boolean> {
     const sdParam = params.get('sd')
     const suddenDeath = sdParam == null ? null : sdParam === 'lava' ? { active: true, calmLeft: 0 } : { active: false, calmLeft: Number(sdParam) || 0 }
     if (minimap && suddenDeath?.active) minimap.lava = MAP_SIZES[size].h - 80
-    const side = (n: number, name: string, color: number, crew: 'bandana' | 'sarge') => ({ name, tag: `P${n}`, color, crew, hp: 80, alive: true, active: n === 1, you: n === 1 })
+    // HUD C: &players=N (2..8) arma N tanques (placas apiladas arriba a la derecha); &turn=ai le da el turno
+    // al rival (el tablero muestra sus datos y los controles quedan inactivos); &fine=1 prueba las décimas.
+    // v5: los 8 tripulantes y colores del contrato
+    const crews = CREWS
+    const names = ['Bandana', 'Sargento', 'Novato', 'Desierto', 'Comando', 'Tanquista', 'Piloto', 'Coronel']
+    const colors = TANK_COLORS
+    const nPlayers = Math.max(2, Math.min(8, Number(params.get('players')) || 2))
+    const aiTurn = params.get('turn') === 'ai'
+    const turn = aiTurn ? 2 : 1
+    const side = (n: number) => ({ name: names[n - 1], tag: `P${n}`, color: colors[n - 1], crew: crews[n - 1], hp: [80, 100, 45, 20, 60, 0, 100, 35][n - 1], alive: n !== 6, active: n === turn, you: n === 1 })
+    const fineAim = params.has('fine')
     const model: Parameters<Hud['update']>[0] = {
-      human: side(1, 'Bandana', 0x3d8cf0, 'bandana'),
-      rival: side(2, 'Sargento', 0xe23d3d, 'sarge'),
-      others: [],
-      angle: 45,
-      power: 60,
+      human: side(1),
+      rival: side(2),
+      others: Array.from({ length: nPlayers - 2 }, (_, i) => side(i + 3)),
+      angle: fineAim ? 135.5 : aiTurn ? 140 : 45,
+      power: fineAim ? 100 : 60,
       weapon: 'heavy',
       ammo: 2,
-      wind: 4,
-      status: params.get('status') ?? '',
-      showAim: true,
+      wind: Number(params.get('wind') ?? 4),
+      status: params.get('status') ?? (aiTurn ? 'SARGENTO PIENSA' : ''),
+      showAim: !aiTurn,
       ammoAll: { normal: 99, heavy: 2, dirt: 3, cluster: 0, napalm: 2, digger: 2, roller: 2, nuke: 1 },
-      fuel: 0.7,
-      showBar: true,
+      fuel: aiTurn ? 1 : 0.7,
+      showBar: !aiTurn,
       extras: {
         round: 2,
         rounds: 3,
         money: 1250,
         items,
-        shield: 25,
+        shield: aiTurn ? 0 : 25,
         tracer: true,
         net: params.has('net')
           ? { role: 'host', code: 'TANK-4F7K', peers: [{ name: 'Sargento', connected: true, ping: 48 }, { name: 'Novato', connected: false, ping: null }], turnLeft: Number(params.get('net')) || 27, waiting: 'ESPERANDO A SARGENTO…' }
@@ -142,7 +194,11 @@ export async function mountUiTest(name: string): Promise<boolean> {
       requestAnimationFrame(tick)
     }
     tick()
-    root.addEventListener('pointerdown', (e) => console.log('minimapAt', JSON.stringify(hud.minimapAt(e.clientX, e.clientY))))
+    // #hud no recibe eventos (pointer-events: none, como en el juego): se escucha en la ventana
+    window.addEventListener('pointerdown', (e) => {
+      console.log('minimapAt', JSON.stringify(hud.minimapAt(e.clientX, e.clientY)))
+      console.log('controlAt', JSON.stringify(hud.controlAt(e.clientX, e.clientY)))
+    })
   } else if (name === 'online') {
     const view = createOnlineMenuView()
     const handlers = { host: () => console.log('host'), join: (c: string) => { console.log('join', c); view.error('SALA NO ENCONTRADA') }, back: () => console.log('back') }
@@ -162,8 +218,16 @@ export async function mountUiTest(name: string): Promise<boolean> {
       start: () => console.log('start'),
       leave: () => console.log('leave'),
     })
+    pressKeys()
   } else return false
   return true
+}
+
+// &keys=ArrowUp,ArrowRight,Enter… manda esas teclas (por code) al abrir la vista: prueba la navegación con teclado.
+function pressKeys(): void {
+  for (const code of (params.get('keys') ?? '').split(',').filter(Boolean)) {
+    window.dispatchEvent(new KeyboardEvent('keydown', { code, key: code === 'Space' ? ' ' : code, bubbles: true }))
+  }
 }
 
 const q = new URLSearchParams(location.search).get('uitest')

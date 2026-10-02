@@ -3,7 +3,7 @@ import { Keyboard, weaponSlot } from './input/keyboard'
 import { Gamepad, type PadState } from './input/gamepad'
 import { TouchControls, fullscreenButton, isTouchDevice, vibrate } from './input/touch'
 import { MousePan } from './input/mouse'
-import type { Viewport } from './render/types'
+import { VIEW_H, VIEW_W, type Viewport } from './render/types'
 import { Sfx } from './audio/sfx'
 import { Session, abyssDrop, isAbyssFall } from './game/session'
 import type { NetSeat } from './game/session'
@@ -18,12 +18,14 @@ import { createTitleView } from './ui/title'
 import { createBannerView } from './ui/banner'
 import { createScoreboardView } from './ui/scoreboard'
 import { createShopView } from './ui/shop'
-import { DEFAULT_CONFIG } from './ui/types'
-import { chooseShot } from './sim'
+import { DEFAULT_CONFIG, type HudControl } from './ui/types'
+import { PATH_DT, chooseShot } from './sim'
 import {
   ANGLE_SPEED,
   BIOMES,
   MAP_SIZE_ORDER,
+  MAX_PLAYERS,
+  MAX_PLAYERS_BY_SIZE,
   POWER_SPEED,
   TANK_H,
   TANK_HALF_W,
@@ -74,7 +76,7 @@ const AUTO_SHOT = { delay: 0.8 }
 const ITEM_KEYS: Record<string, ItemId> = { KeyQ: 'shield', KeyF: 'fuel', KeyR: 'repair', KeyT: 'tracer' }
 // Cámara (v2): Z / X panean a la izquierda / derecha, C recentra en el tanque del turno.
 // También: mouse contra el borde, arrastre con el botón del medio (o el izquierdo fuera del tanque y
-// de la barra de armas), stick derecho del gamepad (R3 recentra), dos dedos en táctil (◎ recentra),
+// del tablero / controles del HUD), stick derecho del gamepad (R3 recentra), dos dedos en táctil (◎ recentra),
 // click o arrastre sobre el minimapa (doble click o doble toque recentra).
 const PAN_SPEED = 700 // pixels de pantalla por segundo con Z / X, el borde o el stick
 // v2 ajuste fino: con Shift (o L3 / Select en el gamepad) ángulo y potencia van a 1/5 de velocidad.
@@ -122,6 +124,8 @@ let viewport: Viewport | null = null
 // minimapa: puntero que lo está arrastrando y hora del último toque (doble toque recentra)
 let miniDrag: number | null = null
 let miniTapAt = -Infinity
+// HUD C: puntero que mantiene apretado ◀ o ▶ del tablero (mover, como A / D) y para qué lado
+let moveHold: { id: number; dir: -1 | 1 } | null = null
 
 void loadUiAssets().then(() => {
   refreshLabels()
@@ -133,15 +137,59 @@ const unlock = () => sfx.unlock()
 window.addEventListener('pointerdown', unlock)
 window.addEventListener('keydown', unlock)
 
-// Click en el selector de armas del HUD.
-window.addEventListener('pointerdown', (e) => {
-  if (screen !== 'play' || overlay !== 'none' || paused || !session.inputEnabled) return
-  const weapon = hud.weaponAt(e.clientX, e.clientY)
-  if (!weapon) return
-  e.preventDefault()
-  sfx.click()
-  session.select(weapon)
+// ---------- HUD C: controles del tablero y de la fila de ítems ----------
+
+// Punto de la ventana dentro del tablero inferior del HUD (las últimas hudBar filas de la pantalla).
+function inBar(clientX: number, clientY: number): boolean {
+  const bar = session.hudBar
+  if (!playing() || bar <= 0) return false
+  const r = stage.getBoundingClientRect()
+  if (r.width <= 0 || r.height <= 0) return false
+  const lx = ((clientX - r.left) / r.width) * VIEW_W
+  const ly = ((clientY - r.top) / r.height) * VIEW_H
+  return lx >= 0 && lx <= VIEW_W && ly >= VIEW_H - bar && ly <= VIEW_H
+}
+
+// Control del HUD bajo el puntero (arma, ítem, ◀ ▶), solo durante la partida sin carteles.
+const controlAt = (clientX: number, clientY: number): HudControl | null => (playing() ? hud.controlAt(clientX, clientY) : null)
+
+// El puntero empieza sobre el HUD que se toca: un control, el tablero entero o el minimapa. Ahí no
+// arrancan el arrastre de cámara, el apuntado táctil ni el paneo contra el borde.
+const onHud = (e: PointerEvent): boolean => onMinimap(e) || inBar(e.clientX, e.clientY) || controlAt(e.clientX, e.clientY) != null
+
+// Click o toque en un control: el arma la elige, el ítem lo usa (como Q / F / R / T) y ◀ ▶ mueven
+// mientras se mantienen apretados (como A / D; soltar frena). Todo solo en tu turno. En captura, antes
+// que el apuntado táctil y el arrastre del #stage.
+window.addEventListener(
+  'pointerdown',
+  (e) => {
+    const c = controlAt(e.clientX, e.clientY)
+    if (!c) return
+    e.preventDefault()
+    if (!session.inputEnabled) return
+    if (c.kind === 'weapon') {
+      sfx.click()
+      session.select(c.id)
+    } else if (c.kind === 'item') {
+      if (!session.useItem(c.id)) sfx.empty()
+    } else {
+      moveHold = { id: e.pointerId, dir: c.dir }
+    }
+  },
+  true,
+)
+// deslizar el dedo de ◀ a ▶ (o al revés) cambia de lado sin soltar
+window.addEventListener('pointermove', (e) => {
+  if (!moveHold || moveHold.id !== e.pointerId) return
+  const c = controlAt(e.clientX, e.clientY)
+  if (c?.kind === 'move') moveHold.dir = c.dir
 })
+const endMove = (e: PointerEvent): void => {
+  if (moveHold?.id === e.pointerId) moveHold = null
+}
+window.addEventListener('pointerup', endMove)
+window.addEventListener('pointercancel', endMove)
+window.addEventListener('blur', () => (moveHold = null))
 
 window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyM') sfx.toggleMute()
@@ -153,9 +201,11 @@ const playing = (): boolean => screen === 'play' && overlay === 'none' && !pause
 const onMinimap = (e: PointerEvent): boolean => playing() && hud.minimapAt(e.clientX, e.clientY) != null
 
 touch.toWorld = (x, y) => renderer.screenToWorld(x, y)
-touch.ignore = onMinimap
-// el click izquierdo arrastra el mundo salvo sobre el tanque del turno, la barra de armas o el minimapa
-mouse.blocked = (e) => onMinimap(e) || hud.weaponAt(e.clientX, e.clientY) != null || onCurrentTank(e.clientX, e.clientY)
+touch.ignore = onHud
+// el click izquierdo arrastra el mundo salvo sobre el tanque del turno, el tablero, un control del HUD o el minimapa
+mouse.blocked = (e) => onHud(e) || onCurrentTank(e.clientX, e.clientY)
+// el mouse contra el borde no panea sobre el tablero ni sobre los ítems de arriba
+mouse.noEdge = (x, y) => inBar(x, y) || controlAt(x, y) != null
 
 // Click o toque en el minimapa: centra la cámara ahí; arrastrar mueve el viewport; doble toque recentra.
 // En captura, antes que el apuntado táctil del #stage.
@@ -247,8 +297,10 @@ if (!uitest) {
       else if (demo.ff > 0) fastForwardFor(demo.ff)
     } else if (playParam != null) {
       const biome = (BIOMES as string[]).includes(params.get('biome') ?? '') ? (params.get('biome') as Biome) : 'forest'
-      const humans = clampInt(params.get('humans'), 1, 1, 4)
-      const bots = clampInt(params.get('bots'), 2, humans > 1 ? 0 : 1, 4 - humans)
+      // v5: humanos + bots hasta el máximo del tamaño (Chico 4, Mediano 6, Grande 8), p. ej. &size=large&bots=7
+      const max = MAX_PLAYERS_BY_SIZE[sizeParam]
+      const humans = clampInt(params.get('humans'), 1, 1, max)
+      const bots = clampInt(params.get('bots'), Math.min(2, max - humans), humans > 1 ? 0 : 1, max - humans)
       const slots: SlotConfig[] = []
       for (let i = 0; i < humans; i++) slots.push({ kind: 'human' })
       for (let i = 0; i < bots; i++) slots.push({ kind: 'ai' })
@@ -402,16 +454,26 @@ function openRoom(role: 'host' | 'client', code?: string): void {
   })
 }
 
-// autotest: 2 humanos (anfitrión + un cliente) y 1 IA, 1 ronda; arranca cuando el cliente tomó su casillero.
+// autotest: 2 humanos (anfitrión + un cliente) y el resto IA, 1 ronda; arranca cuando el cliente tomó
+// su casillero. Por defecto 3 casilleros (2 humanos + 1 IA) en el tamaño por defecto; con &players=N
+// (v5, scripts/net-test.mjs --players N) usa N casilleros y el mapa más chico que los admite.
+const AUTO_PLAYERS = Math.max(3, Math.min(MAX_PLAYERS, Math.round(Number(params.get('players')) || 3)))
 let autotestBusy = false
 function autotestLobby(room: Online): void {
   const lobby = room.lobby
   if (autotestBusy || !lobby || room.started || !room.code) return
   autotestBusy = true
   try {
+    if (params.has('players')) {
+      // el tamaño primero: el anfitrión no deja ocupar casilleros por encima del límite del mapa
+      const size = MAP_SIZE_ORDER.find((k) => MAX_PLAYERS_BY_SIZE[k] >= AUTO_PLAYERS) ?? 'large'
+      if (lobby.size !== size) room.setOption('size', size)
+    }
     if (lobby.slots[1]?.kind !== 'human') room.setSlot(1, 'human')
-    if (lobby.slots[2]?.kind !== 'ai') room.setSlot(2, 'ai')
-    if (lobby.slots[3]?.kind !== 'off') room.setSlot(3, 'off')
+    for (let i = 2; i < lobby.slots.length; i++) {
+      const kind = i < AUTO_PLAYERS ? 'ai' : 'off'
+      if (lobby.slots[i]?.kind !== kind) room.setSlot(i, kind)
+    }
     if (lobby.rounds !== 1) room.setOption('rounds', 1)
     // fuera del callback de la sala: el hello del cliente todavía se está procesando
     if (room.canStart()) setTimeout(() => online === room && !room.started && room.start(), 300)
@@ -494,6 +556,7 @@ function layout(): void {
   const vp = renderer.resize()
   viewport = vp
   hud.place(vp)
+  touch.place(vp, session.hudBar)
   refreshLabels()
 }
 
@@ -519,6 +582,7 @@ function tick(rawDt: number): void {
   touch.setActive(screen === 'play' && overlay === 'none')
   mouse.active = playing()
   if (!mouse.active) mouse.cancel()
+  if (!playing()) moveHold = null
   step1(Math.min(0.05, Math.max(0, rawDt)), true)
 }
 
@@ -651,8 +715,8 @@ function handleInput(dt: number, pressed: Set<string>, padState: ReturnType<Game
   session.nudge(dAngle * k + (padState?.stepAngle ?? 0), dPower * k + (padState?.stepPower ?? 0))
   const drag = touch.dragAim()
   if (drag) session.aimTo(drag.angle, drag.power)
-  const left = keys.isDown('KeyA') || padState?.move === -1
-  const right = keys.isDown('KeyD') || padState?.move === 1
+  const left = keys.isDown('KeyA') || padState?.move === -1 || moveHold?.dir === -1
+  const right = keys.isDown('KeyD') || padState?.move === 1 || moveHold?.dir === 1
   if (left !== right) session.move(left ? -1 : 1, dt)
   else session.stopMove()
   const slot = weaponSlot(pressed)
@@ -699,6 +763,15 @@ function playSounds(events: GameEvent[]): void {
         else if (e.parachute) sfx.parachute()
         else sfx.fall(Math.abs(e.to - e.from))
         break
+      case 'slide': {
+        // pulido v2: raspado mientras dura el recorrido (con golpe seco al empezar si fue un empuje); la
+        // caída que puede seguir llega como fall al aterrizar y suena como siempre
+        const path = e.path
+        let dist = 0
+        for (let i = 1; i < path.length; i++) dist += Math.hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y)
+        if (path.length > 1) sfx.slide((path.length - 1) * PATH_DT, dist, e.cause)
+        break
+      }
       case 'death':
         // perdido en el abismo: golpe lejano, sin la explosión del tanque
         if (e.cause === 'abyss') sfx.abyssThud()

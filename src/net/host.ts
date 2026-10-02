@@ -3,6 +3,8 @@
 //   const room = new HostRoom(createTransport(kind), hooks, { name })
 //   const code = await room.open()               // abre la sala; room.lobby tiene el estado
 //   room.claim / release / setSlot / setOption   // lobby (lo que hace el anfitrión en la vista)
+//                           // v5: siempre MAX_PLAYERS (8) casilleros, pero solo se ocupan los primeros
+//                           // MAX_PLAYERS_BY_SIZE[size] (room.limit). Al achicar el mapa, ver fitSlots.
 //   const { config, playerOfSlot } = room.start(seed)   // arma la partida; la sesión hace createMatch(config)
 //   room.dispatch(cmd)      // TODO comando del anfitrión (su input, la IA, nextRound, setKind): valida con
 //                           // hooks.apply, numera y reparte. 'aim' no entra al log: queda pendiente
@@ -13,7 +15,7 @@
 // Los comandos de los clientes llegan por 'input': el room verifica que sean del jugador del
 // casillero de ese peer y los pasa por hooks.apply (el mismo camino que dispatch).
 // hooks.apply NO debe llamar a dispatch de forma síncrona (si lo hace, el comando se encola).
-import { CREW_NAMES, CREWS } from '../sim'
+import { CREW_NAMES, CREWS, MAX_PLAYERS, MAX_PLAYERS_BY_SIZE } from '../sim'
 import type { Command, MatchConfig, PlayerKind } from '../sim'
 import type { NetTransport } from './base'
 import { NET_VERSION } from './types'
@@ -64,7 +66,7 @@ export class HostRoom {
   private byPeer = new Map<string, PeerRec>()
   private snapQueue = new Map<string, NetMessage[]>() // peers esperando su snapshot
   private pendingAim = new Map<number, { angle: number; power: number }>()
-  private playerOfSlot: (number | null)[] = [null, null, null, null]
+  private playerOfSlot: (number | null)[] = new Array(MAX_PLAYERS).fill(null)
   private applying = false
   private queue: Command[] = []
   private timer = 0
@@ -110,6 +112,11 @@ export class HostRoom {
     return i < 0 ? null : i
   }
 
+  // Casilleros que se pueden ocupar con el tamaño de mapa elegido (Chico 4, Mediano 6, Grande 8).
+  get limit(): number {
+    return MAX_PLAYERS_BY_SIZE[this.state.size ?? 'small'] ?? MAX_PLAYERS
+  }
+
   claim(slot: number): boolean {
     return this.claimFor('host', slot, this.state.slots[this.mySlot ?? 0]?.name ?? '')
   }
@@ -121,6 +128,7 @@ export class HostRoom {
   setSlot(slot: number, kind: PlayerKind | 'off'): void {
     const s = this.state.slots[slot]
     if (!s || this.started) return
+    if (slot >= this.limit && kind !== 'off') return // por encima del límite del mapa solo 'off'
     if (s.owner === 'host' && kind !== 'human') return // el anfitrión suelta su casillero con release()
     if (s.owner && s.owner !== 'host' && kind !== 'human') s.owner = null
     s.kind = kind
@@ -138,14 +146,16 @@ export class HostRoom {
     else if (key === 'biome' && ['forest', 'jungle', 'industrial', 'random', 'rotate'].includes(String(value)))
       st.biome = value as LobbyState['biome']
     else if (key === 'turnSeconds' && Number(value) >= 0) st.turnSeconds = Math.round(Number(value))
-    else if (key === 'size' && (value === 'small' || value === 'medium' || value === 'large')) st.size = value
-    else return
+    else if (key === 'size' && (value === 'small' || value === 'medium' || value === 'large')) {
+      st.size = value
+      this.fitSlots()
+    } else return
     this.lobbyChanged()
   }
 
   // Al menos 2 casilleros ocupados y todos los humanos con dueño conectado.
   canStart(): boolean {
-    const used = this.state.slots.filter((s) => s.kind !== 'off')
+    const used = this.state.slots.filter((s, i) => s.kind !== 'off' && i < this.limit)
     return used.length >= 2 && used.every((s) => s.kind === 'ai' || (s.owner !== null && s.connected))
   }
 
@@ -167,8 +177,8 @@ export class HostRoom {
   start(seed?: number): { config: MatchConfig; slotOfPeer: Record<string, number>; playerOfSlot: (number | null)[] } {
     if (!this.canStart()) throw new Error('Faltan jugadores')
     const st = this.state
-    const used = st.slots.map((s, i) => ({ s, i })).filter(({ s }) => s.kind !== 'off')
-    this.playerOfSlot = [null, null, null, null]
+    const used = st.slots.map((s, i) => ({ s, i })).filter(({ s, i }) => s.kind !== 'off' && i < this.limit)
+    this.playerOfSlot = new Array(MAX_PLAYERS).fill(null)
     used.forEach(({ i }, id) => (this.playerOfSlot[i] = id))
     this.config = {
       slots: used.map(({ s }) => ({ kind: s.kind as PlayerKind, name: s.name || CREW_NAMES[s.crew], crew: s.crew })),
@@ -334,7 +344,7 @@ export class HostRoom {
       s.owner = from
       s.connected = true
     } else if (!this.started) {
-      const free = this.state.slots.findIndex((s) => s.kind === 'human' && s.owner === null)
+      const free = this.state.slots.findIndex((s, i) => s.kind === 'human' && s.owner === null && i < this.limit)
       if (free >= 0) this.claimFor(from, free, rec.name, false)
       slot = free >= 0 ? free : null
     }
@@ -377,13 +387,45 @@ export class HostRoom {
 
   private claimFor(owner: string, slot: number, name: string, notify = true): boolean {
     const s = this.state.slots[slot]
-    if (!s || this.started || s.kind !== 'human' || (s.owner !== null && s.owner !== owner)) return false
+    if (!s || this.started || slot >= this.limit || s.kind !== 'human' || (s.owner !== null && s.owner !== owner)) return false
     this.releaseFor(owner, false)
     s.owner = owner
     s.name = name
     s.connected = true
     if (notify) this.lobbyChanged()
     return true
+  }
+
+  // Criterio al achicar el mapa con casilleros ocupados por encima del nuevo límite (v5): no se
+  // impide el cambio; los casilleros de más se reacomodan en los libres de adentro y lo que no
+  // entra se libera. Prioridad: el anfitrión, después los humanos remotos con dueño (pueden ir a
+  // un casillero 'off' o a uno humano libre), después los humanos libres y por último la IA (estos
+  // dos solo a casilleros 'off'). El que se mueve conserva nombre y dueño pero toma el tripulante
+  // del casillero nuevo (la IA también su nombre). Lo que no entra queda 'off'; si tenía dueño,
+  // ese peer sigue conectado en la sala sin casillero y puede reclamar uno si se libera.
+  private fitSlots(): void {
+    const slots = this.state.slots
+    const lim = this.limit
+    const rank = (s: LobbySlot) => (s.owner === 'host' ? 0 : s.owner ? 1 : s.kind === 'human' ? 2 : 3)
+    const extra = slots
+      .map((s, i) => ({ s, i }))
+      .filter(({ s, i }) => i >= lim && s.kind !== 'off')
+      .sort((a, b) => rank(a.s) - rank(b.s) || a.i - b.i)
+    for (const { s } of extra) {
+      const owned = s.owner !== null
+      const j = slots.findIndex((t, k) => k < lim && (t.kind === 'off' || (owned && t.kind === 'human' && t.owner === null)))
+      if (j >= 0) {
+        const t = slots[j]
+        t.kind = s.kind
+        t.owner = s.owner
+        t.connected = s.connected
+        t.name = s.kind === 'ai' ? CREW_NAMES[t.crew] : s.name
+      }
+      s.kind = 'off'
+      s.owner = null
+      s.name = ''
+      s.connected = false
+    }
   }
 
   private releaseFor(owner: string, notify = true): void {

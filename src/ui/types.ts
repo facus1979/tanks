@@ -12,7 +12,7 @@ export interface TitleView {
   hide(): void
 }
 
-// src/ui/menu.ts: 4 casilleros (humano / IA / vacío, nombre, tripulante), rondas, dificultad, bioma.
+// src/ui/menu.ts: 8 casilleros (humano / IA / vacío, nombre, tripulante; habilitados según MAX_PLAYERS_BY_SIZE), rondas, dificultad, bioma, mapa.
 export interface MenuView {
   show(initial: MatchConfig | null, onPlay: (config: MatchConfig) => void): void
   hide(): void
@@ -128,10 +128,18 @@ export interface MinimapModel {
   lava?: number | null // v2: y de la superficie de la lava de muerte súbita
 }
 
+// HUD C (pulido v2): controles clicables/tocables del tablero inferior y de la fila de ítems.
+export type HudControl =
+  | { kind: 'weapon'; id: import('../sim').WeaponId }
+  | { kind: 'item'; id: ItemId }
+  | { kind: 'move'; dir: -1 | 1 } // botones ◀ ▶ de la sección COMB (mantener = mover)
+
 // Lo que el HUD (src/ui/hud.ts, clase Hud) expone al flujo para navegar con el minimapa.
 export interface MinimapInput {
   // Punto de la ventana → x,y de mundo si cae sobre el minimapa (con un margen táctil de 6 px lógicos); si no, null.
   minimapAt(clientX: number, clientY: number): Vec2 | null
+  // HUD C: control bajo un punto de la ventana (con margen táctil), o null. Reemplaza a weaponAt.
+  controlAt(clientX: number, clientY: number): HudControl | null
 }
 
 // ---------- online ----------
@@ -152,7 +160,7 @@ export interface LobbyModel {
   canStart: boolean // anfitrión: al menos 2 casilleros ocupados y todos los humanos conectados
 }
 
-// src/ui/lobby.ts: código grande + botón copiar link, 4 casilleros (anfitrión los configura: humano remoto /
+// src/ui/lobby.ts: código grande + botón copiar link, 8 casilleros (anfitrión los configura: humano remoto /
 // IA / vacío, y los ajustes de partida; cliente toma un casillero libre), estado de cada peer, empezar / salir.
 export interface LobbyView {
   show(
