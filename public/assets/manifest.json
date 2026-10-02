@@ -5,7 +5,11 @@
       "tank/body-0.png",
       "tank/body-1.png",
       "tank/body-2.png",
-      "tank/body-3.png"
+      "tank/body-3.png",
+      "tank/body-4.png",
+      "tank/body-5.png",
+      "tank/body-6.png",
+      "tank/body-7.png"
     ],
     "wreck": "tank/wreck.png",
     "barrels": [
@@ -35,6 +39,38 @@
       },
       {
         "file": "tank/barrel-3.png",
+        "cell": {
+          "w": 17,
+          "h": 17
+        },
+        "frames": 19
+      },
+      {
+        "file": "tank/barrel-4.png",
+        "cell": {
+          "w": 17,
+          "h": 17
+        },
+        "frames": 19
+      },
+      {
+        "file": "tank/barrel-5.png",
+        "cell": {
+          "w": 17,
+          "h": 17
+        },
+        "frames": 19
+      },
+      {
+        "file": "tank/barrel-6.png",
+        "cell": {
+          "w": 17,
+          "h": 17
+        },
+        "frames": 19
+      },
+      {
+        "file": "tank/barrel-7.png",
         "cell": {
           "w": 17,
           "h": 17
@@ -90,6 +126,38 @@
           "h": 6
         },
         "frames": 4
+      },
+      {
+        "file": "tank/treads-4.png",
+        "cell": {
+          "w": 28,
+          "h": 6
+        },
+        "frames": 4
+      },
+      {
+        "file": "tank/treads-5.png",
+        "cell": {
+          "w": 28,
+          "h": 6
+        },
+        "frames": 4
+      },
+      {
+        "file": "tank/treads-6.png",
+        "cell": {
+          "w": 28,
+          "h": 6
+        },
+        "frames": 4
+      },
+      {
+        "file": "tank/treads-7.png",
+        "cell": {
+          "w": 28,
+          "h": 6
+        },
+        "frames": 4
       }
     ]
   },
@@ -109,6 +177,22 @@
     "desert": {
       "sprite": "crew/desert.png",
       "portrait": "crew/desert-portrait.png"
+    },
+    "commando": {
+      "sprite": "crew/commando.png",
+      "portrait": "crew/commando-portrait.png"
+    },
+    "goggles": {
+      "sprite": "crew/goggles.png",
+      "portrait": "crew/goggles-portrait.png"
+    },
+    "pilot": {
+      "sprite": "crew/pilot.png",
+      "portrait": "crew/pilot-portrait.png"
+    },
+    "colonel": {
+      "sprite": "crew/colonel.png",
+      "portrait": "crew/colonel-portrait.png"
     }
   },
   "materials": {
