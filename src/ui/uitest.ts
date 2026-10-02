@@ -102,6 +102,11 @@ export async function mountUiTest(name: string): Promise<boolean> {
     // ?uitest=hud usa un minimapa falso de mapa Grande; &size=medium|small lo cambia (small = sin minimapa)
     const size = (params.get('size') ?? 'large') as MapSize
     const minimap = size in MAP_SIZES && size !== 'small' ? fakeMinimap(size) : null
+    // v2 muerte súbita: &sd=N muestra "MUERTE SÚBITA EN N" (calmLeft = N); &sd=lava la muestra activa
+    // con la banda de lava en el minimapa, 80 px de mundo sobre el fondo. &status=TEXTO prueba la convivencia.
+    const sdParam = params.get('sd')
+    const suddenDeath = sdParam == null ? null : sdParam === 'lava' ? { active: true, calmLeft: 0 } : { active: false, calmLeft: Number(sdParam) || 0 }
+    if (minimap && suddenDeath?.active) minimap.lava = MAP_SIZES[size].h - 80
     const side = (n: number, name: string, color: number, crew: 'bandana' | 'sarge') => ({ name, tag: `P${n}`, color, crew, hp: 80, alive: true, active: n === 1, you: n === 1 })
     const model: Parameters<Hud['update']>[0] = {
       human: side(1, 'Bandana', 0x3d8cf0, 'bandana'),
@@ -112,7 +117,7 @@ export async function mountUiTest(name: string): Promise<boolean> {
       weapon: 'heavy',
       ammo: 2,
       wind: 4,
-      status: '',
+      status: params.get('status') ?? '',
       showAim: true,
       ammoAll: { normal: 99, heavy: 2, dirt: 3, cluster: 0, napalm: 2, digger: 2, roller: 2, nuke: 1 },
       fuel: 0.7,
@@ -128,6 +133,7 @@ export async function mountUiTest(name: string): Promise<boolean> {
           ? { role: 'host', code: 'TANK-4F7K', peers: [{ name: 'Sargento', connected: true, ping: 48 }, { name: 'Novato', connected: false, ping: null }], turnLeft: Number(params.get('net')) || 27, waiting: 'ESPERANDO A SARGENTO…' }
           : null,
         minimap,
+        suddenDeath,
       },
     }
     // el flujo llama a update en cada frame; acá también, para ver el titileo del turno

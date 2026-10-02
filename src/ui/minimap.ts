@@ -27,6 +27,7 @@ const COLORS: Record<number, number> = {
 }
 const WATER_COLOR = 0x4a9ac8
 const LAVA_COLOR = 0xff7a2a
+const LAVA_SURFACE = 0xffc46a // fila de arriba de la lava de muerte súbita, más clara
 const WOODISH = 0x8a6a40 // madera, tabla, viga, poste y cualquier material sin color propio
 const PROJECTILE = 0xfff1a8
 const FULL = 35 // de 100 pixels de una celda, cuántos sólidos hacen falta para pintarla
@@ -131,6 +132,16 @@ export function drawMinimap(ctx: CanvasRenderingContext2D, L: MinimapLayout, mod
   rect(ctx, ox - 1, oy - 1, w + 2, h + 2, OUT)
   if (terrain) ctx.drawImage(terrain, ox, oy)
   else rect(ctx, ox, oy, w, h, SKY_TOP)
+
+  // lava de muerte súbita: banda de ancho completo desde su superficie hasta el fondo, por encima de la
+  // silueta del terreno y por debajo del viewport, los impactos y los tanques
+  if (model.lava != null && Number.isFinite(model.lava)) {
+    const ly = clamp(oy + Math.round(model.lava / MM_SCALE), oy, oy + h)
+    if (ly < oy + h) {
+      rect(ctx, ox, ly, w, oy + h - ly, LAVA_COLOR)
+      rect(ctx, ox, ly, w, 1, LAVA_SURFACE)
+    }
+  }
 
   // viewport: rectángulo blanco con un velo leve adentro
   const v = model.view
