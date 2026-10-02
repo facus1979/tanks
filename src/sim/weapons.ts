@@ -1,11 +1,12 @@
 // Resolución de un disparo según el arma: racimo, napalm, excavadora, rodadora y el resto.
 import { PATH_DT, fly, type FlightResult } from './ballistics'
 import { blastFor, hurt, resolveBlast, submerged } from './physics'
-import { columnGround, deform, isSolid, liquidAt, markDirty } from './terrain'
+import { columnGround, columnTop, deform, isSolid, liquidAt, markDirty } from './terrain'
 import {
   AIR,
   LAVA,
   MATERIALS,
+  STONE,
   SUBSTEP,
   TANK_H,
   TANK_HALF_W,
@@ -52,6 +53,7 @@ export function resolveShot(state: GameState, shooter: Player, weapon: WeaponId)
     power: shooter.power,
     wind: state.wind,
     lava: state.lava ?? undefined, // v2: lo que toca la lava se derrite sin explotar
+    lavaSolid: w.terrain === 'build', // Pulido v2: salvo la Tierra, que construye ahí
   }
   if (w.split) return cluster(state, shooter, weapon, fly({ ...base, stopAtApex: true }))
   const flight = fly(base)
@@ -130,28 +132,74 @@ function surfaceFrom(state: GameState, x: number, y: number): number {
   return columnGround(state.terrain, x, y)
 }
 
+// Pulido v2: espesor de la capa de piedra flotante que deja el napalm sobre el agua.
+export const NAPALM_CRUST = 4
+
+// La primera fila de agua (la superficie) de la columna x, subiendo desde y mientras haya agua.
+function waterTop(t: GameState['terrain'], x: number, y: number): number {
+  let yy = Math.floor(y)
+  while (yy > 0 && liquidAt(t, x, yy - 1) === WATER) yy--
+  return yy
+}
+
+// Napalm. El fuego corre NAPALM_SPREAD px hacia cada lado por la superficie (cuesta arriba se agota antes,
+// una pared lo frena), quema lo inflamable (front a aire, el back queda) y daña a los tanques que toca.
+// Pulido v2: sobre el agua no se apaga: la superficie del agua alcanzada por el impacto (impacto
+// sumergido o que cae sobre el agua) y por la corrida del fuego se vuelve una capa de piedra flotante de
+// NAPALM_CRUST px (se puede cruzar con el tanque), con eventos 'steam'. La lava sigue frenando el fuego.
 function napalm(state: GameState, ix: number, iy: number, t0: number, seconds: number, events: GameEvent[]): void {
   const t = state.terrain
   const cx = Math.round(ix)
-  // v4: napalm sobre agua no quema: ni con el impacto sumergido ni sobre una superficie tapada de
-  // líquido (agua o lava); el fuego tampoco corre por encima de un líquido
-  if (submerged(t, ix, iy)) return
-  const start = surfaceFrom(state, cx, Math.floor(iy) - 8)
-  if (liquidAt(t, cx, start - 1) !== AIR) return
-  const burning: Vec2[] = [{ x: cx, y: start }]
+  // superficie de una columna: la primera celda que no es aire (sólido o líquido) desde fromY
+  const surface = (x: number, fromY: number) => columnTop(t, x, fromY)
+  let start: number
+  if (submerged(t, ix, iy)) {
+    // impacto bajo el agua (o contra el lecho): el fuego arranca en la superficie de esa columna
+    const wy = liquidAt(t, cx, iy) === WATER ? iy : liquidAt(t, cx, iy - 1) === WATER ? iy - 1 : -1
+    start = wy >= 0 ? waterTop(t, cx, wy) : surface(cx, Math.floor(iy) - 8)
+  } else start = surface(cx, Math.floor(iy) - 8)
+  if (start >= t.h || liquidAt(t, cx, start) === LAVA) return
+  // burning: fuego sobre sólido; crust: columnas de agua cuya superficie se vuelve piedra
+  const burning: Vec2[] = []
+  const crust: { x: number; y: number; n: number }[] = []
+  const mark = (x: number, y: number) => {
+    if (liquidAt(t, x, y) === WATER) crust.push({ x, y, n: 0 })
+    else burning.push({ x, y })
+  }
+  mark(cx, start)
   for (const dir of [-1, 1]) {
     let y = start
     let budget = NAPALM_SPREAD
     for (let x = cx + dir; budget > 0 && x >= 0 && x < t.w; x += dir) {
       if (isSolid(t, x, y - 6)) break // pared: el fuego no sube
-      const g = surfaceFrom(state, x, y - 5)
-      if (g >= t.h || liquidAt(t, x, g - 1) !== AIR) break
+      const g = surface(x, y - 5)
+      if (g >= t.h || liquidAt(t, x, g) === LAVA) break
       budget -= 1 + Math.max(0, y - g) // cuesta arriba se agota antes; cuesta abajo corre
       y = g
-      burning.push({ x, y })
+      mark(x, y)
     }
   }
   burning.sort((a, b) => a.x - b.x)
+  crust.sort((a, b) => a.x - b.x)
+
+  // agua alcanzada → piedra flotante (las NAPALM_CRUST primeras filas de agua de cada columna)
+  for (const c of crust) {
+    let n = 0
+    for (let y = c.y; y < c.y + NAPALM_CRUST && y < t.h; y++) {
+      if (t.front[y * t.w + c.x] !== WATER) break
+      t.front[y * t.w + c.x] = STONE
+      n++
+    }
+    markDirty(t, c.x - 1, c.y - 1, c.x + 1, c.y + NAPALM_CRUST)
+    c.n = n
+  }
+  for (let i = 0; i < crust.length; i += 10) {
+    const seg = crust.slice(i, i + 10)
+    const mid = seg[Math.floor(seg.length / 2)]
+    const n = seg.reduce((a, c) => a + c.n, 0)
+    events.push({ type: 'steam', x: mid.x, y: mid.y, n, t: t0 + Math.abs(mid.x - cx) / 90 })
+  }
+  if (burning.length === 0) return
 
   // quema lo inflamable alrededor del fuego; el back queda (el render lo dibuja chamuscado)
   const r = NAPALM_CHAR
@@ -169,11 +217,14 @@ function napalm(state: GameState, ix: number, iy: number, t0: number, seconds: n
     }
   }
 
-  // eventos 'burn' por tramos de 10 px, con el fuego avanzando desde el impacto
-  for (let i = 0; i < burning.length; i += 10) {
-    const seg = burning.slice(i, i + 10)
+  // eventos 'burn' por tramos de 10 px contiguos, con el fuego avanzando desde el impacto
+  for (let i = 0; i < burning.length; ) {
+    let j = i + 1
+    while (j < burning.length && j - i < 10 && burning[j].x === burning[j - 1].x + 1) j++
+    const seg = burning.slice(i, j)
     const mid = seg[Math.floor(seg.length / 2)]
     events.push({ type: 'burn', x: seg[0].x, y: mid.y, w: seg.length, t: t0 + Math.abs(mid.x - cx) / 90 })
+    i = j
   }
 
   const x0 = burning[0].x

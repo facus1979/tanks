@@ -58,6 +58,9 @@ export interface FlyOptions {
   // v2 muerte súbita: y de la superficie de la lava (GameState.lava). El proyectil que llega a
   // y >= lava se derrite: termina con impacto 'lava' y no explota. Sin esto, no hay lava.
   lava?: number
+  // Pulido v2: el proyectil de Tierra no se derrite: al tocar la lava (banda o grilla) termina con un
+  // impacto 'terrain' en el punto de contacto y construye ahí.
+  lavaSolid?: boolean
 }
 
 // Por columna, la fila más alta con terreno, un tanque vivo o utilería sólida. Sirve mientras
@@ -115,7 +118,7 @@ export function fly(opts: FlyOptions): FlightResult {
   }
   // tanque hundido en la lava hasta la boca: el proyectil se derrite al salir
   if (y >= lava || liquidAt(terrain, x, y) === LAVA) {
-    return { path, impact: { kind: 'lava', x, y }, time: 0, vel: { x: vx, y: vy } }
+    return { path, impact: { kind: opts.lavaSolid ? 'terrain' : 'lava', x, y }, time: 0, vel: { x: vx, y: vy } }
   }
 
   while (elapsed < MAX_FLIGHT) {
@@ -150,7 +153,7 @@ export function fly(opts: FlyOptions): FlightResult {
       if (sy >= lava || liq === LAVA) {
         // tocó la lava (la banda de muerte súbita o la de la grilla) antes que otra cosa: se derrite
         path.push({ x: sx, y: sy })
-        return end({ path, impact: { kind: 'lava', x: sx, y: sy }, time: t, vel: { x: vx, y: vy } })
+        return end({ path, impact: { kind: opts.lavaSolid ? 'terrain' : 'lava', x: sx, y: sy }, time: t, vel: { x: vx, y: vy } })
       }
       if (liq === WATER) {
         if (!wet) splashes.push({ x: sx, y: sy, t })

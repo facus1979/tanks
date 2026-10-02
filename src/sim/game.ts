@@ -1,29 +1,28 @@
 import { PATH_DT } from './ballistics'
 import { generate } from './gen'
 import { flowLiquids } from './flow'
-import { dropIntoAbyss, hurt, inLava, inWater, overAbyss, settleAfterFlow, tankFloor } from './physics'
+import { hurt, inLava, settleAfterFlow, settleTank, tankFloor } from './physics'
+import { SLIDE_MAX, slopeAt, stepTank } from './slide'
 import { resolveShot } from './weapons'
 import { Rng, hashSeed, irange } from './rng'
 import { aiShop, buyEntry, sellEntry, shopEntry } from './shop'
-import { cloneTerrain, isSolid, takeDirty } from './terrain'
+import { cloneTerrain, takeDirty } from './terrain'
 import {
   BIOMES,
   CREWS,
   EARN,
-  FALL_DAMAGE,
-  FUEL_PER_TURN,
+  SLIDE_SLOPE,
+  fuelFor,
   ITEM_ORDER,
   LAVA_DAMAGE,
   LAVA_RISE,
-  MAX_CLIMB,
   PLAYER_HP,
   REPAIR_HP,
   SHIELD_HP,
   START_MONEY,
   SUDDEN_DEATH_CALM,
   TANK_COLORS,
-  TANK_H,
-  TANK_HALF_W,
+  TANK_W,
   WEAPONS,
   WEAPON_ORDER,
   MAP_SIZES,
@@ -87,7 +86,7 @@ export function createMatch(config: MatchConfig): GameState {
       hp: PLAYER_HP,
       angle: 90,
       power: 60,
-      fuel: FUEL_PER_TURN,
+      fuel: fuelFor(MAP_SIZES[size].w),
       weapon: 'normal',
       ammo: initialAmmo(),
       alive: true,
@@ -144,7 +143,7 @@ function setupRound(state: GameState): void {
     p.alive = true
     p.angle = x < state.width / 2 ? 55 : 125
     p.power = 60
-    p.fuel = FUEL_PER_TURN
+    p.fuel = fuelFor(state.width)
     p.shield = 0
     p.tracer = false
     p.ready = false
@@ -245,65 +244,34 @@ function useItem(state: GameState, item: ItemId): StepResult {
   if (item === 'shield') p.shield = SHIELD_HP
   else if (item === 'repair') p.hp = Math.min(PLAYER_HP, p.hp + REPAIR_HP)
   else if (item === 'tracer') p.tracer = true
-  else p.fuel += FUEL_PER_TURN
+  else p.fuel += fuelFor(state.width)
   return { state: next, events: [{ type: 'item', playerId: p.id, item }] }
 }
 
-// F6 básico: un paso de 1 px, sube hasta MAX_CLIMB, cae si el piso se va.
+// F6: un paso de 1 px gastando combustible; sube escalones de hasta MAX_CLIMB, cae si el piso se va.
+// Pulido v2: el paso usa las mismas reglas que el empuje (stepTank). Un paso que lo dejaría en una
+// pendiente mayor que SLIDE_SLOPE cuesta arriba no se da (las orugas patinan: es como una pared); si la
+// pendiente es cuesta abajo, después del paso se desliza (evento 'slide' con cause 'slope', sin t) y,
+// si eso lo deja sin piso, cae. Los primeros MOVE_FREE_FALL px de una caída caminando no hacen daño.
+export const MOVE_FREE_FALL = 12
 function move(state: GameState, dir: -1 | 1): StepResult {
   const actor = state.players[state.current]
   if (actor.fuel <= 0 || (dir !== 1 && dir !== -1)) return { state, events: [] }
-  const nx = actor.x + dir
-  if (nx < TANK_HALF_W || nx > state.width - TANK_HALF_W) return { state, events: [] }
-  const t = state.terrain
-  const edge = dir > 0 ? nx + TANK_HALF_W - 1 : nx - TANK_HALF_W
-  for (let y = actor.y - TANK_H; y < actor.y - MAX_CLIMB; y++) if (isSolid(t, edge, y)) return { state, events: [] }
-  const floor = tankFloor(t, nx, actor.y - MAX_CLIMB)
-  // al subir, el techo tiene que dejar lugar
-  for (let y = floor - TANK_H; y < actor.y - TANK_H; y++) {
-    for (let x = nx - TANK_HALF_W; x < nx + TANK_HALF_W; x++) if (isSolid(t, x, y)) return { state, events: [] }
-  }
-  // no se mete dentro de otro tanque
-  for (const q of state.players) {
-    if (q.id === actor.id || !q.alive) continue
-    if (Math.abs(q.x - nx) < TANK_HALF_W * 2 && Math.abs(q.x - nx) < Math.abs(q.x - actor.x) && Math.abs(q.y - floor) < TANK_H) {
-      return { state, events: [] }
-    }
-  }
+  const step = stepTank(state, actor, actor.x, actor.y, dir, tankFloor)
+  if (!step) return { state, events: [] }
+  if (!step.air && slopeAt(state, step.x, step.floor) * -dir > SLIDE_SLOPE) return { state, events: [] }
   // mover no toca el terreno ni la utilería: se comparten con el estado anterior
   const next = shallow(state)
   const p = next.players[next.current]
   const events: GameEvent[] = []
-  p.x = nx
+  p.x = step.x
+  p.y = step.floor
   p.fuel -= 1
-  if (overAbyss(t, nx, floor)) {
-    // v3: caminó hasta el abismo y se cayó (la sesión frena antes al que no lo hace a propósito,
-    // ver abyssAhead; la IA nunca camina hacia un abismo). Termina el turno como una muerte por caída.
-    dropIntoAbyss(t, p, events)
-    return endTurn(next, events, [], true)
-  }
-  if (floor > p.y + MAX_CLIMB && inWater(t, nx, floor)) {
-    // v4: se tiró al agua: sin daño de caída ni paracaídas
-    events.push({ type: 'fall', playerId: p.id, from: p.y, to: floor, water: true })
-    p.y = floor
-  } else if (floor > p.y + MAX_CLIMB) {
-    const drop = floor - p.y
-    const amount = Math.min(p.hp, Math.round(Math.max(0, drop - 12) * FALL_DAMAGE))
-    const chute = amount > 0 && p.items.parachute > 0
-    events.push(chute ? { type: 'fall', playerId: p.id, from: p.y, to: floor, parachute: true } : { type: 'fall', playerId: p.id, from: p.y, to: floor })
-    p.y = floor
-    if (chute) p.items.parachute -= 1
-    else if (amount > 0) {
-      p.hp -= amount
-      events.push({ type: 'damage', playerId: p.id, amount, hp: p.hp })
-      if (p.hp <= 0) {
-        p.alive = false
-        events.push({ type: 'death', playerId: p.id })
-        // se mató cayendo: termina el turno como un tiro que dañó a un tanque
-        return endTurn(next, events, [], true)
-      }
-    }
-  } else p.y = floor
+  // v3: si caminó (o se deslizó) hasta el abismo se cae (la sesión frena antes al que no lo hace a
+  // propósito, ver abyssAhead; la IA nunca camina hacia un abismo). v4: al agua, sin daño ni paracaídas.
+  settleTank(next, p, events, undefined, undefined, MOVE_FREE_FALL)
+  // se mató cayendo: termina el turno como un tiro que dañó a un tanque
+  if (!p.alive) return endTurn(next, events, [], true)
   return { state: next, events }
 }
 
@@ -392,18 +360,29 @@ function hitBeforeFall(events: GameEvent[], id: number): number {
   return n
 }
 
-// v3: si el tanque del turno avanza `steps` pasos de 1 px hacia dir (sin mirar escalones ni
-// combustible), ¿alguno lo deja sin piso sobre un abismo? La sesión lo usa para frenar al que
-// camina hacia el borde manteniendo la tecla (tiene que soltar y volver a apretar para tirarse);
-// la IA, para no acercarse nunca.
+// v3: si el tanque del turno avanza `steps` pasos de 1 px hacia dir (sin mirar el combustible), ¿alguno
+// lo tira al abismo? La sesión lo usa para frenar al que camina hacia el borde manteniendo la tecla
+// (tiene que soltar y volver a apretar para tirarse); la IA, para no acercarse nunca.
+// Pulido v2: simula los pasos con move (escalones, paredes y deslizamientos incluidos): un paso que lo
+// deja en una pendiente que lo hace resbalar al abismo también cuenta. Una pared corta la búsqueda.
 export function abyssAhead(state: GameState, dir: -1 | 1, steps = 1): boolean {
   const p = state.players[state.current]
   const t = state.terrain
   if (!p || !t.pits) return false
+  // atajo: sin columnas de abismo al alcance (pasos + un tanque + el deslizamiento más largo), no hay peligro
+  const reach = steps + TANK_W + SLIDE_MAX
+  const x0 = Math.max(0, Math.floor(p.x - (dir < 0 ? reach : TANK_W)))
+  const x1 = Math.min(t.w - 1, Math.ceil(p.x + (dir > 0 ? reach : TANK_W)))
+  let near = false
+  for (let x = x0; x <= x1 && !near; x++) if (t.pits[x]) near = true
+  if (!near) return false
+  let s = shallow(state)
+  s.players[s.current].fuel = Infinity
   for (let k = 1; k <= steps; k++) {
-    const nx = p.x + dir * k
-    if (nx < TANK_HALF_W || nx > state.width - TANK_HALF_W) return false
-    if (overAbyss(t, nx, tankFloor(t, nx, p.y - MAX_CLIMB))) return true
+    const r = move(s, dir)
+    if (r.state === s) return false
+    if (r.events.some((e) => e.type === 'death' && e.playerId === p.id && e.cause === 'abyss')) return true
+    s = r.state
   }
   return false
 }
@@ -492,7 +471,7 @@ function advance(state: GameState, events: GameEvent[]): StepResult {
   state.wind = wind.value
   state.rng = wind.state
   state.turn += 1
-  state.players[state.current].fuel = FUEL_PER_TURN
+  state.players[state.current].fuel = fuelFor(state.width)
   events.push({ type: 'turn', playerId: state.players[state.current].id })
   events.push({ type: 'wind', value: state.wind })
   return { state, events }

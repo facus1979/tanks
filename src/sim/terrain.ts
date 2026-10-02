@@ -174,7 +174,9 @@ export type Debris = Partial<Record<Material, number>>
 // líquido corre). build sobre lava pone piedra (la tierra se enfría); sobre agua pone tierra y cada
 // celda de agua tapada sube por su columna hasta el primer aire por encima del círculo (el flujo
 // después la reparte; si no hay lugar se pierde). Marca el rectángulo como sucio para el flujo.
-export function deform(terrain: Terrain, cx: number, cy: number, radius: number, mode: 'destroy' | 'build' | 'dig'): Debris {
+// Pulido v2: stoneFrom (build): desde esa fila hacia abajo la tierra cae sobre la lava de muerte súbita
+// (GameState.lava) y queda piedra, igual que sobre la lava de la grilla.
+export function deform(terrain: Terrain, cx: number, cy: number, radius: number, mode: 'destroy' | 'build' | 'dig', stoneFrom = Infinity): Debris {
   const debris: Debris = {}
   const { w, h, front, back } = terrain
   const r = Math.ceil(radius) + 2
@@ -194,7 +196,7 @@ export function deform(terrain: Terrain, cx: number, cy: number, radius: number,
       if (mode === 'build') {
         if (d > radius) continue
         if (m === AIR || m === WATER) {
-          front[i] = DIRT
+          front[i] = y >= stoneFrom ? STONE : DIRT
           if (back[i] === AIR) back[i] = DIRT
           if (m === WATER) {
             if (!displaced) displaced = []

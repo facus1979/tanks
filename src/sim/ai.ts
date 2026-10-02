@@ -1,11 +1,13 @@
 import { fly, muzzle, skylineOf } from './ballistics'
-import { abyssAhead, applyCommand } from './game'
+import { applyCommand } from './game'
 import { flowLiquids } from './flow'
 import { blastDamage, inLava, submerged } from './physics'
 import { columnTop, hasLiquid, takeDirty } from './terrain'
 import { Rng, hashSeed } from './rng'
+import { SLIDE_MAX } from './slide'
 import { NAPALM_DPS, NAPALM_SPREAD, resolveShot } from './weapons'
 import {
+  KNOCKBACK_MAX,
   LAVA,
   LAVA_DAMAGE,
   LAVA_RISE,
@@ -192,23 +194,44 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
 // v3: la IA no se acerca a menos de esto (en pasos de 1 px) de quedar colgando sobre un abismo.
 export const AI_ABYSS_MARGIN = 24
 
-// Aplica 'move' hasta |dx| pixels. null si no pudo avanzar. Nunca camina hacia un abismo: frena
-// AI_ABYSS_MARGIN px antes del primer paso que la dejaría sin piso.
+// Aplica 'move' hasta |dx| pixels. null si no pudo avanzar al menos 4. Nunca camina hacia un abismo:
+// frena AI_ABYSS_MARGIN px antes del primer paso que la tiraría (Pulido v2: incluido el que la deja en
+// una pendiente que la hace resbalar al abismo; por eso se simulan los pasos con move, que ya desliza).
+// Tampoco se mete en la lava ni da un paso que la mate (caída). Como cada paso de move deja al tanque
+// estable (si resbala, ya se deslizó), nunca se queda parada en una pendiente que la haga resbalar.
 function walk(state: GameState, dx: number): { state: GameState; dx: number } | null {
-  let s = state
-  const id = s.players[s.current].id
+  const id = state.players[state.current].id
   const dir = dx > 0 ? 1 : -1
-  let n = 0
-  for (; n < Math.abs(dx); n++) {
-    if (abyssAhead(s, dir, AI_ABYSS_MARGIN)) break
+  const want = Math.abs(dx)
+  const states: GameState[] = [state]
+  let s = state
+  let limit = want
+  // el margen solo hace falta mirarlo con un abismo al alcance (el paso, el margen y un deslizamiento)
+  const t = state.terrain
+  const x = state.players[state.current].x
+  const reach = want + AI_ABYSS_MARGIN + TANK_HALF_W + SLIDE_MAX
+  let pit = false
+  if (t.pits) for (let k = 0; k <= reach && !pit; k++) pit = t.pits[Math.round(x + dir * k)] === 1
+  for (let n = 0; n < want + (pit ? AI_ABYSS_MARGIN : 0); n++) {
     const r = applyCommand(s, { type: 'move', playerId: id, dir })
-    if (r.state === s || r.state.current !== s.current) break
+    if (r.state === s) break
+    if (r.state.current !== s.current || r.state.phase !== 'aiming') {
+      // este paso la mata: si es el abismo, guarda el margen
+      const abyss = r.events.some((e) => e.type === 'death' && e.playerId === id && e.cause === 'abyss')
+      limit = Math.min(limit, abyss ? n - AI_ABYSS_MARGIN : n)
+      break
+    }
     // v4: no se mete caminando en la lava (si ya estaba adentro, puede seguir para salir)
-    if (inLava(r.state.terrain, r.state.players[r.state.current]) && !inLava(s.terrain, s.players[s.current])) break
+    if (inLava(r.state.terrain, r.state.players[r.state.current]) && !inLava(s.terrain, s.players[s.current])) {
+      limit = Math.min(limit, n)
+      break
+    }
     s = r.state
+    states.push(s)
   }
+  const n = Math.min(limit, states.length - 1)
   if (n < 4) return null
-  return { state: s, dx: dir * n }
+  return { state: states[n], dx: dir * n }
 }
 
 function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
@@ -236,6 +259,10 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   // uno se verifica con la simulación completa (que deja correr la lava)
   const lips = lavaLipsOf(state.terrain, targets)
   const lipAim = lips.map(() => ({ angle: 0, power: 0, d: Infinity }))
+  // Pulido v2: rivales al borde de un abismo o de la lava: el tiro que cae pegado a su otro costado los
+  // empuja adentro (se verifica con la simulación completa, que resuelve el empuje)
+  const brinks = brinksOf(state.terrain, targets)
+  const brinkAim = brinks.map(() => ({ angle: 0, power: 0, d: Infinity }))
   const consider = (angle: number, power: number) => {
     const r = estimate(state, actor, targets, weapons, angle, power, sky, ledges)
     total++
@@ -247,6 +274,10 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
       for (let i = 0; i < lips.length; i++) {
         const d = Math.abs(r.at.x - lips[i].x) + Math.abs(r.at.y - lips[i].y)
         if (d < lipAim[i].d) lipAim[i] = { angle, power, d }
+      }
+      for (let i = 0; i < brinks.length; i++) {
+        const d = Math.abs(r.at.x - brinks[i].x) + Math.abs(r.at.y - brinks[i].y)
+        if (d < brinkAim[i].d) brinkAim[i] = { angle, power, d }
       }
     }
     if (r.blocked) blocked++
@@ -284,8 +315,17 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
     if (la.d >= 40) continue
     for (let a = -2; a <= 2; a += 1) for (let p = -1.5; p <= 1.5; p += 0.5) consider(clamp(la.angle + a, 0, 180), clamp(la.power + p, 10, 100))
   }
+  for (let i = 0; i < brinks.length; i++) {
+    const ba = brinkAim[i]
+    if (ba.d >= 40) continue
+    for (let a = -2; a <= 2; a += 1) for (let p = -1.5; p <= 1.5; p += 0.5) consider(clamp(ba.angle + a, 0, 180), clamp(ba.power + p, 10, 100))
+  }
   // verificación con la simulación completa (racimo, rodadora y napalm no se estiman bien)
   const pool = [...perWeapon.values(), best, ...pushes]
+  for (const ba of brinkAim) {
+    if (ba.d >= 16) continue
+    for (const id of BRINK_WEAPONS) if (weapons.includes(id)) pool.push({ angle: ba.angle, power: ba.power, weapon: id, score: 0 })
+  }
   const lipWeapon: WeaponId = weapons.includes('heavy') ? 'heavy' : weapons[0]
   for (const la of lipAim) if (la.d < 16) pool.push({ angle: la.angle, power: la.power, weapon: lipWeapon, score: 0 })
   let verified: Candidate = { ...best, score: -Infinity }
@@ -433,7 +473,7 @@ function simulate(state: GameState, c: Candidate): number {
   const actor = s.players[s.current]
   actor.angle = c.angle
   actor.power = c.power
-  const before = s.players.map((p) => ({ hp: p.hp, alive: p.alive }))
+  const before = s.players.map((p) => ({ hp: p.hp, alive: p.alive, x: p.x }))
   const { events } = resolveShot(s, actor, c.weapon)
   // v4: si el tiro tocó cerca de lava, la deja correr (como fire) y el rival que quede en ella cuenta
   // como golpeado por lo que la lava le va a quemar. El agua no daña: no hace falta simularla.
@@ -458,8 +498,49 @@ function simulate(state: GameState, c: Candidate): number {
   if (actor.alive && newlyInLava(state, s, actor.id)) self += AI_LAVA_HIT
   if (!actor.alive) return -1e5
   if (!Number.isFinite(near)) return -1e6
+  // Pulido v2: el empuje que acerca a un rival a un abismo o a la lava suma (de a poco lo va llevando al
+  // borde); el que acerca a la propia IA, resta el doble
+  const mask = hazardMask(state.terrain)
+  let drift = 0
+  for (const p of s.players) {
+    if (!p.alive || !before[p.id].alive || p.x === before[p.id].x) continue
+    const d0 = hazardDist(mask, before[p.id].x)
+    const d1 = hazardDist(mask, p.x)
+    if (d1 >= d0) continue
+    drift += p.id === actor.id ? -2 * (d0 - d1) * HAZARD_PULL : (d0 - d1) * HAZARD_PULL
+  }
   const cost = costOf(state, c.weapon)
-  return dmg > 0 ? 1000 + dmg * 10 + kills * 250 - self * SELF_WEIGHT - cost : -near - self * SELF_WEIGHT - cost * 0.01
+  return (dmg > 0 ? 1000 + dmg * 10 + kills * 250 - self * SELF_WEIGHT - cost : -near - self * SELF_WEIGHT - cost * 0.01) + drift
+}
+
+// Pulido v2: columnas peligrosas (abismo o lava arriba de todo) por grilla. Se calcula una vez por grilla
+// real (la búsqueda la comparte; la grilla de trabajo de simulate no se usa para esto).
+const HAZARD_RANGE = 160
+const HAZARD_PULL = 3 // puntos de puntaje por pixel que el empuje acerca a un rival al peligro
+const hazardCache = new WeakMap<Terrain, Uint8Array>()
+function hazardMask(t: Terrain): Uint8Array {
+  const cached = hazardCache.get(t)
+  if (cached) return cached
+  const m = new Uint8Array(t.w)
+  for (let x = 0; x < t.w; x++) {
+    if (t.pits?.[x]) m[x] = 1
+    else {
+      const top = columnTop(t, x)
+      if (top < t.h && t.front[top * t.w + x] === LAVA) m[x] = 1
+    }
+  }
+  hazardCache.set(t, m)
+  return m
+}
+// Distancia del borde de la caja del tanque en x al peligro más cercano (HAZARD_RANGE si no hay).
+function hazardDist(m: Uint8Array, x: number): number {
+  const cx = Math.round(x)
+  for (let d = 0; d < HAZARD_RANGE; d++) {
+    const a = cx - TANK_HALF_W - d
+    const b = cx + TANK_HALF_W - 1 + d
+    if ((a >= 0 && m[a]) || (b < m.length && m[b])) return d
+  }
+  return HAZARD_RANGE
 }
 
 // v4: bordes de los pozos de lava de la grilla. Por cada tramo de columnas cuya primera celda no
@@ -506,6 +587,30 @@ function lavaLipsOf(t: Terrain, targets: Player[]): { x: number; y: number }[] {
   for (const e of poolEdges(t)) {
     const toward = targets.some((p) => (p.x - e.x) * e.side > 0 && Math.abs(p.x - e.x) < LIP_RANGE && p.y > e.y + 6)
     if (toward) out.push({ x: e.x + e.side * 2, y: e.y + 4 })
+  }
+  return out
+}
+
+// Pulido v2: rivales con un abismo o lava de la grilla a menos de un empujón de su costado. Por cada uno,
+// el punto donde tiene que caer el tiro: pegado al otro costado de su caja, a la altura de las orugas.
+const BRINK_REACH = KNOCKBACK_MAX + 8
+const BRINK_WEAPONS: WeaponId[] = ['heavy', 'normal', 'nuke']
+function brinksOf(t: Terrain, targets: Player[]): { x: number; y: number }[] {
+  const out: { x: number; y: number }[] = []
+  for (const p of targets) {
+    for (const side of [-1, 1] as const) {
+      let hazard = false
+      for (let d = TANK_HALF_W; d <= TANK_HALF_W + BRINK_REACH && !hazard; d += 2) {
+        const x = Math.round(p.x + side * d)
+        if (x < 0 || x >= t.w) break
+        if (t.pits?.[x]) hazard = true
+        else {
+          const top = columnTop(t, x, Math.max(0, p.y - TANK_H))
+          if (top < t.h && t.front[top * t.w + x] === LAVA) hazard = true
+        }
+      }
+      if (hazard) out.push({ x: p.x - side * (TANK_HALF_W + 3), y: p.y - 3 })
+    }
   }
   return out
 }

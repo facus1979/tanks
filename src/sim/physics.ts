@@ -1,7 +1,10 @@
 // Resolución de un impacto: terreno, daño, utilería, barriles en cadena, caída y aplastamiento.
 import { deform, hasLiquid, isPit, isSolid, liquidAt, solidRunUp } from './terrain'
+import { knock, slideDown } from './slide'
 import {
   FALL_DAMAGE,
+  KNOCKBACK_MAX,
+  PARACHUTE_MIN_DAMAGE,
   LAVA,
   TANK_H,
   TANK_HALF_W,
@@ -27,6 +30,16 @@ export const MIN_SUPPORT = 3 // columnas sólidas que sostienen al tanque
 // v3: un tanque que cae a un abismo termina ABYSS_DROP px por debajo del borde inferior del mapa
 // (fall.to = h + ABYSS_DROP): el render lo anima cayendo hasta perderse de vista.
 export const ABYSS_DROP = 60
+// Pulido v2: empuje. Un tanque alcanzado por una explosión se corre
+//   round(KNOCKBACK_MAX · min(1, golpe / KNOCKBACK_REF)) px
+// en sentido contrario al centro, donde golpe es el daño crudo que le haría esa explosión (antes del
+// escudo; el impacto directo cuenta el daño entero del arma). Con 2 px o menos no se mueve. La Tierra
+// (build) no empuja: tapa.
+export const KNOCKBACK_REF = 36
+// Segundos entre que el tanque cae a su piso nuevo y empieza a deslizarse (la caída se ve casi instantánea).
+export const FALL_SETTLE = 0.15
+// Veces que se repite caer + deslizarse al asentar un tanque (un deslizamiento puede terminar en otra caída).
+const SETTLE_ROUNDS = 4
 
 export interface Blast {
   x: number
@@ -87,11 +100,14 @@ export function resolveBlast(state: GameState, first: Blast, after?: (events: Ga
   const events: GameEvent[] = []
   const coverBefore = state.players.map((p) => cover(state.terrain, p))
   const queue: Blast[] = [first]
+  // Pulido v2: hasta cuándo se está corriendo cada tanque empujado (para encadenar empujes y caídas)
+  const busy = new Map<number, number>()
+  let last = first.t
   while (queue.length > 0) {
     const b = queue.shift()!
     // v4: explosión con el centro sumergido: radio de terreno y de daño × WATER_BLAST_SCALE
     if (submerged(state.terrain, b.x, b.y)) b.radius *= WATER_BLAST_SCALE
-    const debris = deform(state.terrain, b.x, b.y, b.radius, b.terrain)
+    const debris = deform(state.terrain, b.x, b.y, b.radius, b.terrain, state.lava ?? Infinity)
     events.push({
       type: 'impact',
       x: b.x,
@@ -104,10 +120,14 @@ export function resolveBlast(state: GameState, first: Blast, after?: (events: Ga
       source: b.source ?? 'shot',
     })
     const mark = events.length
+    const pushes: { p: Player; dist: number; dir: -1 | 1 }[] = []
     for (const p of state.players) {
       if (!p.alive) continue
       const amount = p.id === b.directTank ? b.damage : blastDamage(p, b)
       if (amount > 0) hurt(p, amount, events)
+      const dist = b.terrain === 'build' || amount <= 0 ? 0 : Math.round(KNOCKBACK_MAX * Math.min(1, amount / KNOCKBACK_REF))
+      const dx = p.x - b.x
+      if (dist > 2 && Math.abs(dx) >= 1) pushes.push({ p, dist, dir: dx > 0 ? 1 : -1 })
     }
     for (const prop of state.props) {
       if (!prop.alive) continue
@@ -134,10 +154,17 @@ export function resolveBlast(state: GameState, first: Blast, after?: (events: Ga
       const e = events[i]
       if (e.type === 'damage' || e.type === 'death' || e.type === 'prop' || e.type === 'shield') e.t = b.t
     }
+    // Pulido v2: empuje, después de la deformación y del daño de esta explosión. Si el tanque todavía
+    // se está corriendo por una explosión anterior (cadena de barriles), este empuje arranca al terminar.
+    for (const { p, dist, dir } of pushes) {
+      if (!p.alive) continue
+      busy.set(p.id, knock(state, p, dir, dist, Math.max(b.t, busy.get(p.id) ?? -Infinity), events, tankFloor))
+    }
+    last = Math.max(last, b.t)
   }
   after?.(events)
   settleProps(state, events)
-  settleTanks(state, coverBefore, events)
+  settleTanks(state, coverBefore, events, last, busy)
   return events
 }
 
@@ -258,10 +285,12 @@ export function settleAfterFlow(state: GameState, events: GameEvent[], t: number
     state,
     state.players.map(() => Infinity),
     events,
+    t,
+    new Map(state.players.map((p) => [p.id, t])),
   )
   for (let i = mark; i < events.length; i++) {
     const e = events[i]
-    if (e.type === 'prop' || e.type === 'fall' || e.type === 'damage' || e.type === 'death' || e.type === 'shield') e.t = t
+    if ((e.type === 'prop' || e.type === 'fall' || e.type === 'damage' || e.type === 'death' || e.type === 'shield') && e.t === undefined) e.t = t
   }
 }
 
@@ -298,37 +327,79 @@ export function tankFloor(t: Terrain, x: number, y: number): number {
   return t.h
 }
 
-function settleTanks(state: GameState, coverBefore: number[], events: GameEvent[]): void {
-  for (const p of state.players) {
-    const floor = tankFloor(state.terrain, p.x, p.y)
-    if (p.y < state.terrain.h && overAbyss(state.terrain, p.x, floor)) {
-      dropIntoAbyss(state.terrain, p, events)
-      continue
-    }
-    if (floor > p.y) {
-      const from = p.y
-      p.y = floor
-      const drop = floor - from
-      // v4: cayó al agua: sin daño de caída y sin gastar el paracaídas
-      if (inWater(state.terrain, p.x, floor)) {
-        events.push({ type: 'fall', playerId: p.id, from, to: floor, water: true })
-        continue
-      }
-      const harmful = p.alive && drop > 2 && Math.round(drop * FALL_DAMAGE) > 0
-      if (harmful && p.items.parachute > 0) {
-        p.items.parachute -= 1
-        events.push({ type: 'fall', playerId: p.id, from, to: floor, parachute: true })
-        continue
-      }
-      events.push({ type: 'fall', playerId: p.id, from, to: floor })
-      if (harmful) hurt(p, drop * FALL_DAMAGE, events)
-    }
-  }
+// Asienta los tanques después de un cambio de terreno: cada uno cae a su piso y, si queda en una
+// pendiente mayor que SLIDE_SLOPE, se desliza (ver settleTank). Después, el aplastamiento.
+// base: t de la última explosión (para ubicar los deslizamientos); busy: hasta cuándo se corre cada
+// tanque empujado (sus caídas y deslizamientos van después, con t).
+function settleTanks(state: GameState, coverBefore: number[], events: GameEvent[], base: number, busy: Map<number, number>): void {
+  for (const p of state.players) settleTank(state, p, events, base, busy.get(p.id))
   state.players.forEach((p, i) => {
     if (!p.alive) return
     const depth = cover(state.terrain, p)
     if (depth > CRUSH_DEPTH && depth > coverBefore[i]) hurt(p, (depth - CRUSH_DEPTH) * CRUSH_DAMAGE, events)
   })
+}
+
+// Pulido v2: asienta un tanque. Cae a su piso (fallTank) y, si quedó vivo y apoyado en una pendiente
+// mayor que SLIDE_SLOPE, se desliza cuesta abajo (slideDown); si el deslizamiento lo deja sin piso,
+// vuelve a caer, y así hasta SETTLE_ROUNDS veces.
+// t: momento de sus eventos. Sin base ni t (move), nada lleva t. Sin t, la caída va sin t (la sesión la ubica con el impacto anterior,
+// como siempre) y el deslizamiento arranca en base (+ FALL_SETTLE si cayó). Con t, todo va desde t.
+// free: pixels de caída que no hacen daño (0 al asentar tras una explosión; 12 en move).
+// Devuelve el t en que termina lo último que hizo (o el t recibido).
+export function settleTank(state: GameState, p: Player, events: GameEvent[], base?: number, t?: number, free = 0): number | undefined {
+  // sin base ni t (move): ningún evento lleva t, van en el orden de la lista
+  const timed = base !== undefined || t !== undefined
+  for (let round = 0; round < SETTLE_ROUNDS; round++) {
+    const mark = events.length
+    const drop = fallTank(state, p, events, free)
+    if (t !== undefined) {
+      for (let i = mark; i < events.length; i++) {
+        const e = events[i]
+        if (e.type === 'fall' || e.type === 'damage' || e.type === 'death' || e.type === 'shield') e.t = t
+      }
+    }
+    if (!p.alive || p.y >= state.terrain.h) break
+    const start = timed ? (t ?? base ?? 0) + (drop > 0 ? FALL_SETTLE : 0) : undefined
+    const end = slideDown(state, p, start, events, tankFloor)
+    if (end === null) break
+    if (timed) t = end
+  }
+  return t
+}
+
+// Un tanque cae hasta su piso. Abismo: se pierde (dropIntoAbyss). Agua: sin daño ni paracaídas.
+// Si no, daño de caída round(max(0, caída - free) · FALL_DAMAGE) (con free 0, solo caídas de más de
+// 2 px); el paracaídas se abre (y se gasta) solo si ese daño llega a PARACHUTE_MIN_DAMAGE: entonces lo
+// anula. Los restos de un tanque muerto también caen (sin daño). Devuelve los pixels que cayó.
+export function fallTank(state: GameState, p: Player, events: GameEvent[], free = 0): number {
+  const t = state.terrain
+  if (p.y >= t.h) return 0
+  const floor = tankFloor(t, p.x, p.y)
+  if (overAbyss(t, p.x, floor)) {
+    const from = p.y
+    dropIntoAbyss(t, p, events)
+    return p.y - from
+  }
+  if (floor <= p.y) return 0
+  const from = p.y
+  const drop = floor - from
+  p.y = floor
+  // v4: cayó al agua: sin daño de caída y sin gastar el paracaídas
+  if (inWater(t, p.x, floor)) {
+    events.push({ type: 'fall', playerId: p.id, from, to: floor, water: true })
+    return drop
+  }
+  const amount = Math.round(Math.max(0, drop - free) * FALL_DAMAGE)
+  const harmful = p.alive && (free > 0 || drop > 2) && amount > 0
+  if (harmful && amount >= PARACHUTE_MIN_DAMAGE && p.items.parachute > 0) {
+    p.items.parachute -= 1
+    events.push({ type: 'fall', playerId: p.id, from, to: floor, parachute: true })
+    return drop
+  }
+  events.push({ type: 'fall', playerId: p.id, from, to: floor })
+  if (harmful) hurt(p, amount, events)
+  return drop
 }
 
 export function blastFor(weapon: WeaponId, x: number, y: number, t: number, directTank?: number): Blast {
