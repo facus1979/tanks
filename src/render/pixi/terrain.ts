@@ -5,6 +5,7 @@
 // los trozos fuera de la vista se pintan de a uno por frame (o cuando entran en la vista).
 import { AIR, BEAM, DIRT, POST, SLAT, STONE, WOOD } from '../../sim/types'
 import type { Terrain } from '../../sim/types'
+import { PitMap, vnoise } from './abyss'
 import type { Art, BiomePalette } from './assets'
 import { MATERIAL_FLAT, OUT } from './fallback'
 import { bayer, mix, mul, rnd } from './raster'
@@ -69,6 +70,9 @@ export class TerrainPainter {
   readonly back: ChunkLayer
   readonly front: ChunkLayer
   craters: Crater[] = []
+  // v3: columnas de abismo (peso, labio, pared de fondo); vacío en mapas sin abismos (Chico queda igual)
+  readonly pits = new PitMap()
+  fog = 0xf0dfc8 // color de la niebla del bioma (la pone el renderer): flota sobre la boca de los abismos
   private prevFront: Uint8Array | null = null
   private prevBack: Uint8Array | null = null
   private pending: (Rect | null)[] // por trozo, ya con el margen de los bordes
@@ -91,6 +95,7 @@ export class TerrainPainter {
     this.craters = []
     this.prevFront = null
     this.prevBack = null
+    this.pits.reset()
     this.pending.fill(null)
   }
 
@@ -124,6 +129,7 @@ export class TerrainPainter {
   // Repinta lo pendiente de los trozos que tocan [viewX0, viewX1) y, como mucho, de un trozo más fuera de la vista.
   // Devuelve los índices de los trozos repintados (para subir sus texturas).
   update(terrain: Terrain, art: Art, pal: BiomePalette, changed: boolean, viewX0 = 0, viewX1 = Infinity): number[] {
+    if (this.pits.sync(terrain)) this.markDirty({ x0: 0, y0: 0, x1: this.w, y1: this.h })
     if (changed) {
       const diff = this.diff(terrain)
       if (diff) this.markDirty(diff)
@@ -211,6 +217,14 @@ export class TerrainPainter {
     const gMid = grass[Math.min(1, grass.length - 1)]
     const gTip = grass[grass.length - 1]
 
+    // abismo: peso por columna (0 = normal), primera fila de la pared de fondo y niebla del bioma
+    const pits = this.pits
+    const pw = pits.weight
+    const pTop = pits.top
+    const pIn = pits.inPit
+    const fog = this.fog
+    const stoneTex = materials[STONE]
+
     const craters = this.craters.filter((c) => c.x + c.r + 12 >= r.x0 && c.x - c.r - 12 < r.x1 && c.y + c.r + 12 >= r.y0 && c.y - c.r - 12 < r.y1)
 
     const bd = this.back.data
@@ -231,9 +245,24 @@ export class TerrainPainter {
         fd[pi + 3] = 0
         const m = front[i]
         if (m === AIR) {
-          const bm = back[i]
-          if (bm === AIR) continue
+          let bm = back[i]
+          // en el abismo la pared de fondo sigue hasta abajo aunque el generador no haya puesto back
+          const deep = pw !== null && pIn![x] === 1 && y >= pTop![x]
+          if (bm === AIR) {
+            if (!deep) continue
+            bm = DIRT
+          }
           let c = mix(mul(matColor(bm, x, y), 0.3), 0x0e0806, 0.3)
+          if (deep) {
+            // rocas salientes en la pared del abismo: manchas de piedra con el canto de arriba claro
+            const n = vnoise(x, y, 10, 7, 91)
+            if (n > 0.8) {
+              const sc = stoneTex ? matColor(STONE, x, y) : 0x6c6a64
+              c = mix(mul(sc, n > 0.83 ? 0.34 : 0.26), 0x0e0806, 0.3)
+              if (vnoise(x, y - 2, 10, 7, 91) <= 0.8) c = mix(c, 0xb0a68c, 0.16)
+              else if (vnoise(x, y + 2, 10, 7, 91) <= 0.8) c = mul(c, 0.55)
+            }
+          }
           let occ = 0
           for (let k = 1; k <= 6; k++) {
             if (F(x, y - k) !== AIR) {
@@ -252,6 +281,7 @@ export class TerrainPainter {
             const d = Math.hypot(x - cr.x, y - cr.y)
             if (d < cr.r + 2) c = mix(c, 0x0a0605, 0.35 + 0.35 * (1 - d / cr.r))
           }
+          if (pw !== null && pw[x] > 0) c = pits.shade(c, x, y, H, fog, false)
           set(bd, x, y, c)
           continue
         }
@@ -281,13 +311,14 @@ export class TerrainPainter {
         }
         if (!up && (hole(x, y - 1) || hole(x - 1, y) || hole(x + 1, y))) c = m === DIRT ? rimLight : mix(c, 0xb0a68c, 0.35)
         else if (hole(x, y + 1)) c = 0x0a0605
+        if (pw !== null && pw[x] > 0) c = pits.shade(c, x, y, H, fog, true)
         set(fd, x, y, c)
       }
     }
 
     // pasto, musgo y raíces: las fuentes pueden estar hasta 4 px fuera del rectángulo
     const put = (x: number, y: number, c: number): void => {
-      if (x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1) set(fd, x, y, c)
+      if (x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1) set(fd, x, y, pw !== null && pw[x] > 0 ? pits.shade(c, x, y, H, fog, true) : c)
     }
     for (let x = r.x0; x < r.x1; x++) {
       for (let y = Math.max(1, r.y0 - 4); y < Math.min(H, r.y1 + 4); y++) {
@@ -313,6 +344,37 @@ export class TerrainPainter {
         if (m === DIRT && y + 1 < H && front[(y + 1) * W + x] === AIR && back[(y + 1) * W + x] !== AIR && rnd(x, y, 83) > 0.8) {
           const h = 1 + Math.floor(rnd(x, y, 84) * 4)
           for (let k = 1; k <= h; k++) put(x, y + k, k === h ? 0x1a110c : 0x2a1c13)
+        }
+      }
+    }
+    if (pw !== null) this.pitRoots(t, r, put)
+  }
+
+  // Raíces que cuelgan de las paredes de tierra hacia el abismo: arrancan en el canto de la pared,
+  // bajan y se separan un poco de ella. Las fuentes pueden estar hasta 14 px fuera del rectángulo.
+  private pitRoots(t: Terrain, r: Rect, put: (x: number, y: number, c: number) => void): void {
+    const W = t.w
+    const H = t.h
+    const front = t.front
+    const pIn = this.pits.inPit!
+    const rim = this.pits.rim!
+    for (let x = Math.max(1, r.x0 - 6); x < Math.min(W - 1, r.x1 + 6); x++) {
+      for (const side of [-1, 1]) {
+        const nx = x + side
+        if (!pIn[nx]) continue
+        const y0 = Math.max(0, rim[nx] - 30, r.y0 - 14)
+        const y1 = Math.min(H - 1, rim[nx] + 90, r.y1)
+        for (let y = y0; y < y1; y++) {
+          if (front[y * W + x] !== DIRT || front[y * W + nx] !== AIR) continue
+          if (rnd(x, y, 85) < 0.93) continue
+          const len = 4 + Math.floor(rnd(x, y, 86) * 11)
+          let rx = nx
+          for (let k = 0; k < len; k++) {
+            const yy = y + k
+            if (yy >= H || front[yy * W + rx] !== AIR) break
+            put(rx, yy, k >= len - 2 ? 0x1a110c : 0x2e1f15)
+            if (k % 4 === 3 && rnd(x, y + k, 87) > 0.4) rx += side
+          }
         }
       }
     }

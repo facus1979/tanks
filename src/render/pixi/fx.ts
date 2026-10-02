@@ -467,6 +467,29 @@ export class Fx {
     this.lights.push({ x, y: cy, R: 30, tint: 0xff8a3a, k: 0.35, life: 0.5, age: 0 })
   }
 
+  // ---------- abismo (v3) ----------
+
+  // Tanque que llegó al fondo del abismo: destello lejano, chico y anaranjado, que titila dos veces.
+  abyssFlash(x: number, y: number): void {
+    this.lights.push({ x, y, R: 44, tint: 0xff7a2a, k: 0.32, life: 0.7, age: 0 })
+    this.blob({ layer: 1, ox: x, oy: y, r1: 2.6, life: 0.22, grow: 0.03, hold: 0.06, ramp: FIRE, outline: FIRE_OUT, heat0: 0, heatV: 3 })
+    this.later(0.18, () => {
+      this.lights.push({ x: x + (this.r() - 0.5) * 8, y: y - 2, R: 30, tint: 0xff9a40, k: 0.22, life: 0.45, age: 0 })
+      this.blob({ layer: 1, ox: x + (this.r() - 0.5) * 6, oy: y - 2, r1: 1.8, life: 0.16, grow: 0.03, hold: 0.04, ramp: FIRE, outline: FIRE_OUT, heat0: 0.1, heatV: 3 })
+    })
+  }
+
+  // Columna de humo que sube desde el fondo del abismo durante unos segundos.
+  abyssSmoke(x: number, y: number, seconds: number): void {
+    const n = Math.round(seconds / 0.16)
+    for (let i = 0; i < n; i++) {
+      this.later(i * 0.16, () => {
+        const r1 = 4 + this.r() * 3
+        this.blob({ layer: 0, ox: x + (this.r() - 0.5) * 10, oy: y, vy: -40 - this.r() * 12, vx: this.wind * 1.5, ax: this.wind * 0.6, r0: 2, r1, grow: 0.8, hold: 1.8, life: 3.4, heat0: 0.25 + this.r() * 0.3, heatV: 0.04, ramp: SMOKE, outline: SMOKE_OUT, fade: true })
+      })
+    }
+  }
+
   // ¿El punto quedó debajo de la superficie de la lava? (lo que cae ahí se derrite y desaparece)
   private sunk(y: number): boolean {
     return this.lavaY !== null && y > this.lavaY + 1

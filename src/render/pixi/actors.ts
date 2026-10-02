@@ -342,6 +342,12 @@ export class PropView {
     this.root.destroy({ children: true })
   }
 
+  // v3: sprites visibles tal como se dibujaron el último frame (coordenadas de mundo), para soltarlos al abismo.
+  snapshot(): { tex: Texture; x: number; y: number; flip: boolean }[] {
+    if (!this.root.visible) return []
+    return this.sprites.filter((s) => s.visible).map((s) => ({ tex: s.texture, x: s.scale.x < 0 ? s.x - s.texture.width : s.x, y: s.y, flip: s.scale.x < 0 }))
+  }
+
   private need(n: number): void {
     while (this.sprites.length < n) {
       const s = new Sprite()
