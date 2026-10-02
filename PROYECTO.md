@@ -86,6 +86,7 @@ Balance medido con `npm run sim-check -- --balance` (30 partidas de 3 rondas, 3-
 | A / D (mantener) | Mueve el tanque gastando combustible (barra COMB en el HUD) |
 | 1 a 8 o click en el selector | Elige arma (orden de `WeaponId`; sin munición queda gris) |
 | Espacio | Disparar |
+| Shift (mantener) | Ajuste fino: ángulo y potencia a 1/5 de velocidad |
 | M | Silencia / activa el sonido |
 | Q / F / R / T | Ítems: escudo, combustible, reparación, trazador (solo en tu turno; el paracaídas es pasivo) |
 | P | Pausa |
@@ -225,6 +226,12 @@ Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 
     - flujo: `src/game/camera.ts` (amortiguado crítico: 0,45 s al tanque, 0,2 s al proyectil, 0,55 s el zoom; zoom del tiro `min(1, 640/ancho del vuelo, 450/(alto − apogeo + 30))`, mínimo 0,5), `src/input/mouse.ts`, paneo y recentrar en gamepad y táctil, último impacto por jugador, `&size=` en `?play=` y `?demo=`.
     - Pendientes: el fondo `forest-4` tiene un pino cortado en el borde derecho que al repetirse espejado se ve doble en la unión (arte: capas repetibles a lo ancho); el pilar con dintel de la jungla queda pegado a cada empalme; las partidas de 4 tanques en Mediano/Grande duran 1,5× (V2); el snapshot de red pesa 705 KB en Chico y ~3× en Grande (comprimir la grilla si el online se resiente). Acuerdo para V4: el minimapa reconoce agua y lava por `MATERIALS[].name` = `'agua'` y `'lava'`.
 - **V2 Alcance y balance de distancias.** Física derivada del ancho, ajuste fino, IA que apunta a cualquier distancia y decide moverse, muerte súbita. `sim-check` por tamaño.
+  - Estado: hecha (2026-10-01), en cuatro agentes sobre el contrato de muerte súbita, integrada en `v2-mundo`.
+    - sim: `endTurn` cierra el turno (fire, pase sin munición, muerte al moverse). Orden: eventos del tiro → `calm` → `lava` → daño/escudo/muerte de la lava (con `t` = fin del tiro + `LAVA_DELAY` 0,4 s) → `turn`/`wind` o `roundover`. El escudo cuenta como daño para la calma; una vez empezada, la calma queda fija. La lava aparece en `height − LAVA_RISE`. `FlyOptions.lava`, `lavaRisk` en la IA (se aleja hacia arriba, no tira a la lava, gasta munición especial). `sim-check` 31752/31752; tiros por partida 2 / 4 tanques: Chico 10,6 / 18,9, Mediano 9,9 / 25,1, Grande 12,4 / 21,1 (máximo de Grande con 4: 77 → 28). Ronda sin disparos: termina por la lava en 16 turnos.
+    - render: `src/render/pixi/lava.ts`: franja animada de 16 filas a 30 Hz más dos texturas profundas que fluyen, resplandor aditivo, tinte cálido con la lava alta, olas y goterones al subir, chispas y humo en tanques quemados, chisporroteo al derretirse un proyectil (desaparece a < 26 px de la superficie sin `impact`). Cuesta ~0,23 ms de CPU de `render()` en Grande.
+    - vistas: aviso "MUERTE SÚBITA EN N" (N ≤ 3) y cartel titilante cuando está activa; banda de lava en el minimapa; `?uitest=hud&sd=N|lava`.
+    - flujo: ajuste fino (Shift, L3/Select, toque corto de 0,2 en táctil; el tiro humano sale con un decimal y el HUD muestra décimas), lava animada en 0,8 s, sonidos `lavaRise`, `melt`, `lavaBurn`, `suddenDeath` y vibración, `?play=...&calm=N`.
+    - Pendientes: propuesta de combustible `FUEL_PER_TURN · √k` en mapas anchos (no aplicada); el napalm que cae debajo de la lava (V4); en la captura con lava alta el fondo de la lava muestra vetas verticales marcadas, revisar en juego.
 - **V3 Geografía por tramos.** El generador arma el mapa como secuencia de tramos por bioma: montaña, valle, meseta, abismo, lago, pozo de lava, más búnker/torre/cuevas.
 - **V4 Agua y lava.** Materiales, flujo, reglas, texturas y animación (superficie, burbujas, vapor al enfriarse), sonido.
 - **V5 Hasta 8 jugadores.** Arte, HUD, lobby local y online.
