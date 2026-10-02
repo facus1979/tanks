@@ -108,6 +108,10 @@ export class Extras {
   private crews: Crew[] = []
   private curtainT = 0
   private rng = new Rng(4242)
+  // v3: tanques perdidos en el abismo (sin tripulante eyectado desde los restos ni escudo que estalla abajo)
+  // y oscuridad del abismo en un punto (tiñe al tripulante que cae).
+  isLost: (id: number) => boolean = () => false
+  darkAt: (x: number, y: number) => number = () => 0
 
   constructor(private fx: Fx) {
     this.layer.addChild(this.tracerG, this.shardG)
@@ -151,16 +155,17 @@ export class Extras {
       if (ev.left <= 0) s.breakNow = true
     } else if (ev.type === 'death') {
       const p = frame.players.find((q) => q.id === ev.playerId)
-      if (p) this.eject(p, art)
+      if (p && !this.isLost(p.id)) this.eject(p, art)
     }
   }
 
-  private eject(p: Player, art: Art): void {
+  // from: v3, el tripulante salta del tanque que cae al abismo (con menos impulso: se pierde abajo).
+  eject(p: Player, art: Art, from?: { x: number; y: number }): void {
     const sprite = new Sprite(art.crews[p.crew] ?? art.crews.bandana)
     sprite.anchor.set(0.5)
     const dir = this.rng.next() < 0.5 ? -1 : 1
-    const x = p.x
-    const y = p.y - 24
+    const x = from ? from.x : p.x
+    const y = from ? from.y : p.y - 24
     sprite.x = Math.round(x)
     sprite.y = Math.round(y)
     this.layer.addChild(sprite)
@@ -169,7 +174,7 @@ export class Extras {
       x,
       y,
       vx: dir * (40 + this.rng.next() * 40),
-      vy: -(150 + this.rng.next() * 50),
+      vy: -(150 + this.rng.next() * 50) * (from ? 0.55 : 1),
       vr: dir * (7 + this.rng.next() * 4),
       bounced: false,
       age: 0,
@@ -193,7 +198,7 @@ export class Extras {
       const cx = Math.round(p.x)
       const cy = Math.round(p.y - 12 - dropOf(p.id))
       if (s.active && (s.breakNow || !p.alive)) {
-        this.breakShield(cx, cy)
+        if (!this.isLost(p.id)) this.breakShield(cx, cy)
         s.active = false
       }
       s.breakNow = false
@@ -298,9 +303,18 @@ export class Extras {
       }
       // estela de humo cada pocos pixels recorridos
       c.trail += Math.hypot(c.x - px, c.y - py)
+      // en la oscuridad del abismo no deja estela (el humo claro se vería flotando en lo negro)
+      const deep = this.darkAt(c.x, c.y) > 0.12
       while (c.trail >= 4) {
         c.trail -= 4
-        this.fx.trailPoint(c.x, c.y)
+        if (!deep) this.fx.trailPoint(c.x, c.y)
+      }
+      // v3: en el abismo se oscurece con la profundidad y se desvanece antes del borde de abajo
+      const k = this.darkAt(c.x, c.y)
+      if (k > 0) {
+        const g = Math.round(255 * (1 - Math.min(1, k * 1.15)))
+        c.sprite.tint = (g << 16) | (g << 8) | g
+        c.sprite.alpha = Math.max(0, Math.min(1, (t.h + 6 - c.y) / 30))
       }
       if (done) c.sprite.destroy()
       else {

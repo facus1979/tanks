@@ -4,6 +4,8 @@ import { BARREL_LEN, PIVOT_X, PIVOT_Y, TANK_H, TANK_W, WEAPONS } from '../../sim
 import type { Terrain } from '../../sim/types'
 import type { GameRenderer, RenderFrame, Viewport } from '../types'
 import { VIEW_H, VIEW_W } from '../types'
+import { AbyssFalls } from './abyss'
+import type { Part } from './abyss'
 import { BUBBLE_HOLD, BUBBLE_TIME, PropView, RECOIL_TIME, TankView } from './actors'
 import type { Art } from './assets'
 import { loadArt } from './assets'
@@ -100,6 +102,9 @@ export class PixiRenderer implements GameRenderer {
   private glowG = new Graphics()
   private warmG = new Graphics() // v2: tinte cálido de toda la pantalla con la lava alta
   private lava = new LavaView()
+  // v3: tanques que se perdieron en el abismo (los dibuja AbyssFalls mientras caen)
+  private lost = new Set<number>()
+  private lastAlive = new Map<number, { x: number; y: number }>()
 
   private painter: TerrainPainter | null = null
   private backLayer = new Container()
@@ -109,6 +114,8 @@ export class PixiRenderer implements GameRenderer {
 
   private fx = new Fx(BUF_W, BUF_H)
   private extras = new Extras(this.fx)
+  // v3: lo que cae al abismo (tanques, tripulantes, utilería)
+  private abyss = new AbyssFalls(this.fx, () => this.painter?.pits ?? null)
   private fxSprite = new Sprite()
   private lightSprite = new Sprite()
   private fxTex: Texture | null = null
@@ -188,6 +195,7 @@ export class PixiRenderer implements GameRenderer {
       this.backLayer,
       this.propLayer,
       this.lampLayer,
+      this.abyss.layer,
       this.frontLayer,
       this.tankLayer,
       this.lava.glowLayer,
@@ -200,8 +208,10 @@ export class PixiRenderer implements GameRenderer {
     this.app.stage.addChild(this.bg, this.world, this.warmG, this.glowG, this.arrowLayer, this.flashG, this.extras.curtain)
     this.fx.wreckPos = (id) => {
       const p = this.players.find((q) => q.id === id)
-      return p && !p.alive ? { x: Math.round(p.x), y: Math.round(p.y) } : null
+      return p && !p.alive && !this.lost.has(id) ? { x: Math.round(p.x), y: Math.round(p.y) } : null
     }
+    this.extras.isLost = (id) => this.lost.has(id)
+    this.extras.darkAt = (x, y) => (this.painter ? this.painter.pits.dark(x, y, this.painter.h) : 0)
     this.app.ticker.add((ticker) => {
       this.onFrame?.(Math.min(0.05, ticker.deltaMS / 1000))
     })
@@ -259,6 +269,7 @@ export class PixiRenderer implements GameRenderer {
     }
     const painter = this.ensurePainter(frame.terrain)
     if (frame.biome !== this.biome) this.setBiome(art, frame.biome)
+    painter.fog = this.fx.fog
     this.applyCamera(frame)
     this.fx.setTerrain(frame.terrain)
     this.fx.wind = frame.wind
@@ -310,6 +321,7 @@ export class PixiRenderer implements GameRenderer {
     this.fx.draw(this.shotViews(frame))
     this.stats?.sample(this.fx.count, dt, performance.now() - t0, this.fx.trails)
 
+    this.abyss.update(frame.terrain, step)
     this.syncTanks(art, frame, step)
     this.extras.update(art, frame, step, this.time, (id) => this.tanks.get(id)?.dropOff ?? 0)
     this.syncProps(art, frame.props, frame.wind)
@@ -343,6 +355,9 @@ export class PixiRenderer implements GameRenderer {
 
   private reset(): void {
     this.lava.reset()
+    this.abyss.reset()
+    this.lost.clear()
+    this.lastAlive.clear()
     this.painter?.reset()
     this.fx.reset()
     this.extras.reset()
@@ -482,6 +497,8 @@ export class PixiRenderer implements GameRenderer {
       this.reset()
       return
     }
+    // v3: el tanque que cae al abismo se marca antes de que Extras eyecte al tripulante desde los restos
+    if (ev.type === 'death' || ev.type === 'fall') this.checkAbyss(ev, frame)
     if (this.art) this.extras.onEvent(ev, frame, this.art)
     if (FX_TEST && ev.type === 'impact' && ev.source !== 'barrel') {
       const w = WEAPONS[FX_TEST]
@@ -535,18 +552,21 @@ export class PixiRenderer implements GameRenderer {
         this.view(ev.playerId).alert = BUBBLE_TIME
         break
       case 'death': {
+        if (this.lost.has(ev.playerId)) break // se perdió en el abismo: sin explosión ni restos en llamas
         const p = frame.players.find((q) => q.id === ev.playerId)
         if (p) this.fx.explosion('fire', p.x, p.y - 6, 12, { 8: 30 })
         this.fx.wreck(ev.playerId)
         break
       }
       case 'fall': {
+        if (this.lost.has(ev.playerId)) break
         const p = frame.players.find((q) => q.id === ev.playerId)
         if (ev.parachute) this.view(ev.playerId).startChute(ev.from - ev.to)
         else if (p) this.fx.dust(p.x, ev.to, 12, TANK_W)
         break
       }
       case 'prop':
+        if (ev.destroyed && this.propToAbyss(ev, frame)) break
         if (ev.destroyed) {
           const cols = ev.kind === 'barrel' ? [0xd0362c, 0x8e1e1a, 0x8a8a84] : DEBRIS_COLORS[4].concat(DEBRIS_COLORS[5])
           const prop = frame.props.find((q) => q.id === ev.propId)
@@ -558,6 +578,88 @@ export class PixiRenderer implements GameRenderer {
         this.painter?.addCrater(ev.x + ev.w / 2, ev.y, Math.max(3, ev.w / 2))
         break
     }
+  }
+
+  // v3: ¿este fall/death es un tanque que se pierde en el abismo? Si lo es, lo suelta (una sola vez).
+  // Se reconoce por death.cause = 'abyss', o por una caída hasta el fondo del mapa en una columna de abismo.
+  private checkAbyss(ev: Extract<GameEvent, { type: 'death' | 'fall' }>, frame: RenderFrame): void {
+    const t = frame.terrain
+    if (!t.pits || this.lost.has(ev.playerId)) return
+    const p = frame.players.find((q) => q.id === ev.playerId)
+    if (!p) return
+    const last = this.lastAlive.get(p.id) ?? { x: p.x, y: Math.min(p.y, t.h - 1) }
+    let fromY: number
+    if (ev.type === 'fall') {
+      if (ev.to < t.h - 1 || !t.pits[Math.max(0, Math.min(t.w - 1, Math.round(p.x)))]) return
+      fromY = Math.min(ev.from, t.h - 1)
+    } else {
+      const pits = this.painter?.pits
+      if (ev.cause !== 'abyss' && !(pits && pits.lost(t, last.x, last.y))) return
+      fromY = Math.min(last.y, t.h - 1)
+    }
+    this.lost.add(p.id)
+    const x = ev.type === 'fall' ? p.x : last.x
+    this.dropTank(p, x, fromY)
+  }
+
+  private dropTank(p: Player, x: number, floorY: number): void {
+    const art = this.art
+    if (!art) return
+    const t = this.painter
+    const facing = p.angle > 90 ? -1 : 1
+    const local = facing > 0 ? p.angle : 180 - p.angle
+    const frames = art.barrels[p.id % 4]
+    const idx = Math.max(0, Math.min(frames.length - 1, Math.round(local / 5)))
+    const hx = TANK_W / 2
+    const hy = TANK_H / 2
+    const parts: Part[] = [
+      { tex: frames[idx], x: art.pivotInBody.x - hx, y: art.pivotInBody.y - hy, pivot: art.barrelPivot },
+      { tex: art.bodies[p.id % 4], x: -hx, y: -hy },
+    ]
+    // empuja hacia el centro del abismo y gira para ese lado
+    let dir = 0
+    if (t?.pits.inPit) {
+      const inP = (xx: number): number => t.pits.inPit![Math.max(0, Math.min(t.w - 1, Math.round(xx)))]
+      dir = inP(x + 12) - inP(x - 12)
+    }
+    if (dir === 0) dir = this.rng.next() < 0.5 ? -1 : 1
+    const cy = floorY - hy
+    this.abyss.drop(parts, x, cy, dir * (14 + this.rng.next() * 10), dir * (1.2 + this.rng.next()), true, facing < 0)
+    this.fx.dust(x, floorY, 10, TANK_W)
+    this.fx.dust(x - dir * 10, floorY, 4, 8)
+    this.extras.eject(p, art, { x, y: cy - 10 })
+    const v = this.tanks.get(p.id)
+    if (v) {
+      v.root.visible = false
+      v.overlay.visible = false
+    }
+  }
+
+  // v3: utilería destruida porque cayó al abismo: la misma imagen cae y se pierde, sin astillas.
+  private propToAbyss(ev: Extract<GameEvent, { type: 'prop' }>, frame: RenderFrame): boolean {
+    const t = frame.terrain
+    if (!t.pits) return false
+    const prop = frame.props.find((q) => q.id === ev.propId)
+    const w = prop?.w ?? 10
+    const h = prop?.h ?? 12
+    const cx = Math.round(ev.x + w / 2)
+    if (cx < 0 || cx >= t.w || !t.pits[cx]) return false
+    const pits = this.painter?.pits
+    if (!(ev.y + h >= t.h - 2 || (pits && pits.lost(t, cx, ev.y + h)))) return false
+    const view = this.props.get(ev.propId)
+    const snap = view?.snapshot() ?? []
+    if (!snap.length) return true
+    const x0 = Math.min(...snap.map((s) => s.x))
+    const x1 = Math.max(...snap.map((s) => s.x + s.tex.width))
+    const y0 = Math.min(...snap.map((s) => s.y))
+    const y1 = Math.max(...snap.map((s) => s.y + s.tex.height))
+    const mx = (x0 + x1) / 2
+    const my = (y0 + y1) / 2
+    const parts: Part[] = snap.map((s) => ({ tex: s.tex, x: s.flip ? s.x - mx + s.tex.width : s.x - mx, y: s.y - my, flip: s.flip }))
+    const dir = this.rng.next() < 0.5 ? -1 : 1
+    this.abyss.drop(parts, mx, my, dir * (6 + this.rng.next() * 10), dir * (1.5 + this.rng.next() * 2), false)
+    this.fx.dust(mx, y1, 4, w)
+    return true
   }
 
   // La rodadora se reconoce enseguida; otro proyectil tiene que ir pegado al piso varios frames.
@@ -674,7 +776,9 @@ export class PixiRenderer implements GameRenderer {
           let s = TRAIL_STEP - last.acc
           for (; s <= d; s += TRAIL_STEP) {
             const y = last.y + (dy * s) / d
-            if (y > this.viewTop - 20) this.fx.trailPoint(last.x + (dx * s) / d, y)
+            const x = last.x + (dx * s) / d
+            // v3: en la oscuridad del abismo el proyectil no deja estela clara
+            if (y > this.viewTop - 20 && !(this.painter && this.painter.pits.dark(x, y, this.painter.h) > 0.15)) this.fx.trailPoint(x, y)
           }
           last.acc = d - (s - TRAIL_STEP)
         }
@@ -711,6 +815,13 @@ export class PixiRenderer implements GameRenderer {
         v.landed = false
         this.fx.dust(p.x, p.y, 8, TANK_W)
       }
+      if (this.lost.has(p.id)) {
+        // se perdió en el abismo: lo dibuja AbyssFalls mientras cae; acá no queda nada
+        v.root.visible = false
+        v.overlay.visible = false
+        continue
+      }
+      if (p.alive && p.y < frame.terrain.h) this.lastAlive.set(p.id, { x: p.x, y: p.y })
       v.update(art, p, p.id === currentId, this.time, frame.wind, this.blocked, frame.terrain)
       // polvo de las orugas: una bocanada cada pocos pixels, desde la cola del tanque
       if (v.moved !== 0 && dt > 0) {
