@@ -211,6 +211,7 @@ Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 
 - `src/ui/types.ts`: `HudExtras.minimap` (`MinimapModel`, `MinimapTank`), `MinimapInput.minimapAt` (lo implementa `Hud`), `DEFAULT_CONFIG.size` = `'medium'`, `setOption('size')` en el lobby.
 - `src/net/types.ts`: `LobbyState.size`.
 - QA: `?play=...&size=small|medium|large`, `?demo=...&size=...`.
+- V4 (`src/sim/types.ts`): `WATER` (10) y `LAVA` (11) con `MaterialDef.liquid`, `WATER_DRAG`, `WATER_BLAST_SCALE`, `FLOW_MAX_ITERS`, `FLOW_FRAME_ITERS`, `TerrainPatch`, eventos `flow` (parches para animar el asentamiento) y `steam`, `Flight.splashes`, `fall.water`. Los líquidos no tienen textura en el manifiesto: los dibuja el render.
 - V3 (`src/sim/types.ts`): `Terrain.pits` (columnas de abismo), `death.cause` (`'abyss' | 'lava'`).
 - V2 muerte súbita (`src/sim/types.ts`): `SUDDEN_DEATH_CALM` (5), `LAVA_RISE` (18 px por turno), `LAVA_DAMAGE` (20 por turno), `GameState.calm` y `GameState.lava` (y de la superficie o null), `ImpactKind` `'lava'` (proyectil derretido, sin explosión), eventos `lava` y `calm`, `damage.cause = 'lava'`. `RenderFrame.lava`, `HudExtras.suddenDeath`, `MinimapModel.lava`.
 
@@ -242,6 +243,7 @@ Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 
     - flujo: caída animada hasta `h + TANK_H + 30` (muerte al final de la caída), cámara que acompaña si el que cae es el del turno o estaba en pantalla, `ABYSS_HOLD` 1,5 s mirando el fondo y `ABYSS_TAIL` 1,7 s de espera del turno; sonidos `abyssFall`, `abyssThud`, `edgeWarn`; tope en el borde solo para el humano ("Abismo! Apreta otra vez"; soltar y volver a apretar cae).
     - Pendientes: Grande con 2 tanques queda justo bajo el tope del chequeo de balance (15,8 contra 16 en 10 partidas; conviene correr 20 en Grande o revisar el tope); las muertes por abismo casi no ocurren en partidas reales (0 en el balance: las paredes son tierra hasta el fondo y solo cae quien queda sobre un saliente; si se quiere que mate más, hace falta empuje o labios más finos); globo "!" en el borde del abismo (necesita algo como `RenderFrame.alerts`); si la caída al abismo cierra la ronda, la cámara lenta del golpe final arranca cuando el tanque ya desapareció.
 - **V4 Agua y lava.** Materiales, flujo, reglas, texturas y animación (superficie, burbujas, vapor al enfriarse), sonido.
+  - Alcance (2026-10-02): el generador llena con agua o lava las cuencas de V3 (`Generated.basins`); Chico sigue sin líquidos (idéntico a v1). La lava de muerte súbita (`GameState.lava`) sigue siendo una banda aparte. Las explosiones no destruyen líquidos: al romper el borde de una cuenca, el líquido corre.
 - **V5 Hasta 8 jugadores.** Arte, HUD, lobby local y online.
 
 ## Cómo se agrega algo

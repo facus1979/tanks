@@ -77,6 +77,10 @@ export const BEAM = 6 // vigas horizontales
 export const POST = 7 // postes verticales
 export const METAL = 8 // chapa; muy dura
 export const BEDROCK = 9 // fondo del mapa; indestructible
+// v4: líquidos. Van en front pero NO colisionan (isSolid los trata como aire para tanques, proyectiles y
+// apoyo); fluyen con un autómata celular determinista. No tienen textura en el manifiesto: los dibuja el render.
+export const WATER = 10
+export const LAVA = 11
 
 export type Material = number
 
@@ -86,6 +90,7 @@ export interface MaterialDef {
   // Fracción del radio de la explosión que llega a romperlo. 1 = se rompe todo el radio.
   toughness: number
   flammable: boolean
+  liquid?: boolean // v4: agua y lava
 }
 
 export const MATERIALS: MaterialDef[] = [
@@ -99,7 +104,35 @@ export const MATERIALS: MaterialDef[] = [
   { id: POST, name: 'poste', toughness: 0.9, flammable: true },
   { id: METAL, name: 'metal', toughness: 0.35, flammable: false },
   { id: BEDROCK, name: 'roca madre', toughness: 0, flammable: false },
+  // v4. Los nombres 'agua' y 'lava' los usa el minimapa para elegir color. Las explosiones no los rompen.
+  { id: WATER, name: 'agua', toughness: 0, flammable: false, liquid: true },
+  { id: LAVA, name: 'lava', toughness: 0, flammable: false, liquid: true },
 ]
+
+// v4 reglas de líquidos (ver PROYECTO.md, v2 "Reglas nuevas"):
+// - Agua: un tanque que cae al agua no recibe daño de caída. Un proyectil dentro del agua pierde velocidad
+//   (multiplica la velocidad por WATER_DRAG por segundo). Una explosión con centro sumergido usa
+//   radius * WATER_BLAST_SCALE para el terreno y el daño.
+// - Lava (material): un tanque con alguna celda de lava bajo o dentro de su caja recibe LAVA_DAMAGE al empezar
+//   cada turno (damage.cause 'lava'); el proyectil que la toca se derrite (impacto 'lava'); enciende lo
+//   inflamable que toca al fluir.
+// - Tierra (arma Tierra o derrumbe) que cae sobre lava → piedra. Agua que toca lava → piedra (evento 'steam').
+// - Flujo: al final de cada fire que cambió el terreno, hasta FLOW_MAX_ITERS iteraciones; cada FLOW_FRAME_ITERS
+//   se emite un parche para animar (evento 'flow').
+export const WATER_DRAG = 0.25
+export const WATER_BLAST_SCALE = 0.5
+export const FLOW_MAX_ITERS = 400
+export const FLOW_FRAME_ITERS = 8
+
+// Rectángulo de grilla que cambió (front y back completos de ese rectángulo, fila por fila).
+export interface TerrainPatch {
+  x: number
+  y: number
+  w: number
+  h: number
+  front: Uint8Array
+  back: Uint8Array
+}
 
 // Grilla por pixel. front es lo sólido (colisiona). back es lo que había detrás
 // (se dibuja oscuro donde front es AIR: la "pared de fondo" de Broforce). back no colisiona.
@@ -322,6 +355,7 @@ export interface Flight {
   path: Vec2[] // un punto cada PATH_DT segundos
   impact: Impact
   startT?: number // segundos desde el disparo en que arranca este tramo (racimo, rodadora)
+  splashes?: { x: number; y: number; t: number }[] // v4: dónde y cuándo (desde el inicio del tramo) entró al agua
 }
 
 export type GameEvent =
@@ -340,13 +374,16 @@ export type GameEvent =
   // t opcional: momento de playback. Sin t, el evento va con el impacto anterior de la lista.
   | { type: 'damage'; playerId: number; amount: number; hp: number; t?: number; cause?: 'lava' } // cause: v2, quemado por la lava
   | { type: 'death'; playerId: number; t?: number; cause?: 'abyss' | 'lava' } // cause: v3/v2, sin explosión de restos si es 'abyss'
-  | { type: 'fall'; playerId: number; from: number; to: number; parachute?: boolean; t?: number }
+  | { type: 'fall'; playerId: number; from: number; to: number; parachute?: boolean; t?: number; water?: boolean } // water: v4, cayó al agua (sin daño)
   | { type: 'prop'; propId: number; kind: PropKind; x: number; y: number; destroyed: boolean; t?: number }
   | { type: 'burn'; x: number; y: number; w: number; t?: number } // napalm quemando una franja
   | { type: 'shield'; playerId: number; absorbed: number; left: number; t?: number } // el escudo paró daño
   | { type: 'item'; playerId: number; item: ItemId } // useItem aplicado
   | { type: 'turn'; playerId: number }
   | { type: 'wind'; value: number }
+  // v4: los líquidos se asentaron. patches[i] se aplica a la grilla en t + i * dt (el último deja el estado final).
+  | { type: 'flow'; t: number; dt: number; patches: TerrainPatch[] }
+  | { type: 'steam'; x: number; y: number; n: number; t?: number } // v4: agua y lava hicieron piedra (n celdas)
   | { type: 'lava'; from: number | null; to: number; warn: number } // v2: la lava subió (from null = apareció); warn = tiros sin daño que faltan para la muerte súbita (0 si ya empezó)
   | { type: 'calm'; left: number } // v2: tiros sin daño que faltan para que empiece la muerte súbita (se emite al cambiar, 0 = empezó)
   | { type: 'roundover'; winnerId: number | null; earnings: Record<number, number>; last: boolean }
