@@ -1,9 +1,12 @@
 // Partículas y explosiones, dibujadas en pixels enteros (ver explosion()/cluster() del look-test).
 // v2: las partículas viven en coordenadas de mundo y se dibujan en buffers del tamaño de la pantalla
 // (fx y light), que el renderer ubica sobre la parte visible del mundo con Raster.setView.
+// v4: el agua y la lava no frenan partículas (no son sólidas); lo que cae en ellas se apaga o se hunde, y el
+// agua tiene sus propias partículas: gotas (salpicaduras, géiser, espuma) y burbujas.
 import type { BlastStyle, Terrain } from '../../sim/types'
-import { AIR, WEAPONS } from '../../sim/types'
+import { AIR, WATER, WEAPONS } from '../../sim/types'
 import { DEBRIS_COLORS, OUT } from './fallback'
+import { LIQ, solidCell } from './liquids'
 import { Raster, Rng, bayer, mix } from './raster'
 
 const FIRE = [0xfffbe2, 0xffe27a, 0xffb43e, 0xf77a28, 0xd24a1c, 0x8a2814]
@@ -153,6 +156,39 @@ interface Drop {
   acc: number
 }
 
+// v4: gota de agua (salpicadura, géiser, espuma): cae con gravedad y se apaga al volver al agua.
+interface WDrop {
+  x: number
+  y: number
+  vx: number
+  vy: number
+  age: number
+  life: number
+  big: boolean
+}
+
+// v4: burbuja bajo el agua: sube bamboleándose hasta la superficie (top) y revienta.
+interface Bubble {
+  x: number
+  y: number
+  vy: number
+  top: number
+  age: number
+  life: number
+  r: number
+  phase: number
+}
+
+// colores de las gotas y la espuma: la cabeza clara y el resto del azul del agua, para que se lean también
+// contra la niebla clara del fondo
+const W_DROP = 0xe8f4f0
+const W_DROP_MID = 0x8ab8b8
+const W_DROP_TAIL = 0x4a7a84
+const W_FOAM = 0xe4f0ec
+const W_FOAM_EDGE = 0x6e9ea4
+const W_BUBBLE = 0xcfe4dc
+const W_BUBBLE_IN = 0x5a8a92
+
 // Onda expansiva: anillo que crece y levanta polvo donde cruza el piso.
 interface Ring {
   x: number
@@ -223,6 +259,8 @@ export class Fx {
   private drops: Drop[] = []
   private delayed: Delayed[] = []
   private rings: Ring[] = []
+  private wdrops: WDrop[] = []
+  private wbubbles: Bubble[] = []
   private time = 0
   private occ: number[] = [] // x, y, r de fuego y humo del último draw
   private terrain: Terrain | null = null
@@ -263,6 +301,8 @@ export class Fx {
     this.drops = []
     this.delayed = []
     this.rings = []
+    this.wdrops = []
+    this.wbubbles = []
     this.shake = 0
     this.flash = 0
     this.glow = 0
@@ -271,7 +311,18 @@ export class Fx {
 
   get busy(): boolean {
     return (
-      this.blobs.length + this.softs.length + this.debris.length + this.sparks.length + this.chunks.length + this.lights.length + this.emitters.length + this.drops.length + this.rings.length > 0
+      this.blobs.length +
+        this.softs.length +
+        this.debris.length +
+        this.sparks.length +
+        this.chunks.length +
+        this.lights.length +
+        this.emitters.length +
+        this.drops.length +
+        this.rings.length +
+        this.wdrops.length +
+        this.wbubbles.length >
+      0
     )
   }
 
@@ -282,7 +333,17 @@ export class Fx {
     y = Math.round(y)
     if (x < 0 || x >= t.w || y >= t.h) return false
     if (y < 0) return false
-    return t.front[y * t.w + x] !== AIR
+    return solidCell(t.front[y * t.w + x])
+  }
+
+  // v4: ¿hay agua o lava en el punto?
+  private liquid(x: number, y: number): number {
+    const t = this.terrain
+    if (!t) return 0
+    x = Math.round(x)
+    y = Math.round(y)
+    if (x < 0 || y < 0 || x >= t.w || y >= t.h) return 0
+    return LIQ[t.front[y * t.w + x]]
   }
 
   private r(): number {
@@ -465,6 +526,92 @@ export class Fx {
     }
     this.steam(x, y - 2, 3, 20)
     this.lights.push({ x, y: cy, R: 30, tint: 0xff8a3a, k: 0.35, life: 0.5, age: 0 })
+  }
+
+  // ---------- agua y lava material (v4) ----------
+
+  // Salpicadura: corona de gotas que saltan desde la superficie (y) y un poco de espuma.
+  waterSplash(x: number, y: number, n: number, up = 100): void {
+    for (let i = 0; i < n; i++) {
+      const a = -Math.PI / 2 + (this.r() - 0.5) * 1.9
+      const sp = up * (0.45 + this.r() * 0.7)
+      this.wdrops.push({ x: x + (this.r() - 0.5) * 6, y: y - 1, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, age: 0, life: 1.6, big: this.r() < 0.45 })
+    }
+    for (let i = 0; i < Math.min(4, 1 + (n >> 2)); i++) {
+      const r = 1.4 + this.r() * 1.6
+      this.soft({ x0: x + (this.r() - 0.5) * 10, y0: y - 1, vx: (this.r() - 0.5) * 30, vy: -8 - this.r() * 8, drag: 4, r0: r * 0.6, r1: r * 1.6, life: 0.35 + this.r() * 0.25, inner: W_FOAM, edge: W_FOAM_EDGE, a0: 0.85 })
+    }
+  }
+
+  // Burbujas que suben desde (x, y) hasta la superficie top, repartidas en spread px.
+  bubbles(x: number, y: number, n: number, top: number, spread = 10): void {
+    for (let i = 0; i < n; i++) {
+      this.wbubbles.push({
+        x: x + (this.r() - 0.5) * spread * 2,
+        y: y + (this.r() - 0.5) * spread,
+        vy: -(26 + this.r() * 30),
+        top,
+        age: -this.r() * 0.5, // no salen todas juntas
+        life: 4,
+        r: this.r() < 0.3 ? 2 : this.r() < 0.6 ? 1.4 : 1,
+        phase: this.r() * 6,
+      })
+    }
+  }
+
+  // Géiser chico: columna de agua que sale de la superficie (explosión sumergida cerca de ella). s ~ radio.
+  geyser(x: number, y: number, s: number): void {
+    const k = Math.max(0.5, Math.min(2.5, s / 12))
+    const n = Math.round(12 + 10 * k)
+    for (let i = 0; i < n; i++) {
+      const sp = (90 + this.r() * 110) * Math.sqrt(k)
+      this.wdrops.push({ x: x + (this.r() - 0.5) * 6 * k, y: y - 1 - this.r() * 3, vx: (this.r() - 0.5) * 36 * k, vy: -sp, age: 0, life: 2, big: this.r() < 0.5 })
+    }
+    for (let i = 0; i < 4; i++) {
+      const r = (2 + this.r() * 2) * k
+      this.soft({ x0: x + (this.r() - 0.5) * 6, y0: y - 2, vx: (this.r() - 0.5) * 20, vy: -30 - this.r() * 30 * k, drag: 2.5, r0: r * 0.5, r1: r * 1.4, life: 0.5 + this.r() * 0.4, inner: W_FOAM, edge: W_FOAM_EDGE, a0: 0.8 })
+    }
+    this.waterSplash(x, y, Math.round(8 * k), 70)
+  }
+
+  // Explosión bien sumergida: sin fuego ni humo; un fogonazo blanco azulado ahogado, luz y sacudón.
+  // Las burbujas y el géiser los agrega LiquidView.impact.
+  underwater(x: number, y: number, radius: number): void {
+    const s = Math.max(0.5, radius / 15)
+    this.blob({ layer: 4, ox: x, oy: y, r0: 2 * s, r1: 6 * s, grow: 0.03, life: 0.09, ramp: [0xffffff, 0xeef8f4, 0xcfe4dc, 0x8ab8b8], outline: 0x5a8a92, heat0: -0.2 })
+    this.blob({ layer: 1, ox: x, oy: y, r0: 3 * s, r1: 9 * s, grow: 0.06, hold: 0.05, life: 0.22, ramp: [0xeef8f4, 0xcfe4dc, 0xb0d4d0, 0x8ab8b8, 0x5a8a92], outline: 0x2c5a66, heat0: 0, heatV: 3 })
+    this.lights.push({ x, y, R: 30 + radius * 2, tint: 0xa8e0e0, k: 0.4, life: 0.3, age: 0 })
+    this.shake = Math.max(this.shake, 2 + radius * 0.25)
+    this.flash = Math.max(this.flash, Math.min(0.25, radius / 120))
+  }
+
+  // Espuma en el frente del agua que corre: una bocanada blanca y alguna gotita.
+  foam(x: number, y: number): void {
+    const r = 1.2 + this.r() * 1.2
+    this.soft({ x0: x, y0: y - 1, vx: (this.r() - 0.5) * 16, vy: -6 - this.r() * 6, drag: 4, r0: r * 0.6, r1: r * 1.5, life: 0.3 + this.r() * 0.25, inner: W_FOAM, edge: W_FOAM_EDGE, a0: 0.8 })
+    if (this.r() < 0.5) this.wdrops.push({ x, y: y - 1, vx: (this.r() - 0.5) * 50, vy: -30 - this.r() * 40, age: 0, life: 0.8, big: false })
+  }
+
+  // Agua y lava hicieron piedra (n celdas): vapor que sale silbando, alguna chispa y una luz chica.
+  hiss(x: number, y: number, n: number): void {
+    const puffs = Math.min(14, 3 + Math.round(n / 3))
+    const spread = Math.min(30, 6 + Math.sqrt(n) * 3)
+    this.steam(x, y - 1, puffs, spread)
+    for (let i = 0; i < Math.min(6, 1 + (n >> 3)); i++) {
+      const r = 2 + this.r() * 2
+      this.soft({ x0: x + (this.r() - 0.5) * spread, y0: y - 2, vx: this.wind * 2 + (this.r() - 0.5) * 30, vy: -40 - this.r() * 30, drag: 1.6, r0: r * 0.6, r1: r * 3, life: 1.4 + this.r() * 0.8, inner: 0xf8f4ee, edge: 0xc0b8ae, a0: 0.75, keep: 0.25 })
+    }
+    this.lavaSpray(x, y, Math.min(8, 2 + (n >> 2)), 60)
+    this.lights.push({ x, y: y - 2, R: 22, tint: 0xffa040, k: 0.25, life: 0.3, age: 0 })
+  }
+
+  // Tanque apoyado en la lava material: una chispa (y a veces una bocanada de humo negro).
+  ember(x: number, y: number, smoke: boolean): void {
+    this.sparks.push({ x, y, vx: (this.r() - 0.5) * 40, vy: -40 - this.r() * 50, life: 0.35 + this.r() * 0.4, age: 0 })
+    if (smoke) {
+      const r1 = 3 + this.r() * 2
+      this.blob({ layer: 0, ox: x, oy: y - 4, vy: -16, vx: this.wind * 1.5, ax: this.wind * 0.5, r0: 1.5, r1, grow: 0.6, hold: 0.6, life: 1.4, heat0: 0.3 + this.r() * 0.3, heatV: 0.05, ramp: BLACK_SMOKE, outline: BLACK_OUT, fade: true })
+    }
   }
 
   // ---------- abismo (v3) ----------
@@ -1063,7 +1210,7 @@ export class Fx {
     const t = this.terrain
     x = Math.round(x)
     if (!t || x < 0 || x >= t.w) return -1
-    for (let y = Math.max(0, Math.floor(from)); y < t.h; y++) if (t.front[y * t.w + x] !== AIR) return y
+    for (let y = Math.max(0, Math.floor(from)); y < t.h; y++) if (solidCell(t.front[y * t.w + x])) return y
     return -1
   }
 
@@ -1180,7 +1327,8 @@ export class Fx {
     }
     const W = this.worldW
     const H = this.worldH
-    this.debris = this.debris.filter((p) => p.age < p.life && p.x > -10 && p.x < W + 10 && p.y < H + 10 && !this.sunk(p.y))
+    // v4: lo que cae en agua o lava se hunde (desaparece)
+    this.debris = this.debris.filter((p) => p.age < p.life && p.x > -10 && p.x < W + 10 && p.y < H + 10 && !this.sunk(p.y) && !this.liquid(p.x, p.y))
 
     for (const p of this.sparks) {
       p.age += dt
@@ -1189,7 +1337,7 @@ export class Fx {
       p.x += p.vx * dt
       p.y += p.vy * dt
     }
-    this.sparks = this.sparks.filter((p) => p.age < p.life && !(p.vy > 0 && this.sunk(p.y)))
+    this.sparks = this.sparks.filter((p) => p.age < p.life && !(p.vy > 0 && (this.sunk(p.y) || this.liquid(p.x, p.y))))
 
     const chunkAt = (c: Chunk, t: number): [number, number] => [c.ox + c.dx * t, c.oy - Math.sin(t * Math.PI * 0.8) * c.peak + t * t * 22]
     for (const c of this.chunks) {
@@ -1239,6 +1387,18 @@ export class Fx {
         e.x = pos.x
         e.y = pos.y
         if (this.sunk(e.y - 10)) continue // restos tapados por la lava: no echan fuego ni humo
+        if (this.liquid(e.x, e.y - 10) === 1) {
+          // v4: restos bajo el agua: no se queman, largan burbujas
+          while (e.accA >= 0.35) {
+            e.accA -= 0.35
+            const t = this.terrain
+            let top = Math.round(e.y - 10)
+            while (t && top > 0 && t.front[(top - 1) * t.w + Math.round(e.x)] === WATER) top--
+            this.bubbles(e.x, e.y - 8, 1, top, 8)
+          }
+          e.accB = 0
+          continue
+        }
         while (e.accA >= 0.07) {
           e.accA -= 0.07
           const r1 = 2 + this.r() * 2.5
@@ -1269,9 +1429,38 @@ export class Fx {
         while (this.solid(g.x, g.y) && g.y > 0) g.y--
         this.flame(Math.round(g.x) - 2, Math.round(g.y), 5, 0.8 + this.r() * 1.2)
         g.age = g.life
+      } else if (this.liquid(g.x, g.y)) {
+        // v4: napalm que cae al agua se apaga con vapor; en la lava se funde
+        if (this.liquid(g.x, g.y) === 1) this.steam(g.x, g.y - 1, 2, 4)
+        g.age = g.life
       }
     }
     this.drops = this.drops.filter((g) => g.age < g.life && g.x > -10 && g.x < W + 10 && g.y < H + 10 && !this.sunk(g.y))
+
+    // v4: gotas de agua y burbujas
+    for (const g of this.wdrops) {
+      g.age += dt
+      g.vy += 300 * dt
+      g.vx *= 1 - 0.6 * dt
+      g.x += g.vx * dt
+      g.y += g.vy * dt
+      if (g.vy > 0 && (this.liquid(g.x, g.y) || this.solid(g.x, g.y))) g.age = g.life
+    }
+    this.wdrops = this.wdrops.filter((g) => g.age < g.life && g.y < H + 10)
+    if (this.wdrops.length > 160) this.wdrops.splice(0, this.wdrops.length - 160)
+    for (const b of this.wbubbles) {
+      b.age += dt
+      if (b.age < 0) continue
+      b.y += b.vy * dt
+      b.x += Math.sin(b.age * 9 + b.phase) * 10 * dt
+      if (b.y <= b.top + 0.5 || this.liquid(b.x, b.y) !== 1) {
+        // revienta en la superficie: una gotita y a veces un anillo de espuma
+        if (b.r > 1.2 && this.wdrops.length < 160) this.wdrops.push({ x: b.x, y: b.top - 1, vx: (this.r() - 0.5) * 20, vy: -25 - this.r() * 25, age: 0, life: 0.6, big: false })
+        b.age = b.life
+      }
+    }
+    this.wbubbles = this.wbubbles.filter((b) => b.age < b.life)
+    if (this.wbubbles.length > 120) this.wbubbles.splice(0, this.wbubbles.length - 120)
   }
 
   decay(dt: number): void {
@@ -1449,7 +1638,7 @@ export class Fx {
 
   // Partículas activas sin la estela del proyectil (contador de QA en ?fxtest).
   get count(): number {
-    let n = this.blobs.length + this.softs.filter((q) => !q.trail).length + this.debris.length + this.sparks.length + this.drops.length + this.rings.length
+    let n = this.blobs.length + this.softs.filter((q) => !q.trail).length + this.debris.length + this.sparks.length + this.drops.length + this.rings.length + this.wdrops.length + this.wbubbles.length
     for (const c of this.chunks) n += 1 + c.pts.length / 3
     return n
   }
@@ -1595,6 +1784,35 @@ export class Fx {
       fx.put(p.x, p.y, 0xfffbe2)
       fx.put(p.x - ux, p.y - uy, 0xffc64a)
       fx.put(p.x - ux * 2, p.y - uy * 2, 0xf77a28, 0.7 * fade)
+    }
+
+    // v4: burbujas (anillo claro con el centro del color del agua) y gotas (cabeza clara y estela)
+    for (const b of this.wbubbles) {
+      if (b.age < 0) continue
+      if (b.r >= 1.4) {
+        const x = Math.round(b.x)
+        const y = Math.round(b.y)
+        fx.put(x - 1, y, W_BUBBLE, 0.85)
+        fx.put(x + 1, y, W_BUBBLE, 0.85)
+        fx.put(x, y - 1, W_BUBBLE, 0.95)
+        fx.put(x, y + 1, W_BUBBLE, 0.7)
+        if (b.r >= 2) fx.put(x, y, W_BUBBLE_IN, 0.6)
+        else fx.put(x, y, W_BUBBLE, 0.4)
+      } else fx.put(b.x, b.y, W_BUBBLE, 0.9)
+    }
+    for (const g of this.wdrops) {
+      const sp = Math.hypot(g.vx, g.vy) || 1
+      const ux = g.vx / sp
+      const uy = g.vy / sp
+      const fade = g.age > g.life - 0.3 ? (g.life - g.age) / 0.3 : 1
+      fx.put(g.x - ux * 2, g.y - uy * 2, W_DROP_TAIL, 0.6 * fade)
+      fx.put(g.x - ux, g.y - uy, W_DROP_MID, 0.9 * fade)
+      if (g.big) {
+        fx.put(g.x + 1, g.y, W_DROP_MID, fade)
+        fx.put(g.x, g.y + 1, W_DROP_TAIL, fade)
+        fx.put(g.x + 1, g.y + 1, W_DROP_TAIL, fade)
+      }
+      fx.put(g.x, g.y, W_DROP, fade)
     }
 
     for (const g of this.rings) this.drawRing(g)

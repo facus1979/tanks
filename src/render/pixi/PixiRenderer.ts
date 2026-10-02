@@ -14,8 +14,10 @@ import type { ShotView } from './fx'
 import { Extras } from './extras'
 import { Fx } from './fx'
 import { LavaView } from './lava'
+import { LiquidView, solidCell } from './liquids'
 import { Raster, Rng } from './raster'
-import { TerrainPainter } from './terrain'
+import { CHUNK_W, TerrainPainter } from './terrain'
+import type { Rect } from './terrain'
 
 const SCORCH_STYLES = new Set(['fire', 'bigfire', 'napalm', 'nuke'])
 const NEAR_MISS = 40
@@ -102,6 +104,8 @@ export class PixiRenderer implements GameRenderer {
   private glowG = new Graphics()
   private warmG = new Graphics() // v2: tinte cálido de toda la pantalla con la lava alta
   private lava = new LavaView()
+  // v4: superficie animada del agua y la lava material, resplandor de los pozos y efectos de entrada
+  private liquids = new LiquidView()
   // v3: tanques que se perdieron en el abismo (los dibuja AbyssFalls mientras caen)
   private lost = new Set<number>()
   private lastAlive = new Map<number, { x: number; y: number }>()
@@ -111,6 +115,12 @@ export class PixiRenderer implements GameRenderer {
   private frontLayer = new Container()
   private backChunks: Sprite[] = []
   private frontChunks: Sprite[] = []
+  private liquidLayer = new Container() // v4: cuerpo de los líquidos, encima de los tanques
+  private liquidChunks: Sprite[] = []
+  // v4: flujo en curso (evento 'flow'): rectángulo que tocan sus parches y segundos que le quedan
+  private flowRect: Rect | null = null
+  private flowLeft = 0
+  private flowNew = false // el frame en que llega el evento el diff es completo (puede haber otros cambios)
 
   private fx = new Fx(BUF_W, BUF_H)
   private extras = new Extras(this.fx)
@@ -198,6 +208,9 @@ export class PixiRenderer implements GameRenderer {
       this.abyss.layer,
       this.frontLayer,
       this.tankLayer,
+      this.liquidLayer,
+      this.liquids.layer,
+      this.liquids.glowLayer,
       this.lava.glowLayer,
       this.lava.layer,
       this.lightSprite,
@@ -272,6 +285,7 @@ export class PixiRenderer implements GameRenderer {
     painter.fog = this.fx.fog
     this.applyCamera(frame)
     this.fx.setTerrain(frame.terrain)
+    this.liquids.setTerrain(frame.terrain)
     this.fx.wind = frame.wind
 
     const anim = frame.freeze ? 0 : dt
@@ -290,9 +304,18 @@ export class PixiRenderer implements GameRenderer {
     {
       const x0 = -this.camX / this.camZ - CULL_MARGIN
       const x1 = x0 + VIEW_W / this.camZ + 2 * CULL_MARGIN
-      for (const i of painter.update(frame.terrain, art, pal, changed, x0, x1)) {
-        this.backChunks[i].texture.source.update()
-        this.frontChunks[i].texture.source.update()
+      if (this.flowLeft > 0) {
+        this.flowLeft -= dt
+        if (this.flowLeft <= 0) this.flowRect = null
+      }
+      const list = painter.update(frame.terrain, art, pal, changed, x0, x1, this.flowNew ? null : this.flowRect)
+      this.flowNew = false
+      for (const i of list) {
+        if (painter.bfFlushed[i]) {
+          this.backChunks[i].texture.source.update()
+          this.frontChunks[i].texture.source.update()
+        }
+        if (painter.liqFlushed[i]) this.liquidChunks[i].texture.source.update()
       }
     }
 
@@ -317,6 +340,7 @@ export class PixiRenderer implements GameRenderer {
     }
     this.placeWorld()
     this.updateLava(frame, step, events)
+    this.updateLiquids(frame, step, events)
 
     this.fx.draw(this.shotViews(frame))
     this.stats?.sample(this.fx.count, dt, performance.now() - t0, this.fx.trails)
@@ -353,8 +377,34 @@ export class PixiRenderer implements GameRenderer {
     this.warmG.alpha = high * (0.07 + 0.01 * Math.sin(this.time * 2.3))
   }
 
+  // v4: superficie animada de los líquidos visibles, salpicaduras de proyectiles, tanques en la lava y
+  // espuma o chispas en el frente de un flujo.
+  private updateLiquids(frame: RenderFrame, dt: number, events: GameEvent[]): void {
+    const p = this.painter
+    if (!p) return
+    const t = frame.terrain
+    const z = this.camZ
+    const x0 = -(this.camX + this.shakeX) / z
+    const y0 = -(this.camY + this.shakeY) / z
+    const x1 = x0 + VIEW_W / z
+    const y1 = y0 + VIEW_H / z
+    if (!p.liqChunk.some((v) => v === 1)) {
+      this.liquids.idle()
+      return
+    }
+    this.liquids.update(t, p.surfStamp, CHUNK_W, (i) => p.surfaces[i] ?? null, () => p.lavaSurfaces(t), dt, frame.wind, x0, x1, y0, y1)
+    const impacts: Vec2[] = []
+    for (const ev of events) if (ev.type === 'impact') impacts.push(ev)
+    this.liquids.trackShots(this.fx, frame.projectiles, impacts, this.lava.level)
+    this.liquids.tanks(this.fx, frame.players, dt)
+    if (dt > 0 && p.fresh.length) this.liquids.flowFront(this.fx, p.fresh, x0, x1, y0, y1)
+  }
+
   private reset(): void {
     this.lava.reset()
+    this.liquids.reset()
+    this.flowRect = null
+    this.flowLeft = 0
     this.abyss.reset()
     this.lost.clear()
     this.lastAlive.clear()
@@ -394,7 +444,7 @@ export class PixiRenderer implements GameRenderer {
   private ensurePainter(t: Terrain): TerrainPainter {
     const old = this.painter
     if (old && old.w === t.w && old.h === t.h) return old
-    for (const s of this.backChunks.concat(this.frontChunks)) s.destroy({ texture: true, textureSource: true })
+    for (const s of this.backChunks.concat(this.frontChunks, this.liquidChunks)) s.destroy({ texture: true, textureSource: true })
     const p = new TerrainPainter(t.w, t.h)
     if (old) p.craters = old.craters
     const make = (c: { x0: number; canvas: HTMLCanvasElement }): Sprite => {
@@ -404,8 +454,11 @@ export class PixiRenderer implements GameRenderer {
     }
     this.backChunks = p.back.chunks.map(make)
     this.frontChunks = p.front.chunks.map(make)
+    this.liquidChunks = p.liquid.chunks.map(make)
+    for (const s of this.liquidChunks) s.visible = false
     this.backLayer.addChild(...this.backChunks)
     this.frontLayer.addChild(...this.frontChunks)
+    this.liquidLayer.addChild(...this.liquidChunks)
     this.painter = p
     this.version = -1
     return p
@@ -449,6 +502,7 @@ export class PixiRenderer implements GameRenderer {
       const vis = b.x < x1 && b.x + b.texture.width > x0
       b.visible = vis
       this.frontChunks[i].visible = vis
+      this.liquidChunks[i].visible = vis && this.painter?.liqChunk[i] === 1
     }
   }
 
@@ -518,9 +572,13 @@ export class PixiRenderer implements GameRenderer {
               dir = t
             }
           }
-          this.fx.explosion(ev.blast, ev.x, ev.y, ev.radius, ev.debris, dir.dx, dir.dy)
+          // v4: bien sumergida, la explosión no hace fuego ni humo (fogonazo ahogado, burbujas y géiser)
+          const sy = this.liquids.submerged(ev.x, ev.y)
+          if (sy >= 0 && ev.y - sy > ev.radius * 0.5) this.fx.underwater(ev.x, ev.y, ev.radius)
+          else this.fx.explosion(ev.blast, ev.x, ev.y, ev.radius, ev.debris, dir.dx, dir.dy)
         }
         if (SCORCH_STYLES.has(ev.blast)) this.painter?.addCrater(ev.x, ev.y, ev.radius)
+        this.liquids.impact(this.fx, ev.x, ev.y, ev.radius) // v4: burbujas y géiser si explotó bajo el agua
         this.impactSeen = true
         // el tanque más amenazado grita '!', los otros cercanos se preguntan '?'
         {
@@ -546,7 +604,10 @@ export class PixiRenderer implements GameRenderer {
       case 'damage':
         if (ev.cause === 'lava') {
           const p = frame.players.find((q) => q.id === ev.playerId)
-          if (p) this.lava.burn(this.fx, p.x, p.y)
+          // la banda de muerte súbita si el tanque está en ella; si no, la lava material (v4)
+          const L = this.lava.level
+          if (p && L !== null && p.y > L - 30) this.lava.burn(this.fx, p.x, p.y)
+          else if (p) this.liquids.burn(this.fx, p.x, p.y)
         }
         this.hitThisShot.add(ev.playerId)
         this.view(ev.playerId).alert = BUBBLE_TIME
@@ -562,7 +623,22 @@ export class PixiRenderer implements GameRenderer {
         if (this.lost.has(ev.playerId)) break
         const p = frame.players.find((q) => q.id === ev.playerId)
         if (ev.parachute) this.view(ev.playerId).startChute(ev.from - ev.to)
+        else if (p && ev.water) this.liquids.tankSplash(this.fx, p.x, ev.to) // v4: cayó al agua
         else if (p) this.fx.dust(p.x, ev.to, 12, TANK_W)
+        break
+      }
+      case 'steam':
+        this.liquids.steam(this.fx, ev.x, ev.y, ev.n)
+        break
+      case 'flow': {
+        // mientras se aplican los parches, el diff de la grilla mira solo lo que tocan
+        if (!ev.patches.length) break
+        let r: Rect = this.flowRect ?? { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }
+        for (const q of ev.patches) r = { x0: Math.min(r.x0, q.x), y0: Math.min(r.y0, q.y), x1: Math.max(r.x1, q.x + q.w), y1: Math.max(r.y1, q.y + q.h) }
+        this.flowRect = r
+        this.flowNew = true
+        // el evento llega en su t (cuando se aplica el primer parche): quedan patches.length · dt segundos
+        this.flowLeft = Math.max(this.flowLeft, ev.patches.length * ev.dt + 0.5)
         break
       }
       case 'prop':
@@ -673,7 +749,7 @@ export class PixiRenderer implements GameRenderer {
     const t = frame.terrain
     const xi = Math.round(x)
     if (xi < 0 || xi >= t.w) return -1
-    for (let yy = Math.max(0, Math.round(y) - 1); yy <= Math.round(y) + 6 && yy < t.h; yy++) if (t.front[yy * t.w + xi] !== 0) return yy
+    for (let yy = Math.max(0, Math.round(y) - 1); yy <= Math.round(y) + 6 && yy < t.h; yy++) if (solidCell(t.front[yy * t.w + xi])) return yy
     return -1
   }
 
@@ -778,7 +854,10 @@ export class PixiRenderer implements GameRenderer {
             const y = last.y + (dy * s) / d
             const x = last.x + (dx * s) / d
             // v3: en la oscuridad del abismo el proyectil no deja estela clara
-            if (y > this.viewTop - 20 && !(this.painter && this.painter.pits.dark(x, y, this.painter.h) > 0.15)) this.fx.trailPoint(x, y)
+            // v4: bajo el agua tampoco: deja burbujitas
+            const sy = this.liquids.surfaceAbove(x, y)
+            if (sy >= 0) this.fx.bubbles(x, y, 1, sy, 1)
+            else if (y > this.viewTop - 20 && !(this.painter && this.painter.pits.dark(x, y, this.painter.h) > 0.15)) this.fx.trailPoint(x, y)
           }
           last.acc = d - (s - TRAIL_STEP)
         }

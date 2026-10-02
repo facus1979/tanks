@@ -8,7 +8,7 @@
 import { Container, Sprite } from 'pixi.js'
 import type { Texture } from 'pixi.js'
 import type { Terrain } from '../../sim/types'
-import { AIR } from '../../sim/types'
+import { solidCell } from './liquids'
 import type { Fx } from './fx'
 import { bayer, mix, rnd } from './raster'
 
@@ -81,7 +81,7 @@ export class PitMap {
     const W = t.w
     const H = t.h
     const surf = (x: number): number => {
-      for (let y = 0; y < H; y++) if (t.front[y * W + x] !== AIR) return y
+      for (let y = 0; y < H; y++) if (solidCell(t.front[y * W + x])) return y
       return H
     }
     const weight = new Float32Array(W)
@@ -140,7 +140,7 @@ export class PitMap {
     const P = t.pits
     const xi = Math.round(x)
     if (!P || xi < 0 || xi >= t.w || !P[xi]) return false
-    for (let yy = Math.max(0, Math.round(y)); yy < t.h; yy++) if (t.front[yy * t.w + xi] !== AIR) return false
+    for (let yy = Math.max(0, Math.round(y)); yy < t.h; yy++) if (solidCell(t.front[yy * t.w + xi])) return false
     return true
   }
 

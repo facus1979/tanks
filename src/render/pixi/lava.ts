@@ -7,26 +7,29 @@
 // (la parte animada: ondas, costras, burbujas, brillo), a 30 Hz y subida directo desde los bytes. Lo profundo
 // es una textura repetida (TilingSprite) que fluye de costado sin costo, y el resplandor es otra textura
 // repetida con suma aditiva.
+//
+// v4: las tablas (degradé, ruido, costras, olas) se exportan para la lava material (liquids.ts), que usa el
+// mismo look.
 import { BufferImageSource, Container, Sprite, Texture, TilingSprite } from 'pixi.js'
 import type { Vec2 } from '../../sim/types'
 import type { Fx } from './fx'
 import { bayer, hash, mix, Raster, rgb, Rng } from './raster'
 
-const TOP = 10 // filas de la franja por encima de la superficie (burbujas, gotas, crestas de las olas)
-const DEPTH = 6 // filas de la franja por debajo (hasta donde llega la ola); más abajo sigue la textura profunda
-const NOISE_CAP = 30 // corrimiento máximo del ruido con la profundidad (de ahí para abajo solo ondula)
-const STRIP_H = TOP + DEPTH
+export const TOP = 10 // filas de la franja por encima de la superficie (burbujas, gotas, crestas de las olas)
+export const DEPTH = 6 // filas de la franja por debajo (hasta donde llega la ola); más abajo sigue la textura profunda
+export const NOISE_CAP = 30 // corrimiento máximo del ruido con la profundidad (de ahí para abajo solo ondula)
+export const STRIP_H = TOP + DEPTH
 const PAD = 16 // margen pintado a cada lado de la vista
 const STRIP_W = 1700 // ancho visible con zoom 0,5 (1600) más el margen del sacudón y PAD
 const PAINT_DT = 1 / 30
-const DEEP_W = 1024 // período horizontal del ruido (y de la textura profunda)
+export const DEEP_W = 1024 // período horizontal del ruido (y de la textura profunda)
 const DEEP_H = 128 // período vertical de la textura profunda
 const GLOW_H = 72 // alto del resplandor sobre la superficie
 const GLOW_K = 0.24 // intensidad del resplandor junto a la superficie (el light del lookdev usa 0,32 en un pozo)
-const GLOW_TINT = 0xff6a20
+export const GLOW_TINT = 0xff6a20
 const FLOW = 3 // px/s que fluye lo profundo de costado
-const CRUST_V = 5 // px/s que derivan las costras (más el viento)
-const CRUST_CELL = 16
+export const CRUST_V = 5 // px/s que derivan las costras (más el viento)
+export const CRUST_CELL = 16
 
 // Degradé de paintLiquids: 0 = superficie, 1 = rojo oscuro.
 const STOPS: [number, number][] = [
@@ -47,19 +50,19 @@ function gradient(t: number): number {
   return STOPS[STOPS.length - 1][1]
 }
 // 9 niveles (el lookdev cuantiza a octavos con la trama).
-const LEVELS = Array.from({ length: 9 }, (_, i) => gradient(i / 8))
-const LR = new Uint8Array(LEVELS.map((c) => (c >> 16) & 255))
-const LG = new Uint8Array(LEVELS.map((c) => (c >> 8) & 255))
-const LB = new Uint8Array(LEVELS.map((c) => c & 255))
-const SURF = 0xfff1a8
-const SPARKLE = 0xffffff
-const CRUST = 0x3a1810
-const CRUST_TOP = 0x5a2a18
-const DEEP_DARK = 0x6a1e12
-const BUBBLE_EDGE = 0xffb43e
+export const LEVELS = Array.from({ length: 9 }, (_, i) => gradient(i / 8))
+export const LR = new Uint8Array(LEVELS.map((c) => (c >> 16) & 255))
+export const LG = new Uint8Array(LEVELS.map((c) => (c >> 8) & 255))
+export const LB = new Uint8Array(LEVELS.map((c) => c & 255))
+export const SURF = 0xfff1a8
+export const SPARKLE = 0xffffff
+export const CRUST = 0x3a1810
+export const CRUST_TOP = 0x5a2a18
+export const DEEP_DARK = 0x6a1e12
+export const BUBBLE_EDGE = 0xffb43e
 
 // Ruido de valor 1D periódico (DEEP_W) con celdas de 11 px como noise1(x, 11) del lookdev.
-const NOISE = (() => {
+export const NOISE = (() => {
   const cells = Math.round(DEEP_W / 11)
   const n = new Float32Array(DEEP_W)
   const v = (i: number): number => hash(((i % cells) + cells) % cells, 0, 31) / 4294967296
@@ -74,14 +77,14 @@ const NOISE = (() => {
 })()
 
 // Tablas para el loop de la franja: level() = floor(d · LV_D + NOISE8 + BAYER8), sin multiplicar por pixel.
-const LV_D = (0.8 / 46) * 8
-const NOISE8 = Float32Array.from(NOISE, (v) => v * 0.35 * 8)
-const BAYER8 = Float32Array.from({ length: 16 }, (_, i) => bayer(i & 3, i >> 2))
-const SPARK_T = 0.72 * 4294967296 // umbrales de hash() (sin dividir)
-const SUNK_T = 0.985 * 4294967296
+export const LV_D = (0.8 / 46) * 8
+export const NOISE8 = Float32Array.from(NOISE, (v) => v * 0.35 * 8)
+export const BAYER8 = Float32Array.from({ length: 16 }, (_, i) => bayer(i & 3, i >> 2))
+export const SPARK_T = 0.72 * 4294967296 // umbrales de hash() (sin dividir)
+export const SUNK_T = 0.985 * 4294967296
 
 // Nivel del degradé a profundidad d (px bajo la superficie) con el ruido n y la trama b.
-const level = (d: number, n: number, b: number): number => {
+export const level = (d: number, n: number, b: number): number => {
   const l = Math.floor(((d / 46) * 0.8 + n * 0.35) * 8 + b)
   return l < 1 ? 1 : l > 8 ? 8 : l
 }
@@ -155,7 +158,7 @@ function glowTexture(): Texture {
 
 // Corrimiento por la ola según la fila de la franja y la ola de la columna (-3..3): completo en la superficie
 // y por encima, y se apaga hasta DEPTH (donde empalma con la textura profunda). Índice ry · 7 + 3 + ola.
-const WAVE_SHIFT = (() => {
+export const WAVE_SHIFT = (() => {
   const t = new Int8Array(STRIP_H * 7)
   for (let ry = 0; ry < STRIP_H; ry++) {
     const dd = ry - TOP
