@@ -108,6 +108,10 @@ export interface Terrain {
   h: number
   front: Uint8Array
   back: Uint8Array
+  // v3: columnas de abismo (1 = sin fondo). Ahí no hay roca madre y debajo del mapa no es sólido:
+  // lo que cae por debajo de h en esas columnas se pierde (tanque muerto, proyectil 'out', utilería
+  // destruida). Ausente o todo 0 = como v1. Viaja en snapshots y hash.
+  pits?: Uint8Array
 }
 
 export type Biome = 'forest' | 'jungle' | 'industrial'
@@ -335,7 +339,7 @@ export type GameEvent =
     }
   // t opcional: momento de playback. Sin t, el evento va con el impacto anterior de la lista.
   | { type: 'damage'; playerId: number; amount: number; hp: number; t?: number; cause?: 'lava' } // cause: v2, quemado por la lava
-  | { type: 'death'; playerId: number; t?: number }
+  | { type: 'death'; playerId: number; t?: number; cause?: 'abyss' | 'lava' } // cause: v3/v2, sin explosión de restos si es 'abyss'
   | { type: 'fall'; playerId: number; from: number; to: number; parachute?: boolean; t?: number }
   | { type: 'prop'; propId: number; kind: PropKind; x: number; y: number; destroyed: boolean; t?: number }
   | { type: 'burn'; x: number; y: number; w: number; t?: number } // napalm quemando una franja

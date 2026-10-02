@@ -200,7 +200,7 @@ Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 
 
 ### Reglas nuevas
 
-- **Abismo**: tramo sin fondo. Lo que cae por debajo del mapa en un abismo muere (el paracaídas lo evita si se abre antes). Fuera de los abismos, debajo del mapa sigue siendo roca madre.
+- **Abismo**: tramo sin fondo (`Terrain.pits`). Lo que cae por debajo del mapa en un abismo se pierde: el tanque muere (`death.cause = 'abyss'`, el paracaídas no lo salva), el proyectil sale ('out') y la utilería se destruye. Fuera de los abismos, debajo del mapa sigue siendo roca madre.
 - **Agua**: no colisiona. Amortigua caídas (sin daño de caída), frena los proyectiles que entran y reduce a la mitad el radio de las explosiones sumergidas.
 - **Lava**: no colisiona. Un tanque que la toca recibe daño por turno, enciende lo inflamable vecino y derrite los proyectiles (no explotan). La tierra (arma Tierra o derrumbe) sobre lava se vuelve piedra; agua y lava en contacto dan piedra.
 
@@ -211,6 +211,7 @@ Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 
 - `src/ui/types.ts`: `HudExtras.minimap` (`MinimapModel`, `MinimapTank`), `MinimapInput.minimapAt` (lo implementa `Hud`), `DEFAULT_CONFIG.size` = `'medium'`, `setOption('size')` en el lobby.
 - `src/net/types.ts`: `LobbyState.size`.
 - QA: `?play=...&size=small|medium|large`, `?demo=...&size=...`.
+- V3 (`src/sim/types.ts`): `Terrain.pits` (columnas de abismo), `death.cause` (`'abyss' | 'lava'`).
 - V2 muerte súbita (`src/sim/types.ts`): `SUDDEN_DEATH_CALM` (5), `LAVA_RISE` (18 px por turno), `LAVA_DAMAGE` (20 por turno), `GameState.calm` y `GameState.lava` (y de la superficie o null), `ImpactKind` `'lava'` (proyectil derretido, sin explosión), eventos `lava` y `calm`, `damage.cause = 'lava'`. `RenderFrame.lava`, `HudExtras.suddenDeath`, `MinimapModel.lava`.
 
 ### Fases
@@ -233,6 +234,7 @@ Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 
     - flujo: ajuste fino (Shift, L3/Select, toque corto de 0,2 en táctil; el tiro humano sale con un decimal y el HUD muestra décimas), lava animada en 0,8 s, sonidos `lavaRise`, `melt`, `lavaBurn`, `suddenDeath` y vibración, `?play=...&calm=N`.
     - Pendientes: propuesta de combustible `FUEL_PER_TURN · √k` en mapas anchos (no aplicada); el napalm que cae debajo de la lava (V4); en la captura con lava alta el fondo de la lava muestra vetas verticales marcadas, revisar en juego.
 - **V3 Geografía por tramos.** El generador arma el mapa como secuencia de tramos por bioma: montaña, valle, meseta, abismo, lago, pozo de lava, más búnker/torre/cuevas.
+  - Alcance (2026-10-01): Chico sigue idéntico a v1 (referencia de look y tests); la geografía nueva va en Mediano y Grande. Lago y pozo de lava quedan como cuencas secas registradas por el generador; V4 las llena. Arte: capas de fondo repetibles a lo ancho (sin elementos cortados en los bordes).
 - **V4 Agua y lava.** Materiales, flujo, reglas, texturas y animación (superficie, burbujas, vapor al enfriarse), sonido.
 - **V5 Hasta 8 jugadores.** Arte, HUD, lobby local y online.
 
