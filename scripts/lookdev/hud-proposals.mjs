@@ -74,7 +74,7 @@ const color = (p) => V2.STRIPES8[p.n - 1][1]
 const CAM_X = 1060
 const SCENES = {
   grande: { minimap: true, x: { 1: 1205, 2: 1500, 3: 1955, 4: 830 } },
-  chico: { minimap: false, x: { 1: 1205, 2: 1500, 3: 1846, 4: 1785 } },
+  chico: { minimap: false, x: { 1: 1205, 2: 1500, 3: 1580, 4: 1330 } },
 }
 
 // ---------- fuente: la tira de paint-assets, recortada igual que fontFromImage ----------
@@ -305,8 +305,9 @@ function weaponSlot(cv, x, y, id, i) {
   const ammo = STATE.ammoAll[id] ?? 0
   const sel = id === STATE.weapon
   button(cv, x, y, 22, { on: ammo > 0, sel })
-  weaponIcon(cv, id, x + 5, y + 3, { off: ammo <= 0 })
-  text(cv, `${i + 1}`, x + 3, y + 15, sel ? GOLD : ammo > 0 ? GREY : 0x4a4440)
+  // tecla arriba a la izquierda (chica y apagada), ícono corrido a la derecha, munición abajo
+  text(cv, `${i + 1}`, x + 3, y + 3, sel ? GOLD : ammo > 0 ? GREY : 0x4a4440)
+  weaponIcon(cv, id, x + 7, y + 3, { off: ammo <= 0 })
   if (ammo > 0 && ammo < 50) { const t = `${ammo}`; text(cv, t, x + 19 - measure(t), y + 15, WHITE) }
 }
 function weaponRow(cv, x, y, gap = 2) {
@@ -597,8 +598,12 @@ function proposalB(scene) {
   for (let a = 0; a <= 180; a += 5) {
     const r = (a * Math.PI) / 180
     const x = Math.round(px + Math.cos(r) * R), y = Math.round(py - Math.sin(r) * R)
-    if (a % 45 === 0) { cv.rect(x - 1, y - 1, 3, 3, OUT); cv.put(x, y, BRONZE) }
-    else if (Math.abs(a - STATE.angle) > 3) { cv.put(x, y, OUT, 0.55); if (a <= STATE.angle) cv.put(x, y, GOLD, 0.8) }
+    if (a % 45 === 0) { cv.rect(x - 1, y - 1, 3, 3, OUT); cv.put(x, y, a <= STATE.angle ? GOLD : WHITE) }
+    else if (Math.abs(a - STATE.angle) > 3) {
+      // recorrido (0 → ángulo) en dorado; el resto, puntos claros con sombra para que se vean sobre el cielo
+      cv.put(x + 1, y + 1, OUT, 0.8)
+      cv.put(x, y, a <= STATE.angle ? GOLD : WHITE, a <= STATE.angle ? 1 : 0.75)
+    }
   }
   const rad = (STATE.angle * Math.PI) / 180
   thick(cv, px + Math.cos(rad) * 16, py - Math.sin(rad) * 16, px + Math.cos(rad) * (R + 3), py - Math.sin(rad) * (R + 3), GOLD, 1)
@@ -626,9 +631,9 @@ function proposalB(scene) {
   {
     const by = me.ground + 3
     const bx = Math.round(me.sx - 17)
-    segBar(cv, bx, by, 34, 5, STATE.fuel, [FUEL, FUEL_HI, 0xd8ffb0], { segs: 6 })
-    moveArrow(cv, bx - 6, by - 3, -1, WHITE)
-    moveArrow(cv, bx + 35, by - 3, 1, WHITE)
+    segBar(cv, bx, by, 34, 6, STATE.fuel, [FUEL, FUEL_HI, 0xd8ffb0], { segs: 6 })
+    moveArrow(cv, bx - 7, by - 2, -1, WHITE)
+    moveArrow(cv, bx + 35, by - 2, 1, WHITE)
   }
 
   roundAndItems(cv)
@@ -753,7 +758,7 @@ function proposalC(scene) {
   const nm = WEAPON_NAMES[STATE.weapon].toUpperCase()
   const w0 = text(cv, nm, x + 1, top + 1, WHITE)
   text(cv, `x${STATE.ammoAll[STATE.weapon]}`, x + w0 + 6, top + 1, GOLD)
-  weaponRow(cv, x, top + 11, 1)
+  weaponRow(cv, x, top + 11, 2)
   return cv
 }
 
