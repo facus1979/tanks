@@ -260,7 +260,7 @@ Pedido del usuario tras jugar la v2 publicada. Contrato: `fuelFor(width)`, `KNOC
 - **Combustible**: `fuelFor(width)` = 60·√k por turno.
 - **Cruzar líquidos**: el proyectil de Tierra no se derrite en la lava y lo que construye sobre ella es piedra; el napalm sobre agua hace piedra flotante.
 - **Guía de apuntado**: sin trazador se ven los puntos del comienzo de la trayectoria (`AIM_PREVIEW_T` segundos); el trazador sigue mostrando la completa.
-- **HUD**: tres propuestas del área arte para que ángulo, potencia, viento y combustible se lean mejor; el usuario elige una y después se implementa.
+- **HUD**: tres propuestas del área arte (`scripts/lookdev/hud-proposals.mjs`); el usuario eligió la **C, tablero Broforce**: franja de `HUD_BAR_H` = 62 px abajo a lo ancho con retrato/vida/escudo | ÁNG (número ×3 y dial chico) | POT (número ×3 y barra de 10 segmentos) | VIENTO (número ×3, flechas y manga) | COMB (barra con bidón, ◀ ▶ y %) | las 8 armas; ítems arriba a la izquierda con ronda y plata; rivales arriba a la derecha. De la B se suma un arco fino alrededor del cañón mientras se apunta, sin número. Contrato: `HUD_BAR_H` (`src/render/types.ts`), `HudControl` y `controlAt` (`src/ui/types.ts`, reemplaza a `weaponAt`).
 
 ## Cómo se agrega algo
 

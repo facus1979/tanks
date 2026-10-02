@@ -128,10 +128,18 @@ export interface MinimapModel {
   lava?: number | null // v2: y de la superficie de la lava de muerte súbita
 }
 
+// HUD C (pulido v2): controles clicables/tocables del tablero inferior y de la fila de ítems.
+export type HudControl =
+  | { kind: 'weapon'; id: import('../sim').WeaponId }
+  | { kind: 'item'; id: ItemId }
+  | { kind: 'move'; dir: -1 | 1 } // botones ◀ ▶ de la sección COMB (mantener = mover)
+
 // Lo que el HUD (src/ui/hud.ts, clase Hud) expone al flujo para navegar con el minimapa.
 export interface MinimapInput {
   // Punto de la ventana → x,y de mundo si cae sobre el minimapa (con un margen táctil de 6 px lógicos); si no, null.
   minimapAt(clientX: number, clientY: number): Vec2 | null
+  // HUD C: control bajo un punto de la ventana (con margen táctil), o null. Reemplaza a weaponAt.
+  controlAt(clientX: number, clientY: number): HudControl | null
 }
 
 // ---------- online ----------

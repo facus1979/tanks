@@ -5,6 +5,11 @@ import type { Biome, GameEvent, Player, Prop, Terrain, Vec2, WeaponId } from '..
 export const VIEW_W = 800
 export const VIEW_H = 450
 
+// HUD C (pulido v2): alto en pixels lógicos del tablero inferior del HUD. Durante la partida la cámara
+// encuadra de modo que el piso del mundo quede por encima del tablero (las últimas HUD_BAR_H filas de la
+// pantalla las tapa el HUD). Fuera de la partida (demo congelado, título) no hay tablero.
+export const HUD_BAR_H = 62
+
 // Pulido v2: segundos de vuelo que muestra la guía corta de apuntado (sin trazador).
 export const AIM_PREVIEW_T = 0.35
 

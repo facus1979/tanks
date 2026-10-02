@@ -4,7 +4,7 @@ import { VIEW_H, VIEW_W, type Viewport } from '../render/types'
 import { uiAssets, type UiAssets } from './assets'
 import { OUT, css, drawText, measure } from './pixelfont'
 import { MinimapTerrain, drawEdgeArrows, drawMinimap, minimapLayout, minimapPoint, type MinimapLayout } from './minimap'
-import type { HudExtras, HudNet, MinimapInput } from './types'
+import type { HudControl, HudExtras, HudNet, MinimapInput } from './types'
 
 // Tecla de cada ítem usable (el paracaídas es pasivo). La lee también el flujo de entrada.
 export const ITEM_KEYS: Partial<Record<ItemId, string>> = { shield: 'Q', fuel: 'F', repair: 'R', tracer: 'T' }
@@ -153,6 +153,12 @@ export class Hud implements MinimapInput {
     const rect = this.root.getBoundingClientRect()
     if (rect.width <= 0 || rect.height <= 0) return null
     return { x: ((clientX - rect.left) / rect.width) * VIEW_W, y: ((clientY - rect.top) / rect.height) * VIEW_H }
+  }
+
+  // HUD C: stub del contrato sobre el HUD de hoy (solo armas); lo reemplaza el área vistas.
+  controlAt(clientX: number, clientY: number): HudControl | null {
+    const id = this.weaponAt(clientX, clientY)
+    return id ? { kind: 'weapon', id } : null
   }
 
   // Arma bajo un punto de la ventana (clientX/Y), o null.
