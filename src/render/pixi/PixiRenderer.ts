@@ -1,5 +1,6 @@
 import { Application, Container, Graphics, Sprite, Texture, TextureStyle } from 'pixi.js'
 import type { Biome, GameEvent, Player, Prop, Vec2, WeaponId } from '../../sim/types'
+import { PATH_DT } from '../../sim'
 import { BARREL_LEN, PIVOT_X, PIVOT_Y, TANK_H, TANK_W, WEAPONS } from '../../sim/types'
 import type { Terrain } from '../../sim/types'
 import type { GameRenderer, RenderFrame, Viewport } from '../types'
@@ -388,6 +389,9 @@ export class PixiRenderer implements GameRenderer {
     const y0 = -(this.camY + this.shakeY) / z
     const x1 = x0 + VIEW_W / z
     const y1 = y0 + VIEW_H / z
+    // pulido v2: piedra recién enfriada (vapor un rato y grietas que se apagan)
+    if (p.cooledFresh.length) this.liquids.cool(p.cooledFresh)
+    this.liquids.vent(this.fx, dt)
     if (!p.liqChunk.some((v) => v === 1)) {
       this.liquids.idle()
       return
@@ -625,6 +629,14 @@ export class PixiRenderer implements GameRenderer {
         if (ev.parachute) this.view(ev.playerId).startChute(ev.from - ev.to)
         else if (p && ev.water) this.liquids.tankSplash(this.fx, p.x, ev.to) // v4: cayó al agua
         else if (p) this.fx.dust(p.x, ev.to, 12, TANK_W)
+        break
+      }
+      case 'slide': {
+        // pulido v2: la sesión mueve al tanque por el path; acá solo se anima (orugas, terrones, sacudón)
+        if (ev.path.length < 2 || this.lost.has(ev.playerId)) break
+        const dir = Math.sign(ev.path[ev.path.length - 1].x - ev.path[0].x) || 1
+        this.view(ev.playerId).startSlide(ev.cause, ev.path.length * PATH_DT, dir)
+        if (ev.cause === 'blast') this.fx.dust(ev.path[0].x, ev.path[0].y, 6, TANK_W)
         break
       }
       case 'steam':
@@ -906,8 +918,16 @@ export class PixiRenderer implements GameRenderer {
       if (v.moved !== 0 && dt > 0) {
         v.dustAcc += Math.abs(v.moved)
         const dir = Math.sign(v.moved)
-        for (; v.dustAcc >= 3; v.dustAcc -= 3) this.fx.treadDust(p.x - dir * (TANK_W / 2 - 2), p.y, -dir)
+        if (v.sliding) {
+          // pulido v2: deslizándose, terrones desde la oruga del lado de avance (y polvo atrás, más espaciado)
+          const strong = v.slideCause === 'blast'
+          for (; v.dustAcc >= 2; v.dustAcc -= 2) {
+            this.fx.slideClods(p.x + dir * (TANK_W / 2 - 1), p.y, dir, strong)
+            if (this.rng.next() < 0.35) this.fx.treadDust(p.x - dir * (TANK_W / 2 - 2), p.y, -dir)
+          }
+        } else for (; v.dustAcc >= 3; v.dustAcc -= 3) this.fx.treadDust(p.x - dir * (TANK_W / 2 - 2), p.y, -dir)
       }
+      v.stepSlide(dt)
       if (!p.alive) this.fx.wreck(p.id)
     }
     for (const [id, v] of this.tanks) {

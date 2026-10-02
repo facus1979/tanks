@@ -18,6 +18,10 @@ const CURTAIN_COLOR = 0x0c0a12
 const CURTAIN_COLS = 25
 const CREW_GRAVITY = 220
 const TRACER_STEP = 3.5
+// Pulido v2: guía corta de apuntado (sin trazador). Puntos más espaciados que el trazador, con contorno
+// oscuro para leerse sobre cielo claro, terreno oscuro y agua; se desvanecen en escalones hacia el final.
+const GUIDE_STEP = 5
+const GUIDE_FADE = [1, 1, 0.85, 0.7, 0.55, 0.42, 0.3, 0.2] // alfa por tramo (del comienzo al final)
 
 interface ShieldState {
   sprite: Sprite
@@ -187,7 +191,9 @@ export class Extras {
     this.updateShields(frame, dt, time, dropOf)
     this.updateShards(dt)
     this.updateCrews(frame.terrain, dt)
-    this.drawTracer(frame.aimPreview ?? null, time, frame.terrain)
+    const path = frame.aimPreview ?? null
+    if (frame.aimPreviewShort) this.drawGuide(path, time, frame.terrain, frame.players[frame.current] ?? null)
+    else this.drawTracer(path, time, frame.terrain)
     this.updateCurtain(dt)
     void art
   }
@@ -368,6 +374,52 @@ export class Extras {
       g.rect(ex - r, ey, r * 2 + 1, 1).fill(0xff5a3c)
       g.rect(ex, ey - r, 1, r * 2 + 1).fill(0xff5a3c)
       g.rect(ex, ey, 1, 1).fill(0xffffff)
+    }
+  }
+
+  // Pulido v2: guía corta. Puntos de 2×2 cada GUIDE_STEP px sobre el comienzo del vuelo, con sombra de
+  // 1 px abajo a la derecha (se leen sobre cielo claro y sobre terreno o agua oscuros) y alfa que baja en
+  // escalones: los primeros bien marcados, los últimos casi transparentes y de 1 px. Un brillo corre del
+  // tanque hacia afuera para dar la dirección. No pinta sobre la caja del tanque que apunta.
+  private drawGuide(path: Vec2[] | null, time: number, t: Terrain, me: Player | null): void {
+    const g = this.tracerG
+    g.clear()
+    if (!path || path.length < 2) return
+    // largo total del tramo (los puntos se reparten parejo y el desvanecido va por fracción del largo)
+    let total = 0
+    for (let i = 1; i < path.length; i++) total += Math.hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y)
+    if (total < GUIDE_STEP) return
+    const bx0 = me ? Math.round(me.x) - 15 : 0
+    const bx1 = me ? Math.round(me.x) + 15 : -1
+    const by0 = me ? Math.round(me.y) - 22 : 0
+    const by1 = me ? Math.round(me.y) + 1 : -1
+    const count = Math.floor(total / GUIDE_STEP)
+    const run = (time * 2.2) % 1 // brillo que corre hacia afuera
+    let toNext = GUIDE_STEP
+    let n = 0
+    for (let i = 1; i < path.length; i++) {
+      const a = path[i - 1]
+      const b = path[i]
+      const len = Math.hypot(b.x - a.x, b.y - a.y)
+      if (len < 0.001) continue
+      let pos = 0
+      while (pos + toNext <= len) {
+        pos += toNext
+        toNext = GUIDE_STEP
+        n++
+        const x = Math.round(a.x + ((b.x - a.x) * pos) / len)
+        const y = Math.round(a.y + ((b.y - a.y) * pos) / len)
+        if (x < -2 || x > t.w + 2) continue
+        if (x + 2 >= bx0 && x <= bx1 && y + 2 >= by0 && y <= by1) continue
+        const u = (n - 1) / Math.max(1, count - 1)
+        const alpha = GUIDE_FADE[Math.min(GUIDE_FADE.length - 1, Math.floor(u * GUIDE_FADE.length))]
+        const lit = Math.abs(u - run) < 0.5 / Math.max(1, count)
+        const big = u < 0.75
+        const s = big ? 2 : 1
+        g.rect(x + 1, y + 1, s, s).fill({ color: 0x14121c, alpha: alpha * 0.9 })
+        g.rect(x, y, s, s).fill({ color: lit ? 0xffffff : 0xffe36a, alpha })
+      }
+      toNext -= len - pos
     }
   }
 

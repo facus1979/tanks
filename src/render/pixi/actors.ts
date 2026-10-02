@@ -24,6 +24,12 @@ const BUBBLE_SPOTS: [number, number][] = (() => {
   return spots.sort((a, b) => Math.abs(a[0]) * 1.3 + Math.abs(a[1]) - (Math.abs(b[0]) * 1.3 + Math.abs(b[1])))
 })()
 
+// Pulido v2: deslizamiento (evento 'slide'). Mientras dura, el tanque puede correrse más rápido que andando
+// (las orugas y el polvo lo siguen), el casco se inclina según la pendiente que recorre y, si lo empujó una
+// explosión, arranca con un sacudón corto.
+export const SLIDE_TAIL = 0.2 // s de más después del último punto del path (el tanque se asienta)
+const SLIDE_JOLT = 0.24 // s del sacudón al empezar un deslizamiento por explosión
+const SLIDE_TILT = 0.3 // inclinación máxima por pendiente (rad, ~17°)
 const MAX_TILT = 0.35 // ~20°: más que eso el cañón del sim y el dibujo se separan demasiado
 const TILT_REACH = 24
 
@@ -79,6 +85,13 @@ export class TankView {
   moved = 0 // cuánto avanzó en x desde el frame anterior (0 si saltó o está destruido)
   dustAcc = 0
   private lastX: number | null = null
+  private lastY = 0
+  // deslizamiento: segundos que le quedan, causa, sentido (+1 derecha) y sacudón restante
+  slideLeft = 0
+  slideCause: 'blast' | 'slope' = 'slope'
+  slideDir = 0
+  private jolt = 0
+  private slope = 0 // pendiente suavizada del recorrido (rad, y hacia abajo)
   private treadPos = 0
   private tilt = 0
   private chute = new Sprite()
@@ -93,6 +106,23 @@ export class TankView {
     this.chute.anchor.set(0.5, 1)
     this.chute.visible = false
     this.overlay.addChild(this.chuteLines, this.chute, this.tag, this.bubble)
+  }
+
+  // Pulido v2: empieza un deslizamiento que dura `seconds` (largo del path en tiempo) hacia dir.
+  startSlide(cause: 'blast' | 'slope', seconds: number, dir: number): void {
+    this.slideLeft = seconds + SLIDE_TAIL
+    this.slideCause = cause
+    this.slideDir = dir
+    if (cause === 'blast') this.jolt = SLIDE_JOLT
+  }
+
+  stepSlide(dt: number): void {
+    this.slideLeft = Math.max(0, this.slideLeft - dt)
+    this.jolt = Math.max(0, this.jolt - dt)
+  }
+
+  get sliding(): boolean {
+    return this.slideLeft > 0
   }
 
   startChute(height: number): void {
@@ -133,7 +163,14 @@ export class TankView {
     root.scale.x = facing
     // El sim apoya el tanque derecho sobre su punto más alto; acá se inclina hasta tocar la pendiente.
     const lean = p.alive && terrain ? restTilt(terrain, x0, Math.round(p.y)) : null
-    const target = lean ? lean.angle : 0
+    // deslizándose: si el apoyo no da una inclinación, el casco sigue la pendiente que recorre
+    const sdx = this.lastX === null ? 0 : p.x - this.lastX
+    const sdy = this.lastX === null ? 0 : p.y - this.lastY
+    if (this.slideLeft > 0 && Math.abs(sdx) > 0.25) {
+      const a = Math.max(-SLIDE_TILT, Math.min(SLIDE_TILT, Math.atan2(sdy, Math.abs(sdx)) * Math.sign(sdx)))
+      this.slope += (a - this.slope) * 0.4
+    } else if (this.slideLeft <= 0) this.slope = 0
+    const target = lean ? lean.angle : this.slideLeft > 0 ? this.slope : 0
     this.tilt = this.lastX === null ? target : this.tilt + (target - this.tilt) * 0.35
     if (Math.abs(this.tilt - target) < 0.004) this.tilt = target
     const px = lean ? lean.x : x0 + TANK_W / 2
@@ -141,11 +178,20 @@ export class TankView {
     root.x = px
     root.y = top + TANK_H
     root.rotation = this.tilt + swing * 0.05
+    if (this.jolt > 0 && p.alive) {
+      // sacudón del empuje: 1 px de lado a lado y un cabeceo que se apaga
+      const k = this.jolt / SLIDE_JOLT
+      root.x += Math.floor(this.jolt * 50) % 2 === 0 ? 1 : -1
+      root.y += k > 0.6 ? -1 : 0
+      root.rotation += Math.sin(this.jolt * 70) * 0.07 * k
+    }
 
     const alive = p.alive
     const dx = this.lastX === null ? 0 : p.x - this.lastX
     this.lastX = p.x
-    this.moved = alive && Math.abs(dx) <= 4 ? dx : 0
+    this.lastY = p.y
+    // andando avanza a lo sumo unos px por frame (más es un salto); deslizándose puede ir más rápido
+    this.moved = alive && Math.abs(dx) <= (this.slideLeft > 0 ? 12 : 4) ? dx : 0
     // Los eslabones corren un pixel por pixel recorrido, en el espacio local (espejado) del sprite.
     this.treadPos -= this.moved * facing
     const k = this.recoil > 0 ? this.recoil / RECOIL_TIME : 0

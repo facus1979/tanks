@@ -452,6 +452,50 @@ export class Fx {
     }
   }
 
+  // Pulido v2: tanque que se desliza. Desde la oruga del lado de avance (x, y = piso) salen terrones del
+  // material del piso que saltan hacia adelante y arriba, y una bocanada de polvo que se queda atrás.
+  // dir: sentido del deslizamiento (+1 derecha); strong: empujado por una explosión (más violento).
+  slideClods(x: number, y: number, dir: number, strong: boolean): void {
+    const t = this.terrain
+    let m = 0
+    if (t) {
+      const xi = Math.round(x)
+      for (let yy = Math.round(y); yy < Math.round(y) + 4 && !m; yy++) {
+        if (xi >= 0 && xi < t.w && yy >= 0 && yy < t.h) m = t.front[yy * t.w + xi]
+      }
+    }
+    const cols = DEBRIS_COLORS[m] ?? DEBRIS_COLORS[1]
+    const n = strong ? 2 : 1
+    for (let i = 0; i < n; i++) {
+      if (m === AIR && this.r() < 0.6) continue
+      this.debris.push({
+        x: x + dir * this.r() * 2,
+        y: y - 1,
+        vx: dir * (25 + this.r() * (strong ? 55 : 30)),
+        vy: -(35 + this.r() * (strong ? 55 : 30)),
+        color: cols[Math.floor(this.r() * cols.length)],
+        shape: Math.floor(this.r() * 3), // terrones de 1 a 3 px
+        life: 0.5 + this.r() * 0.4,
+        age: 0,
+        rest: false,
+      })
+    }
+    const r = 1.4 + this.r() * 1.8
+    this.soft({
+      x0: x,
+      y0: y - 1 - this.r() * 2,
+      vx: dir * (8 + this.r() * 14),
+      vy: -8 - this.r() * 10,
+      drag: 4,
+      r0: r * 0.6,
+      r1: r * (strong ? 2.4 : 2),
+      life: 0.5 + this.r() * 0.4,
+      inner: 0xa8927a,
+      edge: 0x6e5c48,
+      a0: 0.85,
+    })
+  }
+
   splinters(x: number, y: number, colors: number[], n: number): void {
     for (let i = 0; i < n; i++) {
       const a = -Math.PI * (0.1 + this.r() * 0.8)
