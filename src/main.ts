@@ -5,7 +5,7 @@ import { TouchControls, fullscreenButton, isTouchDevice, vibrate } from './input
 import { MousePan } from './input/mouse'
 import type { Viewport } from './render/types'
 import { Sfx } from './audio/sfx'
-import { Session } from './game/session'
+import { Session, abyssDrop, isAbyssFall } from './game/session'
 import type { NetSeat } from './game/session'
 import { Online } from './game/online'
 import { normalizeCode, readNetParams } from './net'
@@ -570,6 +570,8 @@ function step1(dt: number, live: boolean, draw = true): void {
 
   for (const shot of session.pullShots()) sfx.fire(shot.weapon)
   for (const _ of session.pullMelts()) sfx.melt()
+  // v3: el tanque frenó solo en el borde de un abismo
+  if (session.pullEdgeWarning()) sfx.edgeWarn()
   if (session.pullSuddenDeath() && live) {
     // empieza la muerte súbita: sirena corta y vibración en táctil
     sfx.suddenDeath()
@@ -672,6 +674,7 @@ function handleInput(dt: number, pressed: Set<string>, padState: ReturnType<Game
 }
 
 function playSounds(events: GameEvent[]): void {
+  const h = session.state?.terrain.h ?? 450
   for (const e of events) {
     switch (e.type) {
       case 'impact':
@@ -686,11 +689,15 @@ function playSounds(events: GameEvent[]): void {
         if (e.destroyed && e.kind === 'barrel') sfx.barrel()
         break
       case 'fall':
-        if (e.parachute) sfx.parachute()
+        // v3: al abismo, silbido que se aleja durante la caída (la sesión la anima con abyssDrop)
+        if (isAbyssFall(e, h)) sfx.abyssFall(abyssDrop(e.from, h).dur)
+        else if (e.parachute) sfx.parachute()
         else sfx.fall(Math.abs(e.to - e.from))
         break
       case 'death':
-        sfx.death()
+        // perdido en el abismo: golpe lejano, sin la explosión del tanque
+        if (e.cause === 'abyss') sfx.abyssThud()
+        else sfx.death()
         break
       case 'damage':
         if (e.cause === 'lava') sfx.lavaBurn()

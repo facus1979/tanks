@@ -10,6 +10,7 @@ export const MIN_ZOOM = 0.5
 const TANK_TIME = 0.45 // siguiendo al tanque del turno
 const SHOT_TIME = 0.2 // siguiendo al proyectil
 const IMPACT_TIME = 0.35 // después del último impacto, mientras se asienta el tiro
+const FALL_TIME = 0.25 // acompañando a un tanque que cae al abismo (v3)
 const ZOOM_TIME = 0.55
 const MAX_SPEED = 4000 // px de mundo por segundo
 // El tanque queda un poco por debajo del centro: se ve más cielo para apuntar.
@@ -106,6 +107,16 @@ export class CameraController {
     this.ty = y
     this.tz = 1
     this.time = IMPACT_TIME
+  }
+
+  // v3: un tanque cae al abismo. La cámara lo acompaña rápido y vuelve a zoom 1; clampY la frena con el
+  // borde de abajo del mundo en el borde de abajo de la pantalla (nunca muestra lo que hay debajo).
+  followFall(x: number, y: number): void {
+    this.mode = 'shot'
+    this.tx = x
+    this.ty = y
+    this.tz = 1
+    this.time = FALL_TIME
   }
 
   // Paneo a mano (dx en px de mundo), sin retraso: la cámara va pegada al dedo o al mouse.
