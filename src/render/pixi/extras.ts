@@ -1,7 +1,8 @@
 // F10/F11: escudo, trazador, tripulante eyectado y cortina entre rondas. Todo con el dt que recibe el renderer.
 import { Container, Graphics, Sprite, Texture } from 'pixi.js'
 import type { GameEvent, Player, Terrain, Vec2 } from '../../sim/types'
-import { AIR, SHIELD_HP } from '../../sim/types'
+import { SHIELD_HP } from '../../sim/types'
+import { solidCell } from './liquids'
 import type { RenderFrame } from '../types'
 import { VIEW_H, VIEW_W } from '../types'
 import type { Art } from './assets'
@@ -273,7 +274,7 @@ export class Extras {
     const xi = Math.round(x)
     const yi = Math.round(y)
     if (xi < 0 || xi >= t.w || yi < 0 || yi >= t.h) return false
-    return t.front[yi * t.w + xi] !== AIR
+    return solidCell(t.front[yi * t.w + xi])
   }
 
   private updateCrews(t: Terrain, dt: number): void {

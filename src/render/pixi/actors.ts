@@ -1,7 +1,8 @@
 // Tanques con tripulante, utilería y globos.
 import { Container, Graphics, Sprite, Texture } from 'pixi.js'
 import type { Player, Prop, Terrain } from '../../sim/types'
-import { AIR, TANK_H, TANK_W } from '../../sim/types'
+import { TANK_H, TANK_W } from '../../sim/types'
+import { solidCell } from './liquids'
 import type { Art, Font } from './assets'
 import { GLYPHS, OUT } from './fallback'
 import { mul } from './raster'
@@ -35,7 +36,7 @@ export function restTilt(t: Terrain, x0: number, floor: number): { angle: number
     let y = floor + TILT_REACH
     if (x >= 0 && x < t.w) {
       for (let yy = floor - 2; yy < floor + TILT_REACH && yy < t.h; yy++) {
-        if (yy >= 0 && t.front[yy * t.w + x] !== AIR) {
+        if (yy >= 0 && solidCell(t.front[yy * t.w + x])) {
           y = Math.max(floor, yy)
           break
         }
