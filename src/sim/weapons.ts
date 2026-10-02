@@ -1,13 +1,16 @@
 // Resolución de un disparo según el arma: racimo, napalm, excavadora, rodadora y el resto.
 import { PATH_DT, fly, type FlightResult } from './ballistics'
-import { blastFor, hurt, resolveBlast } from './physics'
-import { columnGround, deform, isSolid } from './terrain'
+import { blastFor, hurt, resolveBlast, submerged } from './physics'
+import { columnGround, deform, isSolid, liquidAt, markDirty } from './terrain'
 import {
   AIR,
+  LAVA,
   MATERIALS,
   SUBSTEP,
   TANK_H,
   TANK_HALF_W,
+  WATER,
+  WATER_DRAG,
   WEAPONS,
   physicsFor,
   type Flight,
@@ -33,7 +36,9 @@ export interface ShotOutcome {
 }
 
 function toFlight(f: FlightResult, startT: number): Flight {
-  return { path: f.path, impact: f.impact, startT }
+  const flight: Flight = { path: f.path, impact: f.impact, startT }
+  if (f.splashes) flight.splashes = f.splashes // v4
+  return flight
 }
 
 export function resolveShot(state: GameState, shooter: Player, weapon: WeaponId): ShotOutcome {
@@ -128,7 +133,11 @@ function surfaceFrom(state: GameState, x: number, y: number): number {
 function napalm(state: GameState, ix: number, iy: number, t0: number, seconds: number, events: GameEvent[]): void {
   const t = state.terrain
   const cx = Math.round(ix)
+  // v4: napalm sobre agua no quema: ni con el impacto sumergido ni sobre una superficie tapada de
+  // líquido (agua o lava); el fuego tampoco corre por encima de un líquido
+  if (submerged(t, ix, iy)) return
   const start = surfaceFrom(state, cx, Math.floor(iy) - 8)
+  if (liquidAt(t, cx, start - 1) !== AIR) return
   const burning: Vec2[] = [{ x: cx, y: start }]
   for (const dir of [-1, 1]) {
     let y = start
@@ -136,7 +145,7 @@ function napalm(state: GameState, ix: number, iy: number, t0: number, seconds: n
     for (let x = cx + dir; budget > 0 && x >= 0 && x < t.w; x += dir) {
       if (isSolid(t, x, y - 6)) break // pared: el fuego no sube
       const g = surfaceFrom(state, x, y - 5)
-      if (g >= t.h) break
+      if (g >= t.h || liquidAt(t, x, g - 1) !== AIR) break
       budget -= 1 + Math.max(0, y - g) // cuesta arriba se agota antes; cuesta abajo corre
       y = g
       burning.push({ x, y })
@@ -148,6 +157,7 @@ function napalm(state: GameState, ix: number, iy: number, t0: number, seconds: n
   const r = NAPALM_CHAR
   for (let i = 0; i < burning.length; i += 3) {
     const p = burning[i]
+    markDirty(t, p.x - r - 1, p.y - r - 1, p.x + r + 1, p.y + r + 1) // v4: lo quemado puede dejar correr un líquido
     for (let y = p.y - r; y <= p.y + r; y++) {
       if (y < 0 || y >= t.h) continue
       for (let x = p.x - r; x <= p.x + r; x++) {
@@ -211,9 +221,23 @@ function roll(state: GameState, shooter: Player, weapon: WeaponId, flight: Fligh
   let hit: Player | undefined
   const path: Vec2[] = [{ x, y }]
   const lava = state.lava ?? Infinity
+  // v4: en el agua la bola frena como un proyectil (WATER_DRAG por segundo) y cada entrada salpica;
+  // en la lava de la grilla se derrite como en la de muerte súbita
+  let wet = liquidAt(t, x, y) === WATER
+  const splashes: { x: number; y: number; t: number }[] = []
+  const drag = WATER_DRAG ** SUBSTEP
+  const push = (impact: Flight['impact']) => {
+    const f: Flight = { path, impact, startT: flight.time }
+    if (splashes.length > 0) f.splashes = splashes
+    flights.push(f)
+  }
   while (time < ROLL_MAX_T) {
     time += SUBSTEP
     n++
+    if (wet) {
+      vx *= drag
+      vy *= drag
+    }
     if (!air) {
       const s = slopeAt(x) / 4 // >0: baja hacia la derecha
       vx += (gravity * 0.9 * s) / Math.sqrt(1 + s * s) * SUBSTEP
@@ -239,26 +263,26 @@ function roll(state: GameState, shooter: Player, weapon: WeaponId, flight: Fligh
     }
     if (x < -20 || x > t.w + 20 || y > t.h) {
       path.push({ x, y })
-      flights.push({ path, impact: { kind: 'out', x, y }, startT: flight.time })
+      push({ kind: 'out', x, y })
       return { flights, events: [] }
     }
-    if (y + ROLL_R >= lava) {
+    if (y + ROLL_R >= lava || liquidAt(t, x, y) === LAVA || liquidAt(t, x, y + ROLL_R - 1) === LAVA) {
       // la bola rodó (o cayó) hasta la lava: se derrite sin explotar
       path.push({ x, y })
-      flights.push({ path, impact: { kind: 'lava', x, y }, startT: flight.time })
+      push({ kind: 'lava', x, y })
       return { flights, events: [] }
     }
+    if (liquidAt(t, x, y) === WATER) {
+      if (!wet) splashes.push({ x, y, t: time })
+      wet = true
+    } else wet = false
     hit = tankAt(state, x, y)
     if (hit && (hit.id !== shooter.id || time > 0.3)) break
     hit = undefined
     if (n % 4 === 0) path.push({ x, y })
   }
   path.push({ x, y })
-  flights.push({
-    path,
-    impact: hit ? { kind: 'tank', x, y, tankId: hit.id } : { kind: 'terrain', x, y },
-    startT: flight.time,
-  })
+  push(hit ? { kind: 'tank', x, y, tankId: hit.id } : { kind: 'terrain', x, y })
   const endT = flight.time + (path.length - 1) * PATH_DT
   return { flights, events: resolveBlast(state, blastFor(weapon, x, y, endT, hit?.id)) }
 }

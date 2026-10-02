@@ -1,12 +1,15 @@
-import { columnGround, isSolid } from './terrain'
+import { columnTop, isSolid, liquidAt } from './terrain'
 import {
   BARREL_LEN,
+  LAVA,
   MAX_FLIGHT,
   PIVOT_X,
   PIVOT_Y,
   SUBSTEP,
   TANK_H,
   TANK_HALF_W,
+  WATER,
+  WATER_DRAG,
   physicsFor,
   type Flight,
   type Impact,
@@ -61,7 +64,7 @@ export interface FlyOptions {
 // el estado no cambie (la IA la calcula una vez por búsqueda).
 export function skylineOf(terrain: Terrain, players: Player[], props: Prop[] = []): Int16Array {
   const sky = new Int16Array(terrain.w)
-  for (let x = 0; x < terrain.w; x++) sky[x] = columnGround(terrain, x)
+  for (let x = 0; x < terrain.w; x++) sky[x] = columnTop(terrain, x) // v4: con agua y lava
   const lower = (x0: number, x1: number, top: number) => {
     for (let x = Math.max(0, x0); x <= Math.min(terrain.w - 1, x1); x++) if (top < sky[x]) sky[x] = top
   }
@@ -97,19 +100,32 @@ export function fly(opts: FlyOptions): FlightResult {
   let n = 0
   const sky = opts.skyline?.length === terrain.w ? opts.skyline : undefined
   const lava = opts.lava ?? Infinity
+  // v4: agua. wet = el proyectil está en el agua (frena); cada entrada desde el aire es una salpicadura.
+  let wet = liquidAt(terrain, x, y) === WATER
+  const splashes: { x: number; y: number; t: number }[] = []
+  const drag = WATER_DRAG ** SUBSTEP
+  const end = (r: FlightResult): FlightResult => {
+    if (splashes.length > 0) r.splashes = splashes
+    return r
+  }
 
   // el primer tramo, del pivote a la boca, también puede chocar (cañón metido en una pared)
   if (isSolid(terrain, x, y)) {
     return { path, impact: { kind: 'terrain', x, y }, time: 0, vel: { x: vx, y: vy } }
   }
   // tanque hundido en la lava hasta la boca: el proyectil se derrite al salir
-  if (y >= lava) {
+  if (y >= lava || liquidAt(terrain, x, y) === LAVA) {
     return { path, impact: { kind: 'lava', x, y }, time: 0, vel: { x: vx, y: vy } }
   }
 
   while (elapsed < MAX_FLIGHT) {
     const px = x
     const py = y
+    if (wet) {
+      // v4: en el agua la velocidad se multiplica por WATER_DRAG por segundo
+      vx *= drag
+      vy *= drag
+    }
     vx += ax * SUBSTEP
     const rising = vy < 0
     vy += gravity * SUBSTEP
@@ -118,40 +134,47 @@ export function fly(opts: FlyOptions): FlightResult {
     elapsed += SUBSTEP
     n++
 
-    // el atajo del skyline no sabe de la lava: solo vale si el tramo entero va por arriba de ella
+    // el atajo del skyline no sabe de la lava de muerte súbita: solo vale si el tramo entero va por
+    // arriba de ella. La línea de cielo sí cuenta el agua y la lava de la grilla (columnTop).
     if (sky && y < lava && clearAbove(sky, terrain, px, py, x, y)) {
       // todo el tramo va por arriba de lo que puede chocar (y afuera del propio tanque)
       if (owner) armed = true
+      wet = false
     } else for (let i = 1, steps = Math.max(1, Math.ceil(Math.hypot(x - px, y - py))); i <= steps; i++) {
       const f = i / steps
       const sx = px + (x - px) * f
       const sy = py + (y - py) * f
       const t = elapsed - SUBSTEP * (1 - f)
       if (owner && !armed && !inTank(owner, sx, sy)) armed = true
-      if (sy >= lava) {
-        // tocó la superficie de la lava antes que cualquier otra cosa: se derrite
+      const liq = liquidAt(terrain, sx, sy)
+      if (sy >= lava || liq === LAVA) {
+        // tocó la lava (la banda de muerte súbita o la de la grilla) antes que otra cosa: se derrite
         path.push({ x: sx, y: sy })
-        return { path, impact: { kind: 'lava', x: sx, y: sy }, time: t, vel: { x: vx, y: vy } }
+        return end({ path, impact: { kind: 'lava', x: sx, y: sy }, time: t, vel: { x: vx, y: vy } })
       }
+      if (liq === WATER) {
+        if (!wet) splashes.push({ x: sx, y: sy, t })
+        wet = true
+      } else wet = false
       const hit = hitAt(terrain, tanks, solidProps, ownerId, armed, sx, sy)
       if (hit) {
         path.push({ x: sx, y: sy })
-        return { path, impact: hit, time: t, vel: { x: vx, y: vy } }
+        return end({ path, impact: hit, time: t, vel: { x: vx, y: vy } })
       }
     }
     if (opts.stopAtApex && rising && vy >= 0) {
       path.push({ x, y })
-      return { path, impact: { kind: 'out', x, y }, time: elapsed, vel: { x: vx, y: vy }, apex: true }
+      return end({ path, impact: { kind: 'out', x, y }, time: elapsed, vel: { x: vx, y: vy }, apex: true })
     }
     if (n % PATH_EVERY === 0) path.push({ x, y })
     // v3: por un abismo el proyectil cae por debajo del mapa (en el resto, debajo es roca madre)
     if (x < -OUT_MARGIN || x > terrain.w + OUT_MARGIN || (y > terrain.h + OUT_MARGIN && x >= 0 && x < terrain.w)) {
       path.push({ x, y })
-      return { path, impact: { kind: 'out', x, y }, time: elapsed, vel: { x: vx, y: vy } }
+      return end({ path, impact: { kind: 'out', x, y }, time: elapsed, vel: { x: vx, y: vy } })
     }
   }
   path.push({ x, y })
-  return { path, impact: { kind: 'out', x, y }, time: elapsed, vel: { x: vx, y: vy } }
+  return end({ path, impact: { kind: 'out', x, y }, time: elapsed, vel: { x: vx, y: vy } })
 }
 
 // El segmento (ax, ay)-(bx, by) pasa entero por arriba de la línea de cielo.

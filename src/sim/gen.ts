@@ -6,19 +6,22 @@
 // lago y pozo de lava), empalmados a la misma altura. Todo se arma "sin espejar" y al final se
 // espeja según la seed.
 import { Rng, hash2, noise1 } from './rng'
-import { columnGround, createTerrain, fillRect } from './terrain'
+import { flowLiquids } from './flow'
+import { LIQUID, columnGround, createTerrain, fillRect } from './terrain'
 import {
   AIR,
   BEAM,
   BEDROCK,
   BRICK,
   DIRT,
+  LAVA,
   METAL,
   POST,
   SLAT,
   STONE,
   TANK_H,
   TANK_HALF_W,
+  WATER,
   WOOD,
   WORLD_H,
   WORLD_W,
@@ -607,6 +610,9 @@ function placeProp(t: Terrain, s: PropSpec, mirror: boolean, id: number, tanks: 
     if (!clear(t, x, y, w, h)) return null
   }
   if (x < 0 || x + w > t.w) return null
+  // v4: nada de utilería dentro de un líquido (bandera y manga: solo el mástil)
+  const lw = s.kind === 'flag' || s.kind === 'windsock' ? 2 : w
+  for (let yy = Math.max(0, y); yy < Math.min(t.h, y + h); yy++) for (let xx = x; xx < x + lw; xx++) if (LIQUID[t.front[yy * t.w + xx]]) return null
   return { id, kind: s.kind, x, y, w, h, alive: true }
 }
 
@@ -980,6 +986,8 @@ function chain(biome: Biome, rng: Rng, count: number, width: number, height: num
   const spawnXs = spreadSpawns(t, slots, rng, count, ok, (x) => spawnOk(t, x, basins, null))
   const targets = spawnXs.map((x) => flatten(t, x))
   ramps(t, spawnXs, targets, { stop: (x) => nearPit(t, x, 3) || basins.some((q) => x >= q.x0 - 2 && x < q.x1 + 2), long: true })
+  // v4: las cuencas se llenan con su líquido hasta level y el flujo asienta lo que haya quedado suelto
+  fillBasins(t, basins)
 
   // una manga de viento cada 800 px
   for (let w0 = 0; w0 < width; w0 += TRAMO_W) {
@@ -1016,6 +1024,49 @@ function chain(biome: Biome, rng: Rng, count: number, width: number, height: num
       return seg
     }),
   }
+}
+
+// v4: llena cada cuenca: en las columnas [x0, x1), desde la fila level hasta el lecho, el aire pasa a
+// ser agua o lava (lo sólido queda: estructuras y piedras del lecho no se pisan). Después corre el flujo
+// sobre la zona (sin animar) por si alguna celda quedó sin apoyo o con un costado abierto: así nunca
+// queda líquido flotando. No usa el rng: el resto del mapa no cambia.
+function fillBasins(t: Terrain, basins: Basin[]): void {
+  if (basins.length === 0) return
+  let x0 = t.w
+  let x1 = -1
+  let y0 = t.h
+  for (const q of basins) {
+    const m = q.kind === 'lava' ? LAVA : WATER
+    // relleno por inundación desde el aire de la cuenca: así también se llenan los huecos debajo de
+    // las piedras del lecho (si no, el flujo los llenaría bajando la superficie). Sin salir de
+    // [x0, x1) ni subir de level.
+    const stack: number[] = []
+    for (let x = q.x0; x < q.x1; x++) {
+      const i = Math.max(0, q.level) * t.w + x
+      if (t.front[i] === AIR) {
+        t.front[i] = m
+        stack.push(i)
+      }
+    }
+    while (stack.length > 0) {
+      const i = stack.pop()!
+      const x = i % t.w
+      const y = (i - x) / t.w
+      for (let d = 0; d < 4; d++) {
+        const xx = d === 0 ? x - 1 : d === 1 ? x + 1 : x
+        const yy = d === 2 ? y - 1 : d === 3 ? y + 1 : y
+        if (xx < q.x0 || xx >= q.x1 || yy < q.level || yy >= t.h) continue
+        const j = yy * t.w + xx
+        if (t.front[j] !== AIR) continue
+        t.front[j] = m
+        stack.push(j)
+      }
+    }
+    x0 = Math.min(x0, q.x0)
+    x1 = Math.max(x1, q.x1 - 1)
+    y0 = Math.min(y0, q.level)
+  }
+  flowLiquids(t, { seed: { x0, y0, x1, y1: t.h - 1 }, record: false })
 }
 
 // La columna x tiene un abismo a menos de d px.

@@ -1,10 +1,11 @@
 import { PATH_DT } from './ballistics'
 import { generate } from './gen'
-import { dropIntoAbyss, hurt, overAbyss, tankFloor } from './physics'
+import { flowLiquids } from './flow'
+import { dropIntoAbyss, hurt, inLava, inWater, overAbyss, settleAfterFlow, tankFloor } from './physics'
 import { resolveShot } from './weapons'
 import { Rng, hashSeed, irange } from './rng'
 import { aiShop, buyEntry, sellEntry, shopEntry } from './shop'
-import { cloneTerrain, isSolid } from './terrain'
+import { cloneTerrain, isSolid, takeDirty } from './terrain'
 import {
   BIOMES,
   CREWS,
@@ -281,7 +282,11 @@ function move(state: GameState, dir: -1 | 1): StepResult {
     dropIntoAbyss(t, p, events)
     return endTurn(next, events, [], true)
   }
-  if (floor > p.y + MAX_CLIMB) {
+  if (floor > p.y + MAX_CLIMB && inWater(t, nx, floor)) {
+    // v4: se tiró al agua: sin daño de caída ni paracaídas
+    events.push({ type: 'fall', playerId: p.id, from: p.y, to: floor, water: true })
+    p.y = floor
+  } else if (floor > p.y + MAX_CLIMB) {
     const drop = floor - p.y
     const amount = Math.min(p.hp, Math.round(Math.max(0, drop - 12) * FALL_DAMAGE))
     const chute = amount > 0 && p.items.parachute > 0
@@ -314,6 +319,8 @@ function fire(state: GameState, actor: Player): StepResult {
   const weapon = shooter.weapon
   const before = next.players.map((p) => ({ hp: p.hp + p.shield, alive: p.alive }))
   const { flights, events } = resolveShot(next, shooter, weapon)
+  // v4: los líquidos corren y se asientan después de los impactos (y lo que eso derrumbe o queme)
+  settleLiquids(next, events, flights)
   // v3: los que cayeron al abismo con este tiro. La vida que perdieron no es daño que se cobre;
   // si los tiró otro, igual cuenta como kill (y como daño para la calma de la muerte súbita).
   const abyss = new Set<number>()
@@ -341,6 +348,38 @@ function fire(state: GameState, actor: Player): StepResult {
     if (fallback) shooter.weapon = fallback
   }
   return { ...endTurn(next, events, flights, damaged), flights }
+}
+
+// ---------- líquidos (v4) ----------
+
+// Segundos entre el último impacto (o quema) del tiro y el primer parche del flujo, y entre parches.
+export const FLOW_DELAY = 0.15
+export const FLOW_DT = 1 / 30
+
+// Medición del costo del flujo (para sim-check; no afecta la simulación): fires, cuántos movieron
+// algún líquido, ms totales y peor caso.
+export const flowStats = { fires: 0, flows: 0, ms: 0, worst: 0 }
+
+// Corre el flujo después de un fire. Siembra desde todo el mapa (no solo lo que tocó el tiro): así lo
+// que haya quedado sin asentar en un flujo anterior cortado por el tope sigue cayendo. Emite un solo
+// 'flow' (t después de todo lo del tiro, un parche cada FLOW_DT), un 'steam' por cuadro con reacción
+// agua + lava y un 'burn' por cuadro en que la lava quemó algo; después asienta utilería y tanques
+// (lo que la lava quemó puede dejarlos sin apoyo) con t = fin del flujo. Sin cambios, no emite nada.
+function settleLiquids(state: GameState, events: GameEvent[], flights: Flight[]): void {
+  takeDirty(state.terrain)
+  const t0 = performance.now()
+  const report = flowLiquids(state.terrain, { seed: null, record: true })
+  const ms = performance.now() - t0
+  flowStats.fires++
+  flowStats.ms += ms
+  flowStats.worst = Math.max(flowStats.worst, ms)
+  if (!report.changed) return
+  flowStats.flows++
+  const t = shotEnd(events, flights) + FLOW_DELAY
+  events.push({ type: 'flow', t, dt: FLOW_DT, patches: report.patches })
+  for (const s of report.steam) events.push({ type: 'steam', x: Math.round(s.x), y: Math.round(s.y), n: s.n, t: t + s.frame * FLOW_DT })
+  for (const b of report.burns) events.push({ type: 'burn', x: b.x, y: b.y, w: b.w, t: t + b.frame * FLOW_DT })
+  settleAfterFlow(state, events, t + (report.patches.length - 1) * FLOW_DT)
 }
 
 // v3: daño (escudo incluido) que recibió un tanque en estos eventos antes de caer al abismo.
@@ -393,7 +432,11 @@ function endTurn(state: GameState, events: GameEvent[], flights: Flight[], damag
   if (!suddenDeath(state)) state.calm = damaged ? 0 : state.calm + 1
   const left = Math.max(0, SUDDEN_DEATH_CALM - state.calm)
   if (left !== leftBefore) events.push({ type: 'calm', left })
-  if (suddenDeath(state) && state.players.filter((p) => p.alive).length > 1) riseLava(state, events, shotEnd(events, flights) + LAVA_DELAY)
+  if (state.players.filter((p) => p.alive).length > 1) {
+    const t = shotEnd(events, flights) + LAVA_DELAY
+    if (suddenDeath(state)) riseLava(state, events)
+    burnInLava(state, events, t)
+  }
   return advance(state, events)
 }
 
@@ -401,17 +444,28 @@ function endTurn(state: GameState, events: GameEvent[], flights: Flight[], damag
 function shotEnd(events: GameEvent[], flights: Flight[]): number {
   let end = 0
   for (const f of flights) end = Math.max(end, (f.startT ?? 0) + Math.max(0, f.path.length - 1) * PATH_DT)
-  for (const e of events) if ('t' in e && typeof e.t === 'number') end = Math.max(end, e.t)
+  for (const e of events) {
+    if ('t' in e && typeof e.t === 'number') end = Math.max(end, e.t)
+    // v4: el flujo dura un parche cada dt
+    if (e.type === 'flow') end = Math.max(end, e.t + Math.max(0, e.patches.length - 1) * e.dt)
+  }
   return end
 }
 
-function riseLava(state: GameState, events: GameEvent[], t: number): void {
+function riseLava(state: GameState, events: GameEvent[]): void {
   const from = state.lava
   const to = Math.max(0, (from ?? state.height) - LAVA_RISE)
   state.lava = to
   events.push({ type: 'lava', from, to, warn: 0 })
+}
+
+// Al empezar el turno, LAVA_DAMAGE a cada tanque vivo con el piso por debajo de la banda de muerte
+// súbita (si empezó) o (v4) con lava de la grilla bajo o dentro de su caja. Si las dos aplican, una vez.
+function burnInLava(state: GameState, events: GameEvent[], t: number): void {
+  const band = suddenDeath(state) ? state.lava : null
   for (const p of state.players) {
-    if (!p.alive || p.y <= to) continue
+    if (!p.alive) continue
+    if (!((band !== null && p.y > band) || inLava(state.terrain, p))) continue
     const mark = events.length
     hurt(p, LAVA_DAMAGE, events)
     for (let i = mark; i < events.length; i++) {
