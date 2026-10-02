@@ -20,7 +20,7 @@ import type {
   WeaponId,
 } from '../sim/types'
 import { ITEM_ORDER, LAVA, SHOP, SUDDEN_DEATH_CALM, TANK_H, TANK_W, WATER, WEAPONS, fuelFor } from '../sim/types'
-import { AIM_PREVIEW_T, VIEW_H, VIEW_W, type Camera, type RenderFrame } from '../render/types'
+import { AIM_PREVIEW_T, HUD_BAR_H, VIEW_W, type Camera, type RenderFrame } from '../render/types'
 import type { HudModel, HudSide } from '../ui/hud'
 import type { BannerModel, HudExtras, HudNet, MinimapModel, ScoreModel, ShopModel } from '../ui/types'
 import { AiClient } from './ai-client'
@@ -377,6 +377,9 @@ export class Session {
     this.tracerCache = null
     this.resetLava()
     this.resetAbyss()
+    // HUD C: el tablero de abajo tapa HUD_BAR_H filas y la cámara apoya el piso encima; el demo congelado
+    // de QA no tiene tablero y conserva el encuadre de siempre (piso en el borde de abajo)
+    this.cam.bar = demo?.freeze ? 0 : HUD_BAR_H
     this.resetCamera()
     this.demo = demo ? { ...demo, shotDone: false, seed } : null
     this.random = demo ? seededRandom(seed ^ 0x5bd1e995) : Math.random
@@ -935,6 +938,11 @@ export class Session {
     return this.cam.camera
   }
 
+  // HUD C: filas de abajo de la pantalla (px lógicos) que tapa el tablero; 0 en el demo congelado.
+  get hudBar(): number {
+    return this.cam.bar
+  }
+
   // Hay cámara móvil: el mapa es más ancho que la pantalla.
   get scrolls(): boolean {
     return !this.cam.fixed
@@ -1444,6 +1452,7 @@ export class Session {
       zoom: shotZoom(
         flights.map((f) => f.path),
         before.terrain.h,
+        this.cam.bar,
       ),
       settle: null,
       lava: before.lava ?? null,
@@ -1636,7 +1645,8 @@ export class Session {
       const { x0, y0, x1, y1 } = f.info
       const w = Math.max(1, x1 - x0 + 1)
       const h = Math.max(1, y1 - y0 + 1)
-      const zoom = clamp(Math.min(1, (VIEW_W * 0.8) / w, (VIEW_H * 0.8) / h), MIN_ZOOM, 1)
+      // el alto útil es el que no tapa el tablero del HUD
+      const zoom = clamp(Math.min(1, (VIEW_W * 0.8) / w, (this.cam.usableH * 0.8) / h), MIN_ZOOM, 1)
       return { x: (x0 + x1) / 2, y: (y0 + y1) / 2, zoom }
     }
     return null
