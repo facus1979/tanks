@@ -404,6 +404,17 @@ export function abyssAhead(state: GameState, dir: -1 | 1, steps = 1): boolean {
 // Segundos entre el último impacto del tiro y la subida de la lava (el playback la muestra después).
 export const LAVA_DELAY = 0.4
 
+// v5: tope de la ronda. Con 6 u 8 tanques siempre hay alguien a tiro y la calma se reiniciaba una y
+// otra vez: la ronda se estiraba hasta 60 tiros. Desde el turno calmLockTurn (CALM_LOCK_PER_PLAYER por
+// tanque de la partida, nunca antes de CALM_LOCK_MIN) los tiros con daño ya no reinician la calma. Con
+// 2 a 4 tanques el tope queda en CALM_LOCK_MIN = 30 turnos, más que casi todas las rondas (no cambia el
+// ritmo); con 8 queda en 32.
+export const CALM_LOCK_MIN = 30
+export const CALM_LOCK_PER_PLAYER = 4
+export function calmLockTurn(players: number): number {
+  return Math.max(CALM_LOCK_MIN, CALM_LOCK_PER_PLAYER * players)
+}
+
 // La muerte súbita ya empezó: la lava sube en cada turno hasta el fin de la ronda.
 export function suddenDeath(state: GameState): boolean {
   return state.calm >= SUDDEN_DEATH_CALM
@@ -411,7 +422,8 @@ export function suddenDeath(state: GameState): boolean {
 
 // Cierra el turno que termina con este fire (o pase sin munición, o muerte por caída al moverse):
 // 1. cuenta de calma: sin daño a ningún tanque suma 1, con daño vuelve a 0 (salvo muerte súbita ya
-//    empezada, donde queda fija en SUDDEN_DEATH_CALM). Emite 'calm' si cambió lo que falta.
+//    empezada, donde queda fija en SUDDEN_DEATH_CALM; v5: ni desde el turno calmLockTurn, donde sube
+//    igual). Emite 'calm' si cambió lo que falta.
 // 2. si la muerte súbita está activa y la ronda sigue (2+ vivos), empieza el turno siguiente: la lava
 //    aparece en el fondo (la primera vez) o sube LAVA_RISE, y quema LAVA_DAMAGE a cada tanque vivo con
 //    el piso por debajo de la superficie. Esos eventos van al final, LAVA_DELAY s después del último
@@ -420,7 +432,10 @@ export function suddenDeath(state: GameState): boolean {
 // La lava no da ni quita plata: el daño no es de nadie y una muerte por lava no cuenta como kill.
 function endTurn(state: GameState, events: GameEvent[], flights: Flight[], damaged: boolean): StepResult {
   const leftBefore = SUDDEN_DEATH_CALM - state.calm
-  if (!suddenDeath(state)) state.calm = damaged ? 0 : state.calm + 1
+  // v5: pasado calmLockTurn, el daño ya no reinicia la calma: la muerte súbita llega a lo sumo
+  // SUDDEN_DEATH_CALM turnos después, con la cuenta regresiva de siempre (eventos 'calm').
+  const locked = state.turn >= calmLockTurn(state.players.length)
+  if (!suddenDeath(state)) state.calm = damaged && !locked ? 0 : state.calm + 1
   const left = Math.max(0, SUDDEN_DEATH_CALM - state.calm)
   if (left !== leftBefore) events.push({ type: 'calm', left })
   if (state.players.filter((p) => p.alive).length > 1) {
@@ -454,14 +469,27 @@ function riseLava(state: GameState, events: GameEvent[]): void {
 // súbita (si empezó) o (v4) con lava de la grilla bajo o dentro de su caja. Si las dos aplican, una vez.
 // Si la lava lo cubre entero (la superficie de la banda queda por encima de la caja del tanque, o hay
 // lava de la grilla en su fila de arriba), muere en el acto, con escudo o sin él.
+// v5: la lava quema de a uno, del más hundido (piso más abajo) al menos hundido y, a la misma altura, del
+// que tiene menos vida (con escudo) al que tiene más. Si iba a matar al último tanque en pie, ese turno no
+// lo toca: gana la ronda el que aguantó más. Solo es empate si el último está igual de hundido y con la
+// misma vida que uno que acaba de morir (no hay forma de decir quién aguantó más). Con 6 u 8 tanques los
+// últimos suelen terminar en la misma meseta y la lava se los llevaba juntos: 1 de cada 4 rondas de 8
+// terminaba en empate.
 function burnInLava(state: GameState, events: GameEvent[], t: number): void {
   const band = suddenDeath(state) ? state.lava : null
-  for (const p of state.players) {
-    if (!p.alive) continue
-    if (!((band !== null && p.y > band) || inLava(state.terrain, p))) continue
+  const victims = state.players.filter((p) => p.alive && ((band !== null && p.y > band) || inLava(state.terrain, p)))
+  victims.sort((a, b) => b.y - a.y || a.hp + a.shield - (b.hp + b.shield) || a.id - b.id)
+  let fallen: { y: number; life: number } | null = null // el último que mató esta quemadura (vida previa)
+  for (const p of victims) {
+    const life = p.hp + p.shield
+    const engulfed = (band !== null && band <= p.y - TANK_H) || engulfedInLava(state.terrain, p)
+    const dies = engulfed || life <= LAVA_DAMAGE
+    const last = state.players.every((q) => q === p || !q.alive)
+    if (dies && last && !(fallen && fallen.y === p.y && fallen.life === life)) continue
     const mark = events.length
-    if ((band !== null && band <= p.y - TANK_H) || engulfedInLava(state.terrain, p)) kill(p, events, 'lava')
+    if (engulfed) kill(p, events, 'lava')
     else hurt(p, LAVA_DAMAGE, events)
+    if (!p.alive) fallen = { y: p.y, life }
     for (let i = mark; i < events.length; i++) {
       const e = events[i]
       if (e.type === 'damage') {

@@ -110,6 +110,12 @@ const H = TRAMO_H
 
 // Separación mínima entre spawns en los mapas de varios tramos.
 const SPAWN_GAP = 80
+// v5: separación buscada con más de 4 tanques (6 en Mediano, 8 en Grande).
+export const SPAWN_GAP_CROWD = 120
+// Medición (para sim-check; no afecta la generación): cuántos spawns salieron de cada nivel de la
+// búsqueda de spreadSpawns (0 = lugar bueno del tramo, 1-3 = columna que sirve a la separación buscada,
+// 4 = a 64 px, 5-6 = sin el chequeo estricto de piso, 7 = cualquier columna).
+export const spawnStats = { levels: [0, 0, 0, 0, 0, 0, 0, 0] }
 
 interface Tramo {
   terrain: Terrain // TRAMO_W × TRAMO_H, sin espejar
@@ -431,26 +437,42 @@ function spreadSpawns(t: Terrain, slots: number[], rng: Rng, count: number, ok: 
   const span = t.w / n
   const taken: number[] = []
   const away = (x: number, d: number) => taken.every((q) => Math.abs(q - x) >= d)
-  // separación buscada: SPAWN_GAP o un tercio del espacio parejo, lo que sea más
-  const gap = Math.max(SPAWN_GAP, span * 0.32)
+  // separación buscada: SPAWN_GAP o un tercio del espacio parejo, lo que sea más. v5: con más de 4
+  // tanques (Mediano hasta 6, Grande hasta 8) el tercio no llega a SPAWN_GAP_CROWD; ese es el piso
+  // para que ningún tiro de arranque alcance a dos tanques a la vez (ni la nuke: radio 60 + media caja).
+  const gap = Math.max(SPAWN_GAP, span * 0.32, n > 4 ? SPAWN_GAP_CROWD : 0)
   for (let i = 0; i < n; i++) {
     const ideal = span * (i + 0.5) + (rng.next() - 0.5) * span * 0.3
     let best = -1
+    let level = 0
     for (const x of slots) {
       if (!away(x, gap) || Math.abs(x - ideal) > span * 0.34) continue
       if (best < 0 || Math.abs(x - ideal) < Math.abs(best - ideal)) best = x
     }
     // los de las puntas buscan primero de su lado (que los tanques cubran el ancho del mapa)
     const edge = (x: number) => (i === 0 ? x < span : i === n - 1 && n > 1 ? x > t.w - span : true)
-    if (best < 0) best = scanSpawn(t, ideal, (x) => edge(x) && away(x, gap) && ok(x)) ?? -1
-    if (best < 0) best = scanSpawn(t, ideal, (x) => away(x, gap) && ok(x)) ?? -1
-    if (best < 0) best = scanSpawn(t, ideal, (x) => away(x, SPAWN_GAP) && ok(x)) ?? -1
-    // sin lugar libre a SPAWN_GAP: el más cercano que sirva aunque quede más pegado a otro
-    if (best < 0) best = scanSpawn(t, ideal, (x) => away(x, 64) && ok(x)) ?? -1
-    if (best < 0) best = scanSpawn(t, ideal, (x) => away(x, 64) && loose(x)) ?? -1
+    const tries: ((x: number) => boolean)[] = [
+      (x) => edge(x) && away(x, gap) && ok(x),
+      (x) => away(x, gap) && ok(x),
+      (x) => away(x, SPAWN_GAP) && ok(x),
+      // sin lugar libre a SPAWN_GAP: el más cercano que sirva aunque quede más pegado a otro
+      (x) => away(x, 64) && ok(x),
+      (x) => away(x, 64) && loose(x),
+    ]
+    for (let k = 0; best < 0 && k < tries.length; k++) {
+      level = k + 1
+      best = scanSpawn(t, ideal, tries[k]) ?? -1
+    }
     // nunca en un abismo ni en una cuenca, aunque quede pegado a otro tanque
-    if (best < 0) best = scanSpawn(t, ideal, loose, 1) ?? -1
-    if (best < 0) best = Math.round(Math.max(40, Math.min(t.w - 40, ideal)))
+    if (best < 0) {
+      level = 6
+      best = scanSpawn(t, ideal, loose, 1) ?? -1
+    }
+    if (best < 0) {
+      level = 7
+      best = Math.round(Math.max(40, Math.min(t.w - 40, ideal)))
+    }
+    spawnStats.levels[level]++
     taken.push(best)
   }
   taken.sort((a, b) => a - b)

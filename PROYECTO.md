@@ -27,7 +27,7 @@ Broforce: pixel art moderno, personajes con personalidad, explosiones exageradas
 
 ## Reglas
 
-- Vida 100. Gana el último tanque en pie; si no queda ninguno, empate.
+- Vida 100. Gana el último tanque en pie; si no queda ninguno, empate. (V5: la lava no mata al último en pie; ver V5.)
 - Viento nuevo cada turno, visible antes de apuntar. Rango -10 a 10.
 - Ángulo 0 a 180: 0 es horizontal a la derecha, 90 arriba y 180 horizontal a la izquierda. Potencia 0 a 100.
 - El tanque se apoya en el terreno. Si el piso desaparece, cae y recibe daño de caída. Si la tierra lo tapa, aplasta.
@@ -50,7 +50,7 @@ Valores finales de `WEAPONS` (F9). Balance medido con `npm run sim-check` (IA no
 | 7 | Rodadora | 16 | 30 | 2 | al tocar el piso rueda cuesta abajo (segundo vuelo con `startT`) hasta frenar, chocar una pared o un tanque |
 | 8 | Nuke | 60 | 55 | 1 | `nuke` |
 
-La IA: error normal ±6° y ±7 de potencia. Si no tiene tiro, prueba moverse (`ShotPlan.move`, pixels con signo; la sesión manda esos comandos `move` antes de apuntar). Tapada y sin tiro, usa la excavadora. Elige el arma verificando con la simulación completa y con un costo por munición especial.
+La IA: error normal ±7° y ±8 de potencia (V5; antes ±6° y ±7). Si no tiene tiro, prueba moverse (`ShotPlan.move`, pixels con signo; la sesión manda esos comandos `move` antes de apuntar). Tapada y sin tiro, usa la excavadora. Elige el arma verificando con la simulación completa y con un costo por munición especial.
 
 ### Rondas y tienda (F10)
 
@@ -194,7 +194,7 @@ Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 
 
 - **Tamaño por partida**, elegido en el menú: Chico 800×450 (el mapa de v1), Mediano 1600×450, Grande 2400×450. Alto fijo. El tamaño viaja en el estado (`terrain.w/h`); `WORLD_W/WORLD_H` dejan de usarse fuera de la pantalla.
 - **Alcance**: potencia 100 llega siempre de punta a punta. `POWER_SCALE` y `GRAVITY` se derivan del ancho del mapa de modo que un tiro de lado a lado a 45° dure ~3 s; con 800 dan los valores de v1. `WIND_ACCEL` escala igual. Shift ajusta ángulo y potencia a 1/5 de velocidad.
-- **Muerte súbita**: tras 5 tiros seguidos sin daño a tanques, la lava sube 18 px desde el fondo en cada turno y quema 20 por turno a los tanques sumergidos; los proyectiles que la tocan se derriten sin explotar. La lava no da ni quita plata ni cuenta como kill. Toda ronda termina.
+- **Muerte súbita**: tras 5 tiros seguidos sin daño a tanques, la lava sube 18 px desde el fondo en cada turno y quema 20 por turno a los tanques sumergidos; los proyectiles que la tocan se derriten sin explotar. La lava no da ni quita plata ni cuenta como kill. Toda ronda termina. V5: desde el turno `calmLockTurn` (4 por tanque, nunca antes del 30) el daño ya no reinicia la calma.
 - **Hasta 8 jugadores**: 4 colores y 4 tripulantes nuevos; HUD rediseñado para 5-8 placas. Spawns repartidos a lo ancho.
 - **Líquidos que fluyen**: agua y lava son materiales de la grilla. Se asientan con un autómata celular determinista al final de cada `fire`, con tope de iteraciones; los cambios salen como evento para que el render los anime.
 
@@ -251,6 +251,12 @@ Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 
     - Pendientes: vetas en la lava honda (tablas de la banda, ya anotado en V2); no hay derrumbe de tierra en la sim, así que "tierra sobre lava → piedra" solo aplica al `build`; posibles mejoras de contrato: `Impact.water` (explosión sumergida exacta) y salpicaduras en `RenderFrame`.
 - **V5 Hasta 8 jugadores.** Arte, HUD, lobby local y online.
   - Decidido (2026-10-02): Chico hasta 4, Mediano hasta 6, Grande hasta 8 (`MAX_PLAYERS_BY_SIZE`); el ritmo de la IA no cambia. Tripulantes nuevos: Comando (boina negra), Tanquista (casco de cuero y antiparras), Piloto (casco y pelo recogido), Coronel (bigote blanco). Colores nuevos: violeta, naranja, turquesa y rosa. Contrato: `CrewId`/`CREWS` de 8, `MAX_PLAYERS`, `MAX_PLAYERS_BY_SIZE`, `TANK_COLORS` de 8 (`src/sim/types.ts`), `tank.bodies`/`barrels` de 8 en el manifiesto, `LobbyState.slots` siempre de 8.
+  - sim (2026-10-02):
+    - Spawns: con más de 4 tanques la separación buscada es `SPAWN_GAP_CROWD` = 120 px (más que el alcance de cualquier explosión entre dos tanques: ningún tiro de arranque pega a dos). En 300 mapas por caso (Mediano 6, Grande 8): separación mínima 120, mediana ~183, todos con lugar bueno (sin cimas, estructuras, abismos ni cuencas); el hueco más grande entre vecinos es 1,4× el espacio parejo de mediana y 2,34× en el peor caso (lago + abismo seguidos). Chico y Mediano/Grande con 2-4 jugadores, byte a byte iguales (hash fijo en `sim-check`). `spawnStats` mide de qué nivel de la búsqueda sale cada spawn.
+    - IA: había un sesgo de posición: entre tiros con el mismo puntaje (impacto directo) la búsqueda se quedaba con el de menor ángulo, que hacia la izquierda es un globo vertical; la punta izquierda ganaba 2 de cada 3 rondas en todos los tamaños. Ahora desempata por el tiro más plano hacia los dos lados (`flatTie`) y se queda con la mejor posición al moverse (no la primera). Prioridad de blancos (`priorities`): cercanía (+0,15), rival entero (+0,3 · vida) y líder de rondas (+0,1); matar suma 40 puntos de daño (`KILL_BONUS`) también en la estimación. Error de la normal ±7° / ±8 para recuperar el ritmo de antes. Tope de flujos simulados por turno en Grande 4 (antes 8): IA difícil con 8 en Grande, peor caso ~150-190 ms (la versión anterior en los mismos estados, ~270).
+    - Reglas: tope de calma `calmLockTurn` = máx(30, 4 · tanques): desde ese turno el daño no reinicia la calma (con 2-4 tanques casi nunca llega; con 8 corta las rondas de hasta 60 tiros). La lava quema del más hundido al menos hundido y no mata al último en pie (gana el que aguantó más; empate solo si está igual de hundido y con la misma vida que el último que murió): con 8 tanques 1 de cada 4 rondas terminaba en empate. Economía, orden de turnos y ronda inicial no cambian (plata media por ronda: 4 tanques ~610-690, 8 tanques ~560-580).
+    - `sim-check` 38308/38308. Tiros por partida (10-20 partidas): 2 / 4 tanques Chico 10,7 / 17,7, Mediano 10,5 / 21,0, Grande 11,5 / 20,6; Mediano 6: 27,7 (máx 38); Grande 8: 34,1 (máx 41). Con 40 rondas: Mediano 6 29,1 (máx 42), Grande 8 34,6 (máx 42), empates 0; con 3 rondas y tienda, Grande 8 38,6 tiros por ronda y el ganador repartido entre posiciones e ids. Muerte súbita: Mediano 6 en ~70% de las rondas, Grande 8 en ~95%.
+    - Pendientes: `session.ts` sigue recortando a 4 casilleros y mostrando `SUDDEN_DEATH_CALM - calm` (correcto: el tope de calma usa la misma cuenta); con 6 en Mediano y 1 ronda el jugador 0 (punta y primer turno) gana ~40% (con 3 rondas se reparte).
 
 ### Pulido v2 (2026-10-02)
 
