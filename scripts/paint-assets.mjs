@@ -4,7 +4,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Canvas, OUT, mix, makeRand, flatTarget, paintForestBackground, TANK_W, TANK_H, PIVOT, CREW_X, antenna, STRIPES, bayer, rnd, TREAD_H } from './lookdev/pixel.mjs'
+import { Canvas, OUT, mix, makeRand, flatTarget, paintForestBackground, TANK_W, TANK_H, PIVOT, CREW_X, antenna, STRIPES, bayer, rnd, TREAD_H, HULLS } from './lookdev/pixel.mjs'
 import { tankBody, tankWreck, barrelGeometry, barrelStrip, treadStrip, crewSprite, portrait, BARREL_FRAMES, TREAD_FRAMES } from './lookdev/characters.mjs'
 import * as TX from './lookdev/textures.mjs'
 import { BIOME_PAINTERS, BIOME_BG, BIOME_PALETTE, BG_W, BG_H } from './lookdev/biomes.mjs'
@@ -35,10 +35,17 @@ const expectSize = (name, cv, w, h) => {
 
 // Constantes que tienen que coincidir con src/sim/types.ts
 const SIM = { TANK_W: 28, TANK_H: 20, PIVOT_X: 5, PIVOT_Y: 17, BARREL_LEN: 14 }
-const CREWS = ['bandana', 'sarge', 'rookie', 'desert']
+// v5: 8 tripulantes y 8 colores de tanque (índice = player.id, orden de TANK_COLORS)
+const CREWS = ['bandana', 'sarge', 'rookie', 'desert', 'commando', 'goggles', 'pilot', 'colonel']
+const TANK_COLORS = [0x3d8cf0, 0xe23d3d, 0xe2c13d, 0x3dbe5a, 0xa65ae0, 0xf0903a, 0x3ad0c8, 0xe85aa0]
+const COLORS = TANK_COLORS.length
 const BIOMES = ['forest', 'jungle', 'industrial']
 const MATERIAL_IDS = { AIR: 0, DIRT: 1, STONE: 2, BRICK: 3, WOOD: 4, SLAT: 5, BEAM: 6, POST: 7, METAL: 8, BEDROCK: 9 }
 
+if (STRIPES.length !== COLORS || HULLS.length !== COLORS) throw new Error('hacen falta un casco y una franja por color de TANK_COLORS')
+STRIPES.forEach(([, c], i) => {
+  if (c !== TANK_COLORS[i]) throw new Error(`la franja ${i} no es el color ${TANK_COLORS[i].toString(16)} de TANK_COLORS`)
+})
 if (TANK_W !== SIM.TANK_W || TANK_H !== SIM.TANK_H) throw new Error('el tanque no mide TANK_W × TANK_H')
 if (PIVOT.x - TANK_W / 2 !== SIM.PIVOT_X || TANK_H - PIVOT.y !== SIM.PIVOT_Y) throw new Error('el pivote no coincide con PIVOT_X/PIVOT_Y')
 
@@ -47,7 +54,7 @@ if (PIVOT.x - TANK_W / 2 !== SIM.PIVOT_X || TANK_H - PIVOT.y !== SIM.PIVOT_Y) th
 const geo = barrelGeometry()
 const bodies = []
 const barrels = []
-for (let i = 0; i < 4; i++) {
+for (let i = 0; i < COLORS; i++) {
   const b = tankBody(i)
   expectSize(`cuerpo ${i}`, b, TANK_W, TANK_H)
   bodies.push(save(`tank/body-${i}.png`, b))
@@ -55,7 +62,7 @@ for (let i = 0; i < 4; i++) {
 }
 const wreck = save('tank/wreck.png', tankWreck())
 // orugas: una tira de 4 frames por color (orden de bodies); van en las últimas TREAD_H filas del cuerpo
-const treadFrames = [0, 1, 2, 3].map((i) => strip(`tank/treads-${i}.png`, treadStrip(i), { w: TANK_W, h: TREAD_H }, TREAD_FRAMES))
+const treadFrames = TANK_COLORS.map((_, i) => strip(`tank/treads-${i}.png`, treadStrip(i), { w: TANK_W, h: TREAD_H }, TREAD_FRAMES))
 
 const tank = {
   bodies,
@@ -185,7 +192,7 @@ function label(cv, str, x, y) {
 }
 
 // Arma un tanque como lo va a hacer el renderer: antena, cañón, cuerpo, tripulante; espejado si mira a la izquierda.
-const barrelCanvases = [0, 1, 2, 3].map((i) => barrelStrip(i, geo))
+const barrelCanvases = TANK_COLORS.map((_, i) => barrelStrip(i, geo))
 const crewCanvases = Object.fromEntries(CREWS.map((id) => [id, crewSprite(id)]))
 function assemble(cv, i, crew, x0, ground, angle) {
   const flip = angle > 90

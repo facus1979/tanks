@@ -170,11 +170,91 @@ const ROOKIE_PAL = {
 }
 const DESERT_PAL = { s: 0xb8784e, S: 0x8a5236, H: 0xe8dcc0, J: 0xb4a482, r: 0xc8302a, B: 0x241810, n: 0x8a7650 }
 
+// v5: cuatro tripulantes más. Cada uno con una silueta propia a 12×12: boina caída de un lado (comando),
+// antiparras redondas y orejeras (tanquista), casco blanco con visor y trenza (piloto), gorra de plato con
+// escudo y bigote blanco (coronel).
+const CREW_COMMANDO = [
+  '...kkkkk....',
+  '..kbbbbbkk..',
+  '.kbBbbbbbbk.',
+  'kbBbbbbbbbbk',
+  '.kykkkkkkbbk',
+  '..ksgsssSkk.',
+  '..kGwGGwGk..',
+  '..kgsssgSk..',
+  '..ksskkSSk..',
+  '.knkTTTTknk.',
+  'knnnkkkknnnk',
+  'knqnnnnnnqnk',
+]
+const COMMANDO_PAL = {
+  s: 0xc88a60, S: 0x96603f, T: 0x6e4430, b: 0x2a2a30, B: 0x4a4a52, y: 0xe2c13d,
+  g: 0x4e6a2c, G: 0x22301a, n: 0x2e3228, q: 0x7a6a44,
+}
+const CREW_GOGGLES = [
+  '...kkkkkk...',
+  '..kLlLlLlk..',
+  '.kyyylLyyyk.',
+  '.kyGyLLyGyk.',
+  '.kyyyllyyyk.',
+  '.kLskssksLk.',
+  '.kLssssSsLk.',
+  '.kLskwwkSLk.',
+  '.kLkTTTTkLk.',
+  '.kffkkkkffk.',
+  'knffnnnnffnk',
+  'knnnnnnnnnnk',
+]
+const GOGGLES_PAL = {
+  s: 0xe0a07a, S: 0xb07050, T: 0x8a5040, L: 0x8a5a32, l: 0x5e3a1e, y: 0xc8a040, G: 0x8ad0e0,
+  f: 0xe8dcc0, n: 0x5e3e24,
+}
+const CREW_PILOT = [
+  '...kkkkkk...',
+  '..kWWWrWhk..',
+  '.kWWWWrWWhk.',
+  '.kVVVvVVVVk.',
+  '.kkkkkkkkkk.',
+  'kBWskssksWk.',
+  'kbWsssSssWk.',
+  'kBkssLLSkk..',
+  'kbkkSSSSk...',
+  'kBnkkkkknk..',
+  'kbnnnnnnnnk.',
+  'knnnnnnnnnnk',
+]
+const PILOT_PAL = {
+  s: 0xe8b08c, S: 0xc08060, W: 0xe8e8e4, h: 0xa8acb0, r: 0xc8302a, V: 0x4a3426, v: 0xe0a040,
+  L: 0xc0605a, B: 0xf0c860, b: 0xb8862e, n: 0x6e7c58,
+}
+const CREW_COLONEL = [
+  '..kkkkkkkk..',
+  '.kCCCyCCCck.',
+  'kCCCyYyCCcck',
+  '.krrryrrrrk.',
+  '.kvvvvvvvvk.',
+  '..kggssggk..',
+  '..kskssksk..',
+  '.kMMMsSMMMk.',
+  '.kMMMkkMMMk.',
+  '.kekkkkkkek.',
+  'knnnnnnyrnnk',
+  'knnnnnnnnnnk',
+]
+const COLONEL_PAL = {
+  s: 0xe2a484, S: 0xb47458, C: 0x6e6c46, c: 0x4a4a2c, y: 0xe2c13d, Y: 0xfff1a8, r: 0x8a1e1a,
+  v: 0x1c1c1c, g: 0xb8b4ac, M: 0xf0ece4, e: 0xc8302a, n: 0x5a5834,
+}
+
 export const CREW_DEFS = {
   bandana: { rows: CREW_BANDANA, pal: BANDANA_PAL },
   sarge: { rows: CREW_SARGE, pal: SARGE_PAL },
   rookie: { rows: CREW_ROOKIE, pal: ROOKIE_PAL },
   desert: { rows: CREW_DESERT, pal: DESERT_PAL },
+  commando: { rows: CREW_COMMANDO, pal: COMMANDO_PAL },
+  goggles: { rows: CREW_GOGGLES, pal: GOGGLES_PAL },
+  pilot: { rows: CREW_PILOT, pal: PILOT_PAL },
+  colonel: { rows: CREW_COLONEL, pal: COLONEL_PAL },
 }
 
 export function crewSprite(id) {
@@ -429,7 +509,270 @@ function portraitDesert() {
   return cv
 }
 
-const PORTRAITS = { bandana: portraitBandana, sarge: portraitSarge, rookie: portraitRookie, desert: portraitDesert }
+// ---------- retratos v5 ----------
+
+// Mandíbula cuadrada: ensancha las últimas filas de la cabeza (21–25) con el mismo sombreado de portraitBase.
+function squareJaw(cv, skin) {
+  const jaw = { 21: [8, 23], 22: [8, 23], 23: [9, 22], 24: [9, 22], 25: [10, 21] }
+  for (const [ys, [l, r]] of Object.entries(jaw)) {
+    const y = +ys
+    for (let x = l; x <= r; x++) {
+      let c = skin.s
+      if (x - l <= 1 && y <= 22) c = skin.l
+      if (r - x <= 2) c = skin.S
+      if (r - x === 0) c = skin.T
+      if (y >= 24) c = skin.S
+      if (y === 25) c = skin.T
+      cv.put(x, y, c)
+    }
+  }
+  // quiebre del ángulo de la mandíbula
+  cv.put(9, 22, skin.S)
+  cv.put(22, 22, skin.T)
+}
+
+function portraitCommando() {
+  const skin = { s: 0xc88a60, l: 0xdca078, S: 0x96603f, T: 0x6e4430 }
+  const cv = portraitBase(skin, { m: 0x3a3e32, n: 0x2a2e24, N: 0x1c1f18 })
+  squareJaw(cv, skin)
+  // cuello alto del buzo, enrollado
+  for (let x = 10; x <= 21; x++) {
+    cv.put(x, 26, x % 3 === 0 ? 0x1c1f18 : 0x2a2e24)
+    cv.put(x, 27, x % 3 === 1 ? 0x1c1f18 : 0x3a3e32)
+  }
+  // correaje del arnés con hebillas
+  for (let y = 27; y <= 31; y++) {
+    for (const x of [6, 7, 24, 25]) cv.put(x, y, x === 6 || x === 24 ? 0x8a7a50 : 0x5a4c30)
+  }
+  g(cv, ['yy', 'YY'], 6, 29, { y: 0xa88a14, Y: 0xe2c13d })
+  g(cv, ['yy', 'YY'], 24, 29, { y: 0xa88a14, Y: 0xe2c13d })
+  // pintura de camuflaje: franja oscura sobre los ojos y dos rayas en diagonal por mejilla
+  const G1 = 0x4e6a2c
+  const G2 = 0x2a3a1a
+  const BK = 0x1a1e14
+  for (let x = 8; x <= 23; x++) {
+    cv.put(x, 13, x === 8 || x === 23 ? skin.S : G2)
+    cv.put(x, 14, [11, 17, 21].includes(x) ? G2 : BK)
+    cv.put(x, 15, [9, 14, 19].includes(x) ? G1 : x % 2 ? BK : G2)
+  }
+  for (let k = 0; k < 5; k++) {
+    for (const [x, c] of [[12 - k, G1], [11 - k, G1], [14 - k, G2], [13 - k, G2]]) if (x >= 8) cv.put(x, 16 + k, c)
+    for (const [x, c] of [[19 + k, G1], [20 + k, G1], [17 + k, G2], [18 + k, G2]]) if (x <= 22 && x !== 17) cv.put(x, 16 + k, c)
+  }
+  for (let x = 10; x <= 14; x++) cv.put(x, 12, G1)
+  // boina negra ladeada: la copa se vuelca sobre la oreja derecha
+  const beret = { light: 0x4a4a52, mid: 0x2a2a30, dark: 0x18181c }
+  dome(cv, { 1: [10, 21], 2: [8, 24], 3: [7, 26], 4: [6, 27], 5: [6, 28], 6: [6, 28], 7: [6, 28], 8: [6, 28] }, beret)
+  for (let x = 12; x <= 25; x += 3) cv.put(x, 2 + ((x >> 1) & 1), beret.dark)
+  cv.put(15, 0, beret.mid)
+  // borde de cuero
+  for (let x = 6; x <= 21; x++) cv.put(x, 9, x % 4 === 1 ? 0x4a3a2c : 0x2a2018)
+  for (let x = 6; x <= 21; x++) cv.put(x, 10, OUT)
+  // lo que cuelga del costado, tapando la oreja
+  const drape = { 9: [21, 28], 10: [22, 28], 11: [23, 27], 12: [24, 27], 13: [25, 26] }
+  for (const [ys, [l, r]] of Object.entries(drape)) for (let x = l; x <= r; x++) cv.put(x, +ys, x === l || +ys >= 12 ? beret.dark : beret.mid)
+  // insignia: escudo dorado con fondo rojo sobre la sien izquierda
+  g(cv, ['.kkkk.', 'kyYYyk', 'kyrRyk', 'kyrryk', '.kyyk.', '..kk..'], 8, 3, { y: 0xa88a14, Y: 0xfff1a8, r: 0x8a1e1a, R: 0xe23d3d })
+  castShadow(cv, 11, skin)
+  // cejas rectas y bajas, mirada clavada
+  g(cv, ['MMMMM.', '.MMMMM'], 9, 11, { M: 0x1a120c })
+  g(cv, ['.MMMMM', 'MMMMM.'], 17, 11, { M: 0x1a120c })
+  g(cv, ['kwek'], 10, 14, { w: 0xf2ece2, e: 0x2a1c14 })
+  g(cv, ['kewk'], 18, 14, { w: 0xf2ece2, e: 0x2a1c14 })
+  // nariz quebrada y boca apretada, comisuras hacia abajo
+  g(cv, ['.S', '.S', 'SS', 'lSS', 'TST'], 15, 15, skin)
+  g(cv, ['.kkkkkk.', 'k......k'], 12, 21, {})
+  for (let x = 13; x <= 18; x++) cv.put(x, 23, skin.S)
+  // barba de tres días en la mandíbula
+  for (let y = 23; y <= 25; y++)
+    for (let x = 9; x <= 22; x++) if (cv.alpha(x, y) && cv.get(x, y) !== OUT && rnd(x, y, 901) > 0.55) cv.put(x, y, skin.T)
+  // cicatriz que cruza la ceja derecha
+  g(cv, ['l.', '.l', '.l'], 20, 11, { l: 0xe8b090 })
+  cv.outline(OUT)
+  return cv
+}
+
+function portraitGoggles() {
+  const skin = { s: 0xe0a07a, l: 0xf0b890, S: 0xb07050, T: 0x8a5040 }
+  const cv = portraitBase(skin, { m: 0x7a5232, n: 0x5e3e24, N: 0x402814 })
+  // campera de cuero con cuello de corderito
+  g(cv, ['FFfffk......kfffFF', '.FFfffk....kfffFF.', '..FFffk....kffFF..', '....FFk....kFF....'], 7, 25, { F: 0xf4ecd8, f: 0xd8c8a4 })
+  for (let y = 28; y <= 31; y++) cv.put(16, y, y % 2 ? 0x2a1a0e : 0x9a7a52)
+  // casco de cuero acolchado: rollos que van de adelante hacia atrás
+  const leather = { light: 0xa47248, mid: 0x7a5030, dark: 0x4e321c }
+  dome(cv, { 1: [11, 20], 2: [9, 22], 3: [8, 23], 4: [7, 24], 5: [7, 24], 6: [7, 24], 7: [7, 24], 8: [7, 24], 9: [7, 24], 10: [7, 24] }, leather)
+  for (let y = 1; y <= 10; y++)
+    for (const x of [11, 15, 16, 20]) if (cv.alpha(x, y)) cv.put(x, y, x === 15 ? leather.light : leather.dark)
+  for (let x = 8; x <= 23; x++) cv.put(x, 11, x % 3 === 0 ? 0x3a2414 : leather.dark)
+  // orejeras que cuelgan a los costados de la cara, con costura
+  for (const [x0, side] of [[4, -1], [22, 1]]) {
+    for (let y = 9; y <= 22; y++)
+      for (let x = x0; x <= x0 + 5; x++) {
+        const bottom = y >= 21 && (x === x0 || x === x0 + 5)
+        if (bottom) continue
+        const rel = (x - x0) / 5
+        let c = leather.mid
+        if ((side < 0 && rel < 0.3) || (side > 0 && rel < 0.2)) c = leather.light
+        if ((side < 0 && rel > 0.8) || (side > 0 && rel > 0.7) || y >= 21) c = leather.dark
+        if (y > 10 && y < 21 && (x === x0 + 1 || x === x0 + 4) && y % 2 === 0) c = 0xc8a070
+        cv.put(x, y, c)
+      }
+  }
+  // correa de la orejera derecha, suelta, con hebilla
+  g(cv, ['d', 'd', 'y', 'd'], 25, 23, { d: 0x3a2414, y: 0xc8a040 })
+  castShadow(cv, 12, skin)
+  // antiparras redondas levantadas sobre la frente, con elástico
+  for (let x = 4; x <= 27; x++) if (cv.alpha(x, 6)) cv.put(x, 6, x % 2 ? 0x2a2420 : 0x3e3630)
+  const lens = (cx, cy) => {
+    for (let dy = -3; dy <= 3; dy++)
+      for (let dx = -3; dx <= 3; dx++) {
+        const d = dx * dx + dy * dy
+        if (d > 11) continue
+        let c = d >= 6 ? (dx + dy < 0 ? 0xe8c060 : 0xa07a28) : 0x6aa8b8
+        if (d < 6 && dx + dy <= -2) c = 0xc8f0f8
+        if (d < 6 && dx + dy >= 2) c = 0x3a6878
+        cv.put(cx + dx, cy + dy, c)
+      }
+    cv.put(cx - 1, cy - 1, 0xffffff)
+  }
+  lens(12, 6)
+  lens(19, 6)
+  // cejas levantadas, ojos atentos y sonrisa ladeada
+  g(cv, ['.MMM', 'M...'], 10, 12, { M: 0x6a3a1c })
+  g(cv, ['MMM.', '...M'], 18, 12, { M: 0x6a3a1c })
+  g(cv, ['kkkk', 'wekw'], 10, 14, { w: 0xf2ece2, e: 0x3a6a3a })
+  g(cv, ['kkkk', 'wkew'], 18, 14, { w: 0xf2ece2, e: 0x3a6a3a })
+  g(cv, ['.S', '.S', 'lSS', 'STS'], 15, 16, skin)
+  g(cv, ['.........k', 'kkkkkkkkk.', '.kwwwwwk..', '..kkkkk...'], 12, 20, { w: 0xf8f4ee })
+  // hollín en la mejilla y la nariz
+  for (const [x, y, a] of [[10, 18, 0.5], [11, 18, 0.6], [11, 19, 0.4], [12, 18, 0.35], [20, 17, 0.3], [21, 18, 0.4]]) cv.tint(x, y, 0x2a2420, a)
+  cv.outline(OUT)
+  return cv
+}
+
+function portraitPilot() {
+  const skin = { s: 0xe8b08c, l: 0xf8c8a4, S: 0xc08060, T: 0x9a6048 }
+  const cv = portraitBase(skin, { m: 0x7a8a64, n: 0x5e6c4c, N: 0x404a34 })
+  // mentón más fino
+  for (const [x, y] of [[10, 23], [21, 23], [11, 24], [20, 24]]) cv.clear(x, y)
+  for (const [x, y] of [[12, 25], [19, 25]]) cv.put(x, y, skin.T)
+  // mono de vuelo: cuello y cierre, parche en el pecho
+  g(cv, ['kmmk......kmmk', '.kmmk....kmmk.', '..kk......kk..'], 9, 26, { m: 0x8a9a74 })
+  for (let y = 27; y <= 31; y++) cv.put(16, y, y % 2 ? 0x2a3020 : 0xb0b8a0)
+  g(cv, ['.kkk.', 'kRyRk', 'kyRyk', '.kkk.'], 21, 27, { R: 0xc8302a, y: 0xe2c13d })
+  // trenza rubia que sale de atrás del casco y cae sobre el hombro izquierdo
+  const hair = { H: 0xf0c860, h: 0xc8963a, d: 0x8a6024 }
+  g(cv, ['.hH', 'hHh', 'dhh'], 5, 15, hair)
+  for (let k = 0; k < 5; k++) g(cv, ['.hHh', 'hHHd', 'dhd.'], 3 + (k & 1), 18 + k * 3, hair)
+  g(cv, ['.r.', 'rRr'], 4, 30, { r: 0x8a1e1a, R: 0xc8302a })
+  // casco blanco con franja roja, orejeras y visor polarizado levantado
+  const shell = { light: 0xffffff, mid: 0xe4e4e0, dark: 0xa8acb0 }
+  dome(cv, { 0: [12, 19], 1: [9, 22], 2: [8, 23], 3: [7, 24], 4: [6, 25], 5: [6, 25], 6: [6, 25], 7: [6, 25], 8: [6, 25], 9: [6, 25], 10: [6, 25] }, shell)
+  for (let y = 0; y <= 4; y++) {
+    cv.put(15, y, 0xc8302a)
+    cv.put(16, y, 0x8a1e1a)
+  }
+  for (let y = 11; y <= 19; y++)
+    for (let x = 5; x <= 9; x++) {
+      if ((y === 19 && (x === 5 || x === 9)) || (x === 9 && y < 13)) continue
+      cv.put(x, y, x <= 6 ? shell.mid : x === 9 ? shell.dark : 0xc8c8c4)
+    }
+  for (let y = 11; y <= 19; y++)
+    for (let x = 22; x <= 26; x++) {
+      if ((y === 19 && (x === 22 || x === 26)) || (x === 22 && y < 13)) continue
+      cv.put(x, y, x >= 25 ? shell.dark : x === 22 ? shell.mid : 0xc8c8c4)
+    }
+  g(cv, ['.kk.', 'kddk', 'kddk', '.kk.'], 5, 14, { d: 0x5a5e62 })
+  g(cv, ['.kk.', 'kddk', 'kddk', '.kk.'], 23, 14, { d: 0x5a5e62 })
+  // visor: banda ahumada con reflejo dorado en diagonal
+  for (let y = 5; y <= 9; y++)
+    for (let x = 7; x <= 24; x++) {
+      const t = (x - 7 - (y - 5) * 2 + 40) % 18
+      let c = y === 5 || y === 9 ? OUT : 0x3a2a24
+      if (y > 5 && y < 9 && (t === 3 || t === 4)) c = 0xe0a040
+      else if (y > 5 && y < 9 && t === 5) c = 0x8a5a2a
+      else if (y === 6) c = mix(0x3a2a24, 0x8a6a4a, 0.4)
+      cv.put(x, y, c)
+    }
+  cv.put(6, 7, 0x6a6e72)
+  cv.put(25, 7, 0x6a6e72)
+  for (let x = 7; x <= 24; x++) cv.put(x, 11, OUT)
+  castShadow(cv, 12, skin)
+  // mechones del flequillo bajo el casco
+  g(cv, ['HhH.Hh', '.h...h'], 9, 12, hair)
+  // cejas finas en ángulo, pestañas y mirada decidida
+  g(cv, ['MMM..', '...MM'], 10, 13, { M: 0x8a6024 })
+  g(cv, ['..MMM', 'MM...'], 17, 13, { M: 0x8a6024 })
+  g(cv, ['kkkkk', '.wEkw'], 9, 15, { w: 0xf8f4ee, E: 0x3a8a6a })
+  g(cv, ['kkkkk', 'wkEw.'], 18, 15, { w: 0xf8f4ee, E: 0x3a8a6a })
+  g(cv, ['S', 'S', 'TS'], 16, 17, skin)
+  // labios cerrados y firmes
+  g(cv, ['LmmmmL', '.llll.'], 13, 21, { L: 0xb06a5a, m: 0x7a2e2e, l: 0xc8786c })
+  for (const [x, y] of [[10, 19], [21, 19]]) cv.put(x, y, 0xe89a88)
+  cv.outline(OUT)
+  return cv
+}
+
+function portraitColonel() {
+  const skin = { s: 0xe2a484, l: 0xf0bc9c, S: 0xb47458, T: 0x8c5440 }
+  const cv = portraitBase(skin, { m: 0x6a6844, n: 0x52502f, N: 0x383620 })
+  // saco con solapas, camisa, corbata, palas rojas y barra de condecoraciones
+  g(cv, ['eeLk.wwww.kLee', '.eeLkwttwkLee.', '..eLkwttwkLe..', '...Lkwttwk.L..'], 9, 26, { e: 0xc8302a, L: 0x7a7850, w: 0xf2ece2, t: 0x6a1a1a })
+  g(cv, ['rbyg', 'gyrb'], 21, 29, { r: 0xc8302a, b: 0x2f7ae0, y: 0xe2c13d, g: 0x3dbe5a })
+  for (const y of [29, 31]) cv.put(12, y, 0xe2c13d)
+  // patillas canosas
+  g(cv, ['WW', 'Ww', 'Ww', 'w.'], 7, 10, { W: 0xf0ece4, w: 0xb8b4ac })
+  g(cv, ['WW', 'wW', 'wW', '.w'], 23, 10, { W: 0xf0ece4, w: 0xb8b4ac })
+  // gorra de plato: copa ancha, banda roja, cordón dorado y visera negra con laureles
+  const crown = { light: 0x8e8c5c, mid: 0x6e6c46, dark: 0x4a4a2c }
+  dome(cv, { 0: [10, 21], 1: [6, 25], 2: [4, 27], 3: [4, 27], 4: [5, 26], 5: [6, 25] }, crown)
+  for (let x = 6; x <= 25; x++) {
+    cv.put(x, 6, x > 22 ? 0x5a1414 : 0x8a1e1a)
+    cv.put(x, 7, x > 22 ? 0x5a1414 : 0x8a1e1a)
+    cv.put(x, 8, x % 2 ? 0xe2c13d : 0xa88a14)
+  }
+  for (let x = 6; x <= 25; x++) cv.put(x, 9, x < 9 || x > 23 ? 0x0e0e0e : 0x1c1c1c)
+  for (let x = 7; x <= 24; x++) cv.put(x, 10, x >= 9 && x <= 13 ? 0x5a5a5a : 0x0e0e0e)
+  for (let x = 9; x <= 22; x += 2) cv.put(x, 9, 0xc8a030)
+  // escudo
+  g(cv, ['..kk..', '.kyyk.', 'kyYYyk', 'kyrryk', 'kyrryk', '.kyyk.', '..kk..'], 13, 1, { y: 0xc8a030, Y: 0xfff1a8, r: 0x8a1e1a })
+  g(cv, ['y......y', '.y....y.'], 12, 5, { y: 0xe2c13d })
+  castShadow(cv, 11, skin, 2)
+  // cejas canosas tupidas, ojos entrecerrados con patas de gallo
+  g(cv, ['.WWWW..', 'WWwwwW.', 'w....ww'], 8, 11, { W: 0xf0ece4, w: 0xb8b4ac })
+  g(cv, ['..WWWW.', '.WwwwWW', 'ww....w'], 17, 11, { W: 0xf0ece4, w: 0xb8b4ac })
+  g(cv, ['kkkk', 'Skek', '.TT.'], 10, 14, { ...skin, e: 0x2a3a5a })
+  g(cv, ['kkkk', 'keSk', '.TT.'], 18, 14, { ...skin, e: 0x2a3a5a })
+  g(cv, ['T', '.T', 'T'], 8, 14, skin)
+  g(cv, ['T', 'T.', '.T'], 23, 14, skin)
+  // nariz grande y colorada
+  g(cv, ['.S.', '.S.', 'lSS', 'lsSS', 'TrrT'], 15, 15, { ...skin, r: 0xd07a6a })
+  // bigote blanco de morsa que tapa la boca
+  const must = { W: 0xf4f0e8, w: 0xd0ccc4, d: 0xa8a49c }
+  g(
+    cv,
+    ['....WWWWWWWW....', '..WWWWWwwWWWWw..', '.WWWWwwWWwwWWWwd', 'WWWwwd.dd..dwwWd', 'Wwd..........dwd', 'wd............d.'],
+    8,
+    19,
+    must,
+  )
+  // mentón con arrugas
+  g(cv, ['.TTT.'], 14, 24, skin)
+  for (const [x, y] of [[11, 17], [20, 17], [11, 18], [20, 18]]) cv.put(x, y, 0xd88a78)
+  cv.outline(OUT)
+  return cv
+}
+
+const PORTRAITS = {
+  bandana: portraitBandana,
+  sarge: portraitSarge,
+  rookie: portraitRookie,
+  desert: portraitDesert,
+  commando: portraitCommando,
+  goggles: portraitGoggles,
+  pilot: portraitPilot,
+  colonel: portraitColonel,
+}
 export const portrait = (id) => PORTRAITS[id]()
 
 export { PIVOT, TANK_W, TANK_H, HULLS, STRIPES, hash }
