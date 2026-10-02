@@ -6,7 +6,9 @@
 //   ?join=TANK-XXXX       entra a esa sala al arrancar (el link de compartir)
 //   ?autotest=1           prueba e2e (scripts/net-test.mjs): el anfitrión arma 2 humanos + 1 IA,
 //                         1 ronda, y ambos disparan con ángulos fijos hasta el fin. El flujo expone
-//                         window.__tanksNet = { role, code, seq, hash, phase }.
+//                         window.__tanksNet = { role, code, seq, hash, phase, players, size }.
+//   &players=N            (con autotest, v5) N casilleros: 2 humanos + N-2 IA, en el mapa más chico
+//                         que los admite (8 → Grande).
 import type { NetTransport } from './base'
 import { LocalTransport } from './local'
 import { PeerTransport } from './peer'
@@ -61,6 +63,8 @@ export interface NetDebug {
   seq: number
   hash: number
   phase: string // Phase de la sim, o 'lobby' antes de empezar
+  players?: number // tanques de la partida (v5), si empezó
+  size?: string // tamaño del mapa de la partida, si empezó
 }
 
 declare global {

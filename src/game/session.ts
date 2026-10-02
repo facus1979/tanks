@@ -19,7 +19,7 @@ import type {
   Vec2,
   WeaponId,
 } from '../sim/types'
-import { ITEM_ORDER, LAVA, SHOP, SUDDEN_DEATH_CALM, TANK_H, TANK_W, WATER, WEAPONS, fuelFor } from '../sim/types'
+import { ITEM_ORDER, LAVA, MAX_PLAYERS_BY_SIZE, SHOP, SUDDEN_DEATH_CALM, TANK_H, TANK_W, WATER, WEAPONS, fuelFor } from '../sim/types'
 import { AIM_PREVIEW_T, HUD_BAR_H, VIEW_W, type Camera, type RenderFrame } from '../render/types'
 import type { HudModel, HudSide } from '../ui/hud'
 import type { BannerModel, HudExtras, HudNet, MinimapModel, ScoreModel, ShopModel } from '../ui/types'
@@ -351,7 +351,8 @@ export class Session {
     this.sentReady.clear()
     this.sentNext = false
     const seed = config.seed ?? ((Math.random() * 0xffffffff) >>> 0)
-    const slots = config.slots.slice(0, 4)
+    // v5: hasta MAX_PLAYERS_BY_SIZE[size] casilleros (Chico 4, Mediano 6, Grande 8), igual que createMatch
+    const slots = config.slots.slice(0, MAX_PLAYERS_BY_SIZE[config.size ?? 'small'] ?? 4)
     this.config = { ...config, slots, rounds: Math.max(1, Math.round(config.rounds || 1)), seed }
     this.state = createMatch(this.config)
     this.logic = this.mode === 'client' ? this.state : null

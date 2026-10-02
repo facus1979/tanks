@@ -284,7 +284,15 @@ export class Online {
     if (prev && seq === this.debugSeq && prev.phase === phase && prev.code === this.code) return
     this.debugSeq = seq
     const state = this.started ? this.session.authState : null
-    window.__tanksNet = { role: this.role, code: this.code, seq, hash: state ? hashState(state) : 0, phase }
+    window.__tanksNet = {
+      role: this.role,
+      code: this.code,
+      seq,
+      hash: state ? hashState(state) : 0,
+      phase,
+      players: state?.players.length,
+      size: state?.size,
+    }
   }
 }
 

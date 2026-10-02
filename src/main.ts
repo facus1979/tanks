@@ -24,6 +24,8 @@ import {
   ANGLE_SPEED,
   BIOMES,
   MAP_SIZE_ORDER,
+  MAX_PLAYERS,
+  MAX_PLAYERS_BY_SIZE,
   POWER_SPEED,
   TANK_H,
   TANK_HALF_W,
@@ -295,8 +297,10 @@ if (!uitest) {
       else if (demo.ff > 0) fastForwardFor(demo.ff)
     } else if (playParam != null) {
       const biome = (BIOMES as string[]).includes(params.get('biome') ?? '') ? (params.get('biome') as Biome) : 'forest'
-      const humans = clampInt(params.get('humans'), 1, 1, 4)
-      const bots = clampInt(params.get('bots'), 2, humans > 1 ? 0 : 1, 4 - humans)
+      // v5: humanos + bots hasta el máximo del tamaño (Chico 4, Mediano 6, Grande 8), p. ej. &size=large&bots=7
+      const max = MAX_PLAYERS_BY_SIZE[sizeParam]
+      const humans = clampInt(params.get('humans'), 1, 1, max)
+      const bots = clampInt(params.get('bots'), Math.min(2, max - humans), humans > 1 ? 0 : 1, max - humans)
       const slots: SlotConfig[] = []
       for (let i = 0; i < humans; i++) slots.push({ kind: 'human' })
       for (let i = 0; i < bots; i++) slots.push({ kind: 'ai' })
@@ -450,16 +454,26 @@ function openRoom(role: 'host' | 'client', code?: string): void {
   })
 }
 
-// autotest: 2 humanos (anfitrión + un cliente) y 1 IA, 1 ronda; arranca cuando el cliente tomó su casillero.
+// autotest: 2 humanos (anfitrión + un cliente) y el resto IA, 1 ronda; arranca cuando el cliente tomó
+// su casillero. Por defecto 3 casilleros (2 humanos + 1 IA) en el tamaño por defecto; con &players=N
+// (v5, scripts/net-test.mjs --players N) usa N casilleros y el mapa más chico que los admite.
+const AUTO_PLAYERS = Math.max(3, Math.min(MAX_PLAYERS, Math.round(Number(params.get('players')) || 3)))
 let autotestBusy = false
 function autotestLobby(room: Online): void {
   const lobby = room.lobby
   if (autotestBusy || !lobby || room.started || !room.code) return
   autotestBusy = true
   try {
+    if (params.has('players')) {
+      // el tamaño primero: el anfitrión no deja ocupar casilleros por encima del límite del mapa
+      const size = MAP_SIZE_ORDER.find((k) => MAX_PLAYERS_BY_SIZE[k] >= AUTO_PLAYERS) ?? 'large'
+      if (lobby.size !== size) room.setOption('size', size)
+    }
     if (lobby.slots[1]?.kind !== 'human') room.setSlot(1, 'human')
-    if (lobby.slots[2]?.kind !== 'ai') room.setSlot(2, 'ai')
-    if (lobby.slots[3]?.kind !== 'off') room.setSlot(3, 'off')
+    for (let i = 2; i < lobby.slots.length; i++) {
+      const kind = i < AUTO_PLAYERS ? 'ai' : 'off'
+      if (lobby.slots[i]?.kind !== kind) room.setSlot(i, kind)
+    }
     if (lobby.rounds !== 1) room.setOption('rounds', 1)
     // fuera del callback de la sala: el hello del cliente todavía se está procesando
     if (room.canStart()) setTimeout(() => online === room && !room.started && room.start(), 300)
