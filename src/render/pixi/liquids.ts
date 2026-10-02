@@ -10,7 +10,7 @@
 //   ondulación de 1 px, brillo que corre y destellos; lava: olas, costras, chispitas, burbujas y gotitas como la
 //   banda), pintada a 30 Hz en buffers chicos que se suben directo desde los bytes. Más el resplandor de la lava
 //   (un sprite aditivo por pozo, solo se rehace cuando cambia la grilla) y los efectos de entrada al agua.
-import { BufferImageSource, Container, Sprite, Texture } from 'pixi.js'
+import { BufferImageSource, Container, Graphics, Sprite, Texture } from 'pixi.js'
 import { AIR, LAVA, MATERIALS, WATER } from '../../sim/types'
 import type { Player, Terrain, Vec2 } from '../../sim/types'
 import type { Fx } from './fx'
@@ -110,6 +110,21 @@ const BAND_GAP_Y = 16 // superficies a menos de esto en y van en el mismo buffer
 const BAND_GAP_X = 48
 const GLOW_K = 0.3 // intensidad del resplandor de un pozo (el light del lookdev usa 0,32)
 const MAX_RIPPLES = 24
+// Pulido v2: piedra recién enfriada (napalm sobre agua, agua y lava): vapor que sigue saliendo un rato y
+// grietas que todavía brillan al principio.
+const VENT_LIFE = 4.5 // s de vapor
+const VENT_GLOW = 1.6 // s que brillan las grietas
+const VENT_RATE = 7 // bocanadas por segundo al empezar (cada 24 px de piedra), bajan con la edad
+const MAX_VENTS = 12
+
+interface Vent {
+  x0: number
+  x1: number
+  y: number // fila de arriba de la piedra
+  age: number
+  acc: number
+  cracks: number[] // celdas (x, y) de las grietas que brillan
+}
 
 interface Ripple {
   x: number
@@ -197,8 +212,16 @@ export class LiquidView {
   private prevShots: Vec2[] = []
   private burnAcc = new Map<number, number>()
   private terrain: Terrain | null = null
+  private vents: Vent[] = []
+  readonly ventG = new Graphics() // grietas que brillan (va en la capa de la superficie)
+
+  constructor() {
+    this.layer.addChild(this.ventG)
+  }
 
   reset(): void {
+    this.vents = []
+    this.ventG.clear()
     this.ripples = []
     this.bubbles = []
     this.droplets = []
@@ -315,6 +338,70 @@ export class LiquidView {
   steam(fx: Fx, x: number, y: number, n: number): void {
     fx.hiss(x, y, n)
     this.ripple(x, y, 1.2)
+  }
+
+  // Pulido v2: celdas que se volvieron piedra sobre un líquido en el último cambio de la grilla (x, y
+  // alternados, de TerrainPainter.cooledFresh). Se agrupan en tramos con su fila de arriba: de ahí sale el vapor.
+  cool(cells: number[]): void {
+    const t = this.terrain
+    if (!t || cells.length === 0) return
+    const fresh: Vent[] = []
+    for (let i = 0; i < cells.length; i += 2) {
+      const x = cells[i]
+      const y = cells[i + 1]
+      let v = fresh.find((q) => x >= q.x0 - 6 && x <= q.x1 + 6 && Math.abs(y - q.y) <= 8)
+      if (!v) {
+        v = { x0: x, x1: x, y, age: 0, acc: 0, cracks: [] }
+        fresh.push(v)
+      }
+      v.x0 = Math.min(v.x0, x)
+      v.x1 = Math.max(v.x1, x)
+      v.y = Math.min(v.y, y)
+      // una de cada pocas celdas de la cara de arriba es grieta que brilla
+      const top = y === 0 || t.front[(y - 1) * t.w + x] !== t.front[y * t.w + x]
+      if (top && v.cracks.length < 120 && (hash(x, y, 31) & 3) === 0) v.cracks.push(x, y)
+    }
+    this.vents.push(...fresh)
+    if (this.vents.length > MAX_VENTS) this.vents.splice(0, this.vents.length - MAX_VENTS)
+  }
+
+  // Vapor de la piedra que se enfría y grietas que se apagan. dt = 0 congelado.
+  vent(fx: Fx, dt: number): void {
+    const g = this.ventG
+    if (this.vents.length === 0) {
+      if (g.visible) {
+        g.clear()
+        g.visible = false
+      }
+      return
+    }
+    g.clear()
+    g.visible = true
+    const live: Vent[] = []
+    for (const v of this.vents) {
+      v.age += dt
+      if (v.age >= VENT_LIFE) continue
+      live.push(v)
+      const k = 1 - v.age / VENT_LIFE
+      const w = v.x1 - v.x0 + 1
+      v.acc += dt * VENT_RATE * Math.max(1, w / 24) * k * k
+      for (; v.acc >= 1; v.acc -= 1) {
+        const x = v.x0 + this.rng.next() * w
+        fx.steam(x, v.y - 1, 1, 3)
+      }
+      // grietas: naranja que pasa a rojo oscuro y se apaga (titilan un poco)
+      const gk = 1 - v.age / VENT_GLOW
+      if (gk <= 0) continue
+      for (let i = 0; i < v.cracks.length; i += 2) {
+        const x = v.cracks[i]
+        const y = v.cracks[i + 1]
+        if (this.terrain && this.terrain.front[y * this.terrain.w + x] === AIR) continue
+        const fl = 0.75 + 0.25 * Math.sin(this.time * 9 + x * 1.7)
+        const col = gk > 0.55 ? 0xffb050 : gk > 0.25 ? 0xe0602a : 0x8a2a18
+        g.rect(x, y, 1, 1).fill({ color: col, alpha: Math.min(1, gk * 1.4) * fl })
+      }
+    }
+    this.vents = live
   }
 
   // Proyectiles: entrada al agua (salpicadura y ondas) y derretidos en la lava material (chisporroteo).
