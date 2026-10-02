@@ -991,7 +991,7 @@ export class Session {
     if (this.tracerCache?.key === key) return this.tracerCache.path
     let path: Vec2[] = []
     try {
-      path = fly({ terrain: s.terrain, players: s.players, props: s.props, ownerId: p.id, angle, power, wind: s.wind }).path
+      path = fly({ terrain: s.terrain, players: s.players, props: s.props, ownerId: p.id, angle, power, wind: s.wind, lava: s.lava ?? undefined }).path
     } catch (err) {
       console.error(err)
     }

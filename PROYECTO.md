@@ -193,7 +193,7 @@ Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 
 
 - **Tamaño por partida**, elegido en el menú: Chico 800×450 (el mapa de v1), Mediano 1600×450, Grande 2400×450. Alto fijo. El tamaño viaja en el estado (`terrain.w/h`); `WORLD_W/WORLD_H` dejan de usarse fuera de la pantalla.
 - **Alcance**: potencia 100 llega siempre de punta a punta. `POWER_SCALE` y `GRAVITY` se derivan del ancho del mapa de modo que un tiro de lado a lado a 45° dure ~3 s; con 800 dan los valores de v1. `WIND_ACCEL` escala igual. Shift ajusta ángulo y potencia a 1/5 de velocidad.
-- **Muerte súbita**: tras N turnos seguidos sin daño a tanques, la lava sube desde el fondo cada turno. Toda ronda termina.
+- **Muerte súbita**: tras 5 tiros seguidos sin daño a tanques, la lava sube 18 px desde el fondo en cada turno y quema 20 por turno a los tanques sumergidos; los proyectiles que la tocan se derriten sin explotar. La lava no da ni quita plata ni cuenta como kill. Toda ronda termina.
 - **Hasta 8 jugadores**: 4 colores y 4 tripulantes nuevos; HUD rediseñado para 5-8 placas. Spawns repartidos a lo ancho.
 - **Líquidos que fluyen**: agua y lava son materiales de la grilla. Se asientan con un autómata celular determinista al final de cada `fire`, con tope de iteraciones; los cambios salen como evento para que el render los anime.
 
@@ -210,7 +210,7 @@ Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 
 - `src/ui/types.ts`: `HudExtras.minimap` (`MinimapModel`, `MinimapTank`), `MinimapInput.minimapAt` (lo implementa `Hud`), `DEFAULT_CONFIG.size` = `'medium'`, `setOption('size')` en el lobby.
 - `src/net/types.ts`: `LobbyState.size`.
 - QA: `?play=...&size=small|medium|large`, `?demo=...&size=...`.
-- V2 muerte súbita (`src/sim/types.ts`): `SUDDEN_DEATH_CALM` (6), `LAVA_RISE` (14 px por turno), `LAVA_DAMAGE` (20 por turno), `GameState.calm` y `GameState.lava` (y de la superficie o null), `ImpactKind` `'lava'` (proyectil derretido, sin explosión), eventos `lava` y `calm`, `damage.cause = 'lava'`. `RenderFrame.lava`, `HudExtras.suddenDeath`, `MinimapModel.lava`.
+- V2 muerte súbita (`src/sim/types.ts`): `SUDDEN_DEATH_CALM` (5), `LAVA_RISE` (18 px por turno), `LAVA_DAMAGE` (20 por turno), `GameState.calm` y `GameState.lava` (y de la superficie o null), `ImpactKind` `'lava'` (proyectil derretido, sin explosión), eventos `lava` y `calm`, `damage.cause = 'lava'`. `RenderFrame.lava`, `HudExtras.suddenDeath`, `MinimapModel.lava`.
 
 ### Fases
 
