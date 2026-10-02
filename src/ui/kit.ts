@@ -97,7 +97,7 @@ const portraits: PortraitBox[] = []
 
 export function portrait(crew: CrewId, color: number, size = 1): HTMLCanvasElement {
   const canvas = document.createElement('canvas')
-  canvas.className = 'px-label'
+  canvas.className = 'px-label portrait' // .portrait: para que el CSS achique solo retratos, no etiquetas
   const box = { canvas, crew, color, size }
   portraits.push(box)
   paintPortrait(box)

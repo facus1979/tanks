@@ -12,7 +12,7 @@ export interface TitleView {
   hide(): void
 }
 
-// src/ui/menu.ts: 4 casilleros (humano / IA / vacío, nombre, tripulante), rondas, dificultad, bioma.
+// src/ui/menu.ts: 8 casilleros (humano / IA / vacío, nombre, tripulante; habilitados según MAX_PLAYERS_BY_SIZE), rondas, dificultad, bioma, mapa.
 export interface MenuView {
   show(initial: MatchConfig | null, onPlay: (config: MatchConfig) => void): void
   hide(): void
@@ -160,7 +160,7 @@ export interface LobbyModel {
   canStart: boolean // anfitrión: al menos 2 casilleros ocupados y todos los humanos conectados
 }
 
-// src/ui/lobby.ts: código grande + botón copiar link, 4 casilleros (anfitrión los configura: humano remoto /
+// src/ui/lobby.ts: código grande + botón copiar link, 8 casilleros (anfitrión los configura: humano remoto /
 // IA / vacío, y los ajustes de partida; cliente toma un casillero libre), estado de cada peer, empezar / salir.
 export interface LobbyView {
   show(

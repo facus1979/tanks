@@ -1,4 +1,5 @@
 // Tabla entre rondas y pantalla final con el campeón.
+// v5: con más de 4 filas (hasta 8) la tabla pasa a compacta: retratos chicos y el campeón en una franja horizontal.
 import { bindNav, button, el, label, portrait, screenRoot, type Nav } from './kit'
 import type { ScoreModel, ScoreRow, ScoreboardView } from './types'
 
@@ -17,7 +18,9 @@ class ScoreboardScreen implements ScoreboardView {
   }
 
   show(model: ScoreModel, onContinue: () => void, onMenu: () => void): void {
-    const frame = el('div', 'frame')
+    // compacta: con 5 a 8 jugadores las filas con retrato grande no entran en 800×450
+    const many = model.rows.length > 4
+    const frame = el('div', many ? 'frame score-frame many' : 'frame score-frame')
     const title = el('div', 'title')
     const winner = model.rows.find((r) => r.id === model.winnerId) ?? null
     if (model.final) {
@@ -28,8 +31,12 @@ class ScoreboardScreen implements ScoreboardView {
     frame.append(title)
 
     if (model.final) {
-      const champ = el('div', 'winner')
-      if (winner) {
+      const champ = el('div', many ? 'winner compact' : 'winner')
+      if (winner && many) {
+        const text = el('div', 'stack')
+        text.append(label('CAMPEON', GOLD, 1), label(winner.name.toUpperCase(), winner.color, 2))
+        champ.append(portrait(winner.crew, winner.color, 1), text)
+      } else if (winner) {
         champ.append(label('CAMPEON', GOLD, 1), portrait(winner.crew, winner.color, 2), label(winner.name.toUpperCase(), winner.color, 2))
       } else {
         champ.append(label('EMPATE', GOLD, 3))
