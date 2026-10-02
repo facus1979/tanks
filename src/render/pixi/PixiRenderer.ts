@@ -11,6 +11,7 @@ import { DEBRIS_COLORS } from './fallback'
 import type { ShotView } from './fx'
 import { Extras } from './extras'
 import { Fx } from './fx'
+import { LavaView } from './lava'
 import { Raster, Rng } from './raster'
 import { TerrainPainter } from './terrain'
 
@@ -97,6 +98,8 @@ export class PixiRenderer implements GameRenderer {
   private arrowLayer = new Container()
   private flashG = new Graphics()
   private glowG = new Graphics()
+  private warmG = new Graphics() // v2: tinte cálido de toda la pantalla con la lava alta
+  private lava = new LavaView()
 
   private painter: TerrainPainter | null = null
   private backLayer = new Container()
@@ -178,18 +181,23 @@ export class PixiRenderer implements GameRenderer {
     this.glowG.rect(0, 0, VIEW_W, VIEW_H).fill(0xffffff)
     this.glowG.blendMode = 'add'
     this.glowG.alpha = 0
+    this.warmG.rect(0, 0, VIEW_W, VIEW_H).fill(0xff6a20)
+    this.warmG.alpha = 0
+    this.warmG.visible = false
     this.world.addChild(
       this.backLayer,
       this.propLayer,
       this.lampLayer,
       this.frontLayer,
       this.tankLayer,
+      this.lava.glowLayer,
+      this.lava.layer,
       this.lightSprite,
       this.fxSprite,
       this.extras.layer,
       this.overlayLayer,
     )
-    this.app.stage.addChild(this.bg, this.world, this.glowG, this.arrowLayer, this.flashG, this.extras.curtain)
+    this.app.stage.addChild(this.bg, this.world, this.warmG, this.glowG, this.arrowLayer, this.flashG, this.extras.curtain)
     this.fx.wreckPos = (id) => {
       const p = this.players.find((q) => q.id === id)
       return p && !p.alive ? { x: Math.round(p.x), y: Math.round(p.y) } : null
@@ -297,6 +305,7 @@ export class PixiRenderer implements GameRenderer {
       }
     }
     this.placeWorld()
+    this.updateLava(frame, step, events)
 
     this.fx.draw(this.shotViews(frame))
     this.stats?.sample(this.fx.count, dt, performance.now() - t0, this.fx.trails)
@@ -314,7 +323,26 @@ export class PixiRenderer implements GameRenderer {
     this.glowG.alpha = 0.42 * this.fx.glow * this.fx.glow
   }
 
+  // v2: lava de muerte súbita sobre el rectángulo visible (con sacudón), proyectiles derretidos y tinte cálido.
+  private updateLava(frame: RenderFrame, dt: number, events: GameEvent[]): void {
+    const t = frame.terrain
+    const z = this.camZ
+    const x0 = -(this.camX + this.shakeX) / z
+    const y0 = -(this.camY + this.shakeY) / z
+    this.lava.update(this.fx, frame.lava, dt, frame.wind, t.w, t.h, x0, x0 + VIEW_W / z, y0, y0 + VIEW_H / z)
+    this.fx.lavaY = this.lava.level
+    const impacts: Vec2[] = []
+    for (const ev of events) if (ev.type === 'impact') impacts.push(ev)
+    this.lava.trackShots(this.fx, frame.projectiles, impacts, t.w)
+    // tinte: arranca cuando la lava pasó un cuarto del alto del mapa y llega al máximo a tres cuartos
+    const L = this.lava.level
+    const high = L === null ? 0 : Math.max(0, Math.min(1, ((t.h - L) / t.h - 0.25) / 0.5))
+    this.warmG.visible = high > 0
+    this.warmG.alpha = high * (0.07 + 0.01 * Math.sin(this.time * 2.3))
+  }
+
   private reset(): void {
+    this.lava.reset()
     this.painter?.reset()
     this.fx.reset()
     this.extras.reset()
@@ -492,7 +520,17 @@ export class PixiRenderer implements GameRenderer {
           })
         }
         break
+      case 'lava': {
+        const z = this.camZ
+        const x0 = -this.camX / z
+        this.lava.rise(this.fx, Math.max(0, x0), Math.min(frame.terrain.w, x0 + VIEW_W / z), ev.from === null)
+        break
+      }
       case 'damage':
+        if (ev.cause === 'lava') {
+          const p = frame.players.find((q) => q.id === ev.playerId)
+          if (p) this.lava.burn(this.fx, p.x, p.y)
+        }
         this.hitThisShot.add(ev.playerId)
         this.view(ev.playerId).alert = BUBBLE_TIME
         break

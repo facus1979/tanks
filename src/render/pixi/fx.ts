@@ -210,6 +210,7 @@ export class Fx {
   glowColor = 0xff7a2a
   hitStop = 0
   wind = 0
+  lavaY: number | null = null // v2: superficie de la lava de muerte súbita; lo que cae debajo se derrite
   fog = 0xf0dfc8 // color de la niebla del bioma: el humo se disuelve hacia él
   private rng = new Rng(20250928)
   private blobs: Blob[] = []
@@ -396,6 +397,79 @@ export class Fx {
       const sp = 50 + this.r() * 110
       this.debris.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, color: colors[i % colors.length], shape: Math.floor(this.r() * 4), life: 1.4 + this.r(), age: 0, rest: false })
     }
+  }
+
+  // ---------- lava de muerte súbita (v2) ----------
+
+  // Gotas de lava: chispas que saltan de la superficie y se apagan al volver a caer en ella (lavaY).
+  lavaSpray(x: number, y: number, n: number, up = 70): void {
+    for (let i = 0; i < n; i++) {
+      this.sparks.push({ x: x + (this.r() - 0.5) * 4, y: y - 1, vx: (this.r() - 0.5) * 50, vy: -up * (0.5 + this.r() * 0.7), life: 0.5 + this.r() * 0.5, age: 0 })
+    }
+  }
+
+  // Salpicadura: goterones de lava (racimo de fuego chico con contorno) que saltan y vuelven a caer en la superficie.
+  lavaSplash(x: number, y: number, n: number, up = 90): void {
+    for (let i = 0; i < n; i++) {
+      const vy = -up * (0.55 + this.r() * 0.6)
+      const ay = 300
+      const life = (-2 * vy) / ay
+      const r1 = 1.1 + this.r() * 1.1
+      this.blob({ layer: 1, ox: x + (this.r() - 0.5) * 6, oy: y, vx: (this.r() - 0.5) * 50, vy, ay, r0: r1, r1, grow: 0.001, hold: life * 0.8, life, heat0: -0.15 + this.r() * 0.2, heatV: 0.6, ramp: FIRE, outline: FIRE_OUT })
+    }
+  }
+
+  // Vapor: bocanadas claras que suben y se abren con el viento.
+  steam(x: number, y: number, n: number, spread = 6): void {
+    for (let i = 0; i < n; i++) {
+      const r = 1.5 + this.r() * 1.5
+      this.soft({
+        x0: x + (this.r() - 0.5) * spread,
+        y0: y - this.r() * 2,
+        vx: this.wind * 1.5 + (this.r() - 0.5) * 8,
+        vy: -18 - this.r() * 14,
+        drag: 1.2,
+        r0: r * 0.6,
+        r1: r * 2.8,
+        life: 1 + this.r() * 0.8,
+        inner: 0xf4efe8,
+        edge: 0xb4aaa0,
+        a0: 0.8,
+        keep: 0.3,
+      })
+    }
+  }
+
+  // Proyectil derretido en la superficie: chisporroteo, vapor y un destello chico.
+  sizzle(x: number, y: number): void {
+    this.lavaSpray(x, y, 12, 110)
+    this.lavaSplash(x, y, 4, 100)
+    this.steam(x, y - 2, 6, 10)
+    this.blob({ layer: 1, ox: x, oy: y - 2, r1: 2.6, life: 0.16, grow: 0.03, hold: 0.06, ramp: FIRE, outline: FIRE_OUT, heat0: -0.2, heatV: 4 })
+    this.lights.push({ x, y: y - 3, R: 26, tint: 0xffa040, k: 0.4, life: 0.35, age: 0 })
+  }
+
+  // Tanque quemado por la lava (damage con cause 'lava'): chispas, llamitas y humo negro desde el tanque.
+  lavaBurn(x: number, y: number): void {
+    const cy = y - 8
+    for (let i = 0; i < 12; i++) {
+      this.sparks.push({ x: x + (this.r() - 0.5) * 22, y: cy + (this.r() - 0.5) * 8, vx: (this.r() - 0.5) * 80, vy: -50 - this.r() * 70, life: 0.4 + this.r() * 0.5, age: 0 })
+    }
+    for (let i = 0; i < 4; i++) {
+      const r1 = 2 + this.r() * 2
+      this.blob({ layer: 1, ox: x + (this.r() - 0.5) * 18, oy: cy + (this.r() - 0.5) * 4, vy: -26, vx: this.wind * 1.5, r0: r1 * 0.5, r1, grow: 0.05, hold: 0.15, life: 0.45, delay: i * 0.05, heat0: 0.1 + this.r() * 0.3, heatV: 1.2, ramp: FIRE, outline: FIRE_OUT })
+    }
+    for (let i = 0; i < 5; i++) {
+      const r1 = 4 + this.r() * 3
+      this.blob({ layer: 0, ox: x + (this.r() - 0.5) * 14, oy: cy - 4, vy: -18, vx: this.wind * 1.5, ax: this.wind * 0.5, r0: 2, r1, grow: 0.8, hold: 0.8, life: 1.8, delay: 0.05 + i * 0.12, heat0: 0.3 + this.r() * 0.3, heatV: 0.05, ramp: BLACK_SMOKE, outline: BLACK_OUT, fade: true })
+    }
+    this.steam(x, y - 2, 3, 20)
+    this.lights.push({ x, y: cy, R: 30, tint: 0xff8a3a, k: 0.35, life: 0.5, age: 0 })
+  }
+
+  // ¿El punto quedó debajo de la superficie de la lava? (lo que cae ahí se derrite y desaparece)
+  private sunk(y: number): boolean {
+    return this.lavaY !== null && y > this.lavaY + 1
   }
 
   wreck(id: number): void {
@@ -1050,7 +1124,7 @@ export class Fx {
     for (const g of this.rings) this.updateRing(g, dt)
     this.rings = this.rings.filter((g) => g.age < g.life)
     for (const s of this.softs) s.age += dt
-    this.softs = this.softs.filter((s) => s.age < s.life)
+    this.softs = this.softs.filter((s) => s.age < s.life && !(s.trail && this.sunk(s.y0)))
     this.capParticles()
     for (const l of this.lights) l.age += dt
     this.lights = this.lights.filter((l) => l.age < l.life)
@@ -1083,7 +1157,7 @@ export class Fx {
     }
     const W = this.worldW
     const H = this.worldH
-    this.debris = this.debris.filter((p) => p.age < p.life && p.x > -10 && p.x < W + 10 && p.y < H + 10)
+    this.debris = this.debris.filter((p) => p.age < p.life && p.x > -10 && p.x < W + 10 && p.y < H + 10 && !this.sunk(p.y))
 
     for (const p of this.sparks) {
       p.age += dt
@@ -1092,7 +1166,7 @@ export class Fx {
       p.x += p.vx * dt
       p.y += p.vy * dt
     }
-    this.sparks = this.sparks.filter((p) => p.age < p.life)
+    this.sparks = this.sparks.filter((p) => p.age < p.life && !(p.vy > 0 && this.sunk(p.y)))
 
     const chunkAt = (c: Chunk, t: number): [number, number] => [c.ox + c.dx * t, c.oy - Math.sin(t * Math.PI * 0.8) * c.peak + t * t * 22]
     for (const c of this.chunks) {
@@ -1120,7 +1194,7 @@ export class Fx {
         c.x += c.vx * dt
         c.y += c.vy * dt
       }
-      if (this.solid(c.x, c.y) || c.age >= c.life) c.done = true
+      if (this.solid(c.x, c.y) || c.age >= c.life || this.sunk(c.y)) c.done = true
     }
     for (const c of this.chunks) {
       let k = 0
@@ -1141,6 +1215,7 @@ export class Fx {
         }
         e.x = pos.x
         e.y = pos.y
+        if (this.sunk(e.y - 10)) continue // restos tapados por la lava: no echan fuego ni humo
         while (e.accA >= 0.07) {
           e.accA -= 0.07
           const r1 = 2 + this.r() * 2.5
@@ -1173,7 +1248,7 @@ export class Fx {
         g.age = g.life
       }
     }
-    this.drops = this.drops.filter((g) => g.age < g.life && g.x > -10 && g.x < W + 10 && g.y < H + 10)
+    this.drops = this.drops.filter((g) => g.age < g.life && g.x > -10 && g.x < W + 10 && g.y < H + 10 && !this.sunk(g.y))
   }
 
   decay(dt: number): void {
@@ -1512,8 +1587,9 @@ export class Fx {
     light.clear()
     for (const l of this.lights) light.light(l.x, l.y, l.R, l.tint, l.k * Math.pow(1 - l.age / l.life, 1.5))
     for (const e of this.emitters) {
-      if (e.kind === 'wreck') light.light(e.x, e.y - 12, 22 + Math.sin(this.time * 17 + e.x) * 2, 0xff8a3a, 0.28)
-      else if (e.kind === 'burn') {
+      if (e.kind === 'wreck') {
+        if (!this.sunk(e.y - 10)) light.light(e.x, e.y - 12, 22 + Math.sin(this.time * 17 + e.x) * 2, 0xff8a3a, 0.28)
+      } else if (e.kind === 'burn') {
         const k = this.burnK(e)
         if (k > 0) light.light(e.x + e.w / 2, e.y - 6, Math.max(22, e.w * 1.6), 0xff8a3a, 0.3 * k * (0.85 + 0.15 * Math.sin(this.time * 13 + e.x)))
       }
