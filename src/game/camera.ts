@@ -11,6 +11,7 @@ const TANK_TIME = 0.45 // siguiendo al tanque del turno
 const SHOT_TIME = 0.2 // siguiendo al proyectil
 const IMPACT_TIME = 0.35 // después del último impacto, mientras se asienta el tiro
 const FALL_TIME = 0.25 // acompañando a un tanque que cae al abismo (v3)
+const SLIDE_TIME = 0.35 // acompañando a un tanque que se desliza (pulido v2)
 const WATCH_TIME = 0.5 // mirando un flujo de líquido (v4): viaje tranquilo, el agua corre despacio
 const ZOOM_TIME = 0.55
 const MAX_SPEED = 4000 // px de mundo por segundo
@@ -128,6 +129,16 @@ export class CameraController {
     this.ty = y
     this.tz = 1
     this.time = FALL_TIME
+  }
+
+  // Pulido v2: un tanque se desliza (empuje o pendiente). La cámara lo acompaña con suavizado y vuelve a
+  // zoom 1, sin saltos.
+  followSlide(x: number, y: number): void {
+    this.mode = 'shot'
+    this.tx = x
+    this.ty = y
+    this.tz = 1
+    this.time = SLIDE_TIME
   }
 
   // Paneo a mano (dx en px de mundo), sin retraso: la cámara va pegada al dedo o al mouse.

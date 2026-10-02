@@ -19,7 +19,7 @@ import { createBannerView } from './ui/banner'
 import { createScoreboardView } from './ui/scoreboard'
 import { createShopView } from './ui/shop'
 import { DEFAULT_CONFIG } from './ui/types'
-import { chooseShot } from './sim'
+import { PATH_DT, chooseShot } from './sim'
 import {
   ANGLE_SPEED,
   BIOMES,
@@ -699,6 +699,15 @@ function playSounds(events: GameEvent[]): void {
         else if (e.parachute) sfx.parachute()
         else sfx.fall(Math.abs(e.to - e.from))
         break
+      case 'slide': {
+        // pulido v2: raspado mientras dura el recorrido (con golpe seco al empezar si fue un empuje); la
+        // caída que puede seguir llega como fall al aterrizar y suena como siempre
+        const path = e.path
+        let dist = 0
+        for (let i = 1; i < path.length; i++) dist += Math.hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y)
+        if (path.length > 1) sfx.slide((path.length - 1) * PATH_DT, dist, e.cause)
+        break
+      }
       case 'death':
         // perdido en el abismo: golpe lejano, sin la explosión del tanque
         if (e.cause === 'abyss') sfx.abyssThud()
