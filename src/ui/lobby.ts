@@ -1,5 +1,7 @@
-// Sala online: código y link, 4 casilleros con retrato, ajustes de partida (anfitrión) y empezar / salir.
-import { CREWS, MAP_SIZE_ORDER, TANK_COLORS, type CrewId } from '../sim/types'
+// Sala online: código y link, 8 casilleros con retrato (dos columnas de 4), ajustes de partida (anfitrión) y empezar / salir.
+// v5: los casilleros que pasan MAX_PLAYERS_BY_SIZE[lobby.size] se ven bloqueados con "SOLO MAPA …" y no se pueden
+// tomar ni configurar (el anfitrión, en src/net, tampoco deja ocuparlos).
+import { CREWS, MAP_SIZE_ORDER, MAX_PLAYERS, MAX_PLAYERS_BY_SIZE, TANK_COLORS, type CrewId, type MapSize } from '../sim/types'
 import type { LobbySlot } from '../net/types'
 import { bindNav, el, label, portrait, screenRoot, setLabel, setPortrait, type Nav } from './kit'
 import { SIZE_NAMES } from './menu'
@@ -58,6 +60,14 @@ const OPTIONS: { key: OptionKey; name: string; values: { v: number | string; tex
   },
 ]
 
+// Casilleros por columna en la grilla de dos columnas.
+const SLOT_ROWS = MAX_PLAYERS / 2
+
+// El tamaño de mapa más chico que admite el casillero i (para el cartel de los bloqueados).
+function sizeFor(i: number): MapSize | null {
+  return MAP_SIZE_ORDER.find((z) => i < MAX_PLAYERS_BY_SIZE[z]) ?? null
+}
+
 function optionValue(m: LobbyModel, i: number): number | string | undefined {
   const o = OPTIONS[i]
   return m.lobby[o.key] ?? o.fallback
@@ -96,6 +106,7 @@ class LobbyScreen implements LobbyView {
   private handlers: Handlers | null = null
   private unbind: (() => void) | null = null
   private cursor = 0
+  private side = 0 // columna de casilleros en la que estuvo el cursor por última vez
   private slotEls: SlotEls[] = []
   private optEls: { btn: HTMLButtonElement; value: HTMLCanvasElement }[] = []
   private codeLabel!: HTMLCanvasElement
@@ -125,7 +136,12 @@ class LobbyScreen implements LobbyView {
   }
 
   update(model: LobbyModel): void {
+    // el cursor sigue al mismo elemento aunque cambie cuántos casilleros quedan habilitados (al cambiar el mapa)
+    const key = (r: Row | undefined) => (r ? `${r.t}:${'i' in r ? r.i : ''}` : '')
+    const was = key(this.rows()[this.cursor])
     this.model = model
+    const now = this.rows().findIndex((r) => key(r) === was)
+    if (now >= 0) this.cursor = now
     if (this.slotEls.length) this.sync()
   }
 
@@ -161,8 +177,8 @@ class LobbyScreen implements LobbyView {
     this.linkBox.append(this.linkInput)
 
     const body = el('div', 'lobby-body')
-    const slotsBox = el('div', 'slots')
-    for (let i = 0; i < 4; i++) slotsBox.append(this.buildSlot(i))
+    const slotsBox = el('div', 'slots slots8')
+    for (let i = 0; i < MAX_PLAYERS; i++) slotsBox.append(this.buildSlot(i))
     this.optBox = el('div', 'lobby-opts')
     OPTIONS.forEach((o, i) => {
       const row = el('div', 'opt')
@@ -203,13 +219,23 @@ class LobbyScreen implements LobbyView {
     const kindLabel = label('')
     kind.append(kindLabel)
     kind.addEventListener('click', () => {
-      this.cursor = i
+      if (this.locked(i)) return
+      const at = this.rows().findIndex((r) => r.t === 'slot' && r.i === i)
+      if (at >= 0) this.cursor = at
       this.pickSlot(i)
       this.sync()
     })
     row.append(num, crew, who, dot, kind)
     this.slotEls.push({ root: row, kind, kindLabel, portrait: port, numLabel, nameLabel, ownerLabel, dot })
     return row
+  }
+
+  // Bloqueado: pasa el máximo del tamaño de mapa (sin size, Chico) o el lobby no lo trae (anfitrión anterior a v5).
+  private locked(i: number): boolean {
+    const lobby = this.model?.lobby
+    if (!lobby || !lobby.slots[i]) return true
+    const size = lobby.size && lobby.size in MAX_PLAYERS_BY_SIZE ? lobby.size : 'small'
+    return i >= MAX_PLAYERS_BY_SIZE[size]
   }
 
   private isHost(): boolean {
@@ -236,14 +262,32 @@ class LobbyScreen implements LobbyView {
     const cur = rows[this.cursor]
     setLabel(this.codeLabel, m.lobby.code)
     setLabel(this.statusLabel, m.status.toUpperCase(), /error|no |fall|perd|cerr/i.test(m.status) ? 0xff8a6a : 0xffe27a)
-    m.lobby.slots.slice(0, 4).forEach((slot, i) => {
-      const e = this.slotEls[i]
+    let n = 0
+    this.slotEls.forEach((e, i) => {
+      const slot = m.lobby.slots[i]
+      const locked = this.locked(i)
+      e.root.classList.toggle('locked', locked)
+      e.kind.classList.toggle('sel', !locked && cur?.t === 'slot' && cur.i === i)
+      if (locked || !slot) {
+        // bloqueado por el tamaño del mapa: dice desde qué mapa se puede usar
+        const need = sizeFor(i)
+        e.root.classList.remove('empty', 'mine')
+        setLabel(e.numLabel, '-', 0x4a4440)
+        setPortrait(e.portrait, slot?.crew ?? CREWS[i], 0x3a3430)
+        setLabel(e.nameLabel, need ? `SOLO MAPA` : '', 0x7a7068)
+        setLabel(e.ownerLabel, need ? `${SIZE_NAMES[need]}${need === 'large' ? '' : '+'}` : '', 0x7a7068)
+        e.dot.className = 'dot'
+        setLabel(e.kindLabel, '-', 0x6a625a)
+        return
+      }
       const off = slot.kind === 'off'
-      const color = off ? 0x4a4440 : (TANK_COLORS[i] ?? 0xffffff)
+      // como en el menú (y en la sim), número y color siguen el orden de los ocupados
+      const color = off ? 0x4a4440 : (TANK_COLORS[n] ?? 0xffffff)
+      if (!off) n++
       const own = this.owner(slot, i)
       e.root.classList.toggle('empty', off)
       e.root.classList.toggle('mine', m.mySlot === i)
-      setLabel(e.numLabel, `P${i + 1}`, color)
+      setLabel(e.numLabel, off ? '-' : `P${n}`, color)
       setPortrait(e.portrait, slot.crew, color)
       const same = !slot.name || slot.name.toUpperCase() === own.text
       setLabel(e.nameLabel, off ? '' : (same ? CREW_NAMES[slot.crew] : slot.name.toUpperCase()), 0xffffff)
@@ -254,7 +298,6 @@ class LobbyScreen implements LobbyView {
       let kindText = KIND_NAMES[slot.kind]
       if (!host) kindText = m.mySlot === i ? 'SOLTAR' : free ? 'TOMAR' : KIND_NAMES[slot.kind]
       setLabel(e.kindLabel, kindText, slot.kind === 'human' ? 0xffd23a : slot.kind === 'ai' ? 0x9ad0ff : 0x8a8078)
-      e.kind.classList.toggle('sel', cur?.t === 'slot' && cur.i === i)
     })
     this.optBox.classList.toggle('ro', !host)
     OPTIONS.forEach((o, i) => {
@@ -274,7 +317,8 @@ class LobbyScreen implements LobbyView {
   // ---------- acciones ----------
 
   private rows(): Row[] {
-    const out: Row[] = [0, 1, 2, 3].map((i) => ({ t: 'slot', i }))
+    const out: Row[] = []
+    for (let i = 0; i < MAX_PLAYERS; i++) if (!this.locked(i)) out.push({ t: 'slot', i })
     if (this.isHost()) OPTIONS.forEach((_, i) => out.push({ t: 'opt', i }))
     out.push({ t: 'copy' })
     if (this.isHost()) out.push({ t: 'start' })
@@ -287,7 +331,7 @@ class LobbyScreen implements LobbyView {
     const h = this.handlers
     if (!m || !h) return
     const slot = m.lobby.slots[i]
-    if (!slot) return
+    if (!slot || this.locked(i)) return
     if (this.isHost()) {
       if (slot.owner === 'host') return
       h.setSlot(i, KIND_CYCLE[(KIND_CYCLE.indexOf(slot.kind as SlotKind) + 1) % KIND_CYCLE.length])
@@ -358,15 +402,37 @@ class LobbyScreen implements LobbyView {
     const rows = this.rows()
     if (nav === 'back') return this.handlers?.leave()
     if (nav === 'start') return this.start()
-    if (nav === 'up') this.cursor = (this.cursor + rows.length - 1) % rows.length
+    const cur = rows[this.cursor]
+    const at = (r: (x: Row) => boolean) => rows.findIndex(r)
+    const slotAt = (i: number) => at((x) => x.t === 'slot' && x.i === i)
+    const firstOther = at((x) => x.t !== 'slot')
+    if (nav === 'ok') return this.activate()
+    if (cur?.t === 'slot') {
+      // grilla de dos columnas: arriba/abajo dentro de la columna, izquierda/derecha cambia de columna
+      const side = cur.i >= SLOT_ROWS ? 1 : 0
+      const r = cur.i % SLOT_ROWS
+      this.side = side
+      if (nav === 'down') this.cursor = r < SLOT_ROWS - 1 && slotAt(cur.i + 1) >= 0 ? slotAt(cur.i + 1) : firstOther
+      else if (nav === 'up') this.cursor = r > 0 ? slotAt(cur.i - 1) : rows.length - 1
+      else {
+        const j = slotAt(side ? cur.i - SLOT_ROWS : cur.i + SLOT_ROWS)
+        if (j >= 0) this.cursor = j
+        // misma fila del otro lado bloqueada: va al último habilitado de esa columna
+        else if (!side) {
+          for (let k = SLOT_ROWS * 2 - 1; k >= SLOT_ROWS; k--) if (slotAt(k) >= 0 && k - SLOT_ROWS <= r) {
+            this.cursor = slotAt(k)
+            break
+          }
+        }
+      }
+    } else if (nav === 'up' && this.cursor === firstOther) {
+      // vuelve al último casillero de la columna en la que estaba
+      let k = this.side * SLOT_ROWS + SLOT_ROWS - 1
+      while (k > 0 && slotAt(k) < 0) k--
+      this.cursor = Math.max(0, slotAt(k))
+    } else if (nav === 'up') this.cursor = (this.cursor + rows.length - 1) % rows.length
     else if (nav === 'down') this.cursor = (this.cursor + 1) % rows.length
-    else if (nav === 'ok') return this.activate()
-    else {
-      const cur = rows[this.cursor]
-      const dir = nav === 'left' ? -1 : 1
-      if (cur.t === 'opt') this.pickOption(cur.i, dir)
-      else if (cur.t === 'slot' && this.isHost()) this.pickSlot(cur.i)
-    }
+    else if (cur?.t === 'opt') this.pickOption(cur.i, nav === 'left' ? -1 : 1)
     this.sync()
   }
 }
