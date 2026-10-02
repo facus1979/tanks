@@ -27,6 +27,7 @@ import {
   WEAPONS,
   WEAPON_ORDER,
   MAP_SIZES,
+  MAX_PLAYERS_BY_SIZE,
   type Biome,
   type MapSize,
   type Command,
@@ -42,7 +43,16 @@ import {
 } from './types'
 
 // Nombre por defecto de cada tripulante.
-export const CREW_NAMES: Record<CrewId, string> = { bandana: 'Brodozer', sarge: 'Sarge', rookie: 'Rookie', desert: 'Desert' }
+export const CREW_NAMES: Record<CrewId, string> = {
+  bandana: 'Brodozer',
+  sarge: 'Sarge',
+  rookie: 'Rookie',
+  desert: 'Desert',
+  commando: 'Comando',
+  goggles: 'Tanquista',
+  pilot: 'Piloto',
+  colonel: 'Coronel',
+}
 
 function initialAmmo(): Record<WeaponId, number> {
   const ammo = {} as Record<WeaponId, number>
@@ -69,7 +79,8 @@ export function biomeFor(mode: Biome | 'random' | 'rotate', seed: number, round:
 
 export function createMatch(config: MatchConfig): GameState {
   const seed = (config.seed ?? 1) >>> 0 || 1
-  const slots = (config.slots ?? []).slice(0, 4)
+  const sizeKey: MapSize = config.size && MAP_SIZES[config.size] ? config.size : 'small'
+  const slots = (config.slots ?? []).slice(0, MAX_PLAYERS_BY_SIZE[sizeKey])
   while (slots.length < 2) slots.push({ kind: 'ai' })
   const rounds = Math.max(1, Math.floor(config.rounds || 1))
   const biomeMode = config.biome ?? BIOMES[0]

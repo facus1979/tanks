@@ -250,6 +250,7 @@ Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 
     - flujo: aplica cada parche en su `t`, los daños posteriores van al fin del flujo + 0,25 s, el turno espera el flujo; cámara `watch` sobre flujos de ≥ 300 celdas a la vista o cerca (zoom ≥ 0,5); sonidos `splash`, `boomUnder`, `steam`, `flow` (agua o lava), `plunge`.
     - Pendientes: vetas en la lava honda (tablas de la banda, ya anotado en V2); no hay derrumbe de tierra en la sim, así que "tierra sobre lava → piedra" solo aplica al `build`; posibles mejoras de contrato: `Impact.water` (explosión sumergida exacta) y salpicaduras en `RenderFrame`.
 - **V5 Hasta 8 jugadores.** Arte, HUD, lobby local y online.
+  - Decidido (2026-10-02): Chico hasta 4, Mediano hasta 6, Grande hasta 8 (`MAX_PLAYERS_BY_SIZE`); el ritmo de la IA no cambia. Tripulantes nuevos: Comando (boina negra), Tanquista (casco de cuero y antiparras), Piloto (casco y pelo recogido), Coronel (bigote blanco). Colores nuevos: violeta, naranja, turquesa y rosa. Contrato: `CrewId`/`CREWS` de 8, `MAX_PLAYERS`, `MAX_PLAYERS_BY_SIZE`, `TANK_COLORS` de 8 (`src/sim/types.ts`), `tank.bodies`/`barrels` de 8 en el manifiesto, `LobbyState.slots` siempre de 8.
 
 ### Pulido v2 (2026-10-02)
 

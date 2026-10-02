@@ -31,7 +31,16 @@ export const SIZE_NAMES: Record<MapSize, string> = { small: 'CHICO', medium: 'ME
 const SIZE_CHOICES: { id: MapSize; name: string }[] = MAP_SIZE_ORDER.map((id) => ({ id, name: SIZE_NAMES[id] }))
 const KIND_NAMES: Record<SlotKind, string> = { human: 'HUMANO', ai: 'IA', empty: 'VACIO' }
 const KIND_CYCLE: SlotKind[] = ['human', 'ai', 'empty']
-const CREW_NAMES: Record<CrewId, string> = { bandana: 'BANDANA', sarge: 'SARGENTO', rookie: 'NOVATO', desert: 'DESIERTO' }
+const CREW_NAMES: Record<CrewId, string> = {
+  bandana: 'BANDANA',
+  sarge: 'SARGENTO',
+  rookie: 'NOVATO',
+  desert: 'DESIERTO',
+  commando: 'COMANDO',
+  goggles: 'TANQUISTA',
+  pilot: 'PILOTO',
+  colonel: 'CORONEL',
+}
 const NAME_MAX = 10
 const STORE = 'tanks.menu2'
 

@@ -11,7 +11,16 @@ type OptionKey = 'rounds' | 'difficulty' | 'biome' | 'size' | 'turnSeconds'
 
 const KIND_CYCLE: SlotKind[] = ['human', 'ai', 'off']
 const KIND_NAMES: Record<SlotKind, string> = { human: 'HUMANO', ai: 'IA', off: 'VACIO' }
-const CREW_NAMES: Record<CrewId, string> = { bandana: 'BANDANA', sarge: 'SARGENTO', rookie: 'NOVATO', desert: 'DESIERTO' }
+const CREW_NAMES: Record<CrewId, string> = {
+  bandana: 'BANDANA',
+  sarge: 'SARGENTO',
+  rookie: 'NOVATO',
+  desert: 'DESIERTO',
+  commando: 'COMANDO',
+  goggles: 'TANQUISTA',
+  pilot: 'PILOTO',
+  colonel: 'CORONEL',
+}
 
 // fallback: el valor que se muestra si el lobby no trae la clave (un anfitrión anterior a v2 no manda size)
 const OPTIONS: { key: OptionKey; name: string; values: { v: number | string; text: string }[]; fallback?: number | string }[] = [

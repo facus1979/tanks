@@ -34,7 +34,7 @@ export interface LobbySlot {
 
 export interface LobbyState {
   code: string
-  slots: LobbySlot[] // siempre 4
+  slots: LobbySlot[] // siempre MAX_PLAYERS (8, v5); el anfitrión solo deja ocupar MAX_PLAYERS_BY_SIZE[size]
   rounds: number
   difficulty: Difficulty
   biome: Biome | 'random' | 'rotate'

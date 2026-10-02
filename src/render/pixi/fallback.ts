@@ -137,6 +137,11 @@ const CREW_DEF: Record<CrewId, { rows: string[]; pal: Record<string, number> }> 
   sarge: { rows: CREW_SARGE, pal: { H: 0x4a5a2a, J: 0x6e8040, M: 0x3a2214, n: 0x5a5030 } },
   rookie: { rows: CREW_BANDANA, pal: { b: 0x2a2a2a, B: 0x4a4a4a, g: 0x6a3a1a, G: 0xc89a4a, c: 0x6b3e1f, e: 0xff8a30, n: 0x3a4454 } },
   desert: { rows: CREW_SARGE, pal: { H: 0x8a7650, J: 0xb09a6c, M: 0x8a8a84, n: 0x6a5a3a } },
+  // v5: provisorios (variantes de color) hasta que el área arte pinte los tripulantes nuevos
+  commando: { rows: CREW_BANDANA, pal: { b: 0x1a1a1a, B: 0x3a3a3a, g: 0x141414, G: 0x8ab0d0, c: 0x4a2c16, e: 0xff8a30, n: 0x2a3a2a } },
+  goggles: { rows: CREW_SARGE, pal: { H: 0x5a3a22, J: 0x8a5a32, M: 0x3a2214, n: 0x4a4038 } },
+  pilot: { rows: CREW_SARGE, pal: { H: 0x6a6e74, J: 0x9aa0a6, M: 0x6a3a1a, n: 0x3a4454 } },
+  colonel: { rows: CREW_SARGE, pal: { H: 0x3a4a2a, J: 0x5a6e3a, M: 0xe8e4dc, n: 0x5a5030 } },
 }
 export function crewSprite(crew: CrewId): HTMLCanvasElement {
   const def = CREW_DEF[crew] ?? CREW_DEF.bandana

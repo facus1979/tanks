@@ -225,8 +225,14 @@ export type Difficulty = 'easy' | 'normal' | 'hard'
 export type Phase = 'aiming' | 'roundover' | 'shop' | 'gameover'
 
 // Tripulantes con cara propia. El renderer mapea crew -> sprite y retrato.
-export type CrewId = 'bandana' | 'sarge' | 'rookie' | 'desert'
-export const CREWS: CrewId[] = ['bandana', 'sarge', 'rookie', 'desert']
+// v5: cuatro más (comando con boina negra, tanquista con casco de cuero y antiparras, piloto con casco y
+// pelo recogido, coronel de bigote blanco). El orden fija el tripulante por defecto de cada casillero.
+export type CrewId = 'bandana' | 'sarge' | 'rookie' | 'desert' | 'commando' | 'goggles' | 'pilot' | 'colonel'
+export const CREWS: CrewId[] = ['bandana', 'sarge', 'rookie', 'desert', 'commando', 'goggles', 'pilot', 'colonel']
+
+// v5: hasta 8 jugadores, limitado por el tamaño del mapa (en Chico no entran más de 4 con lugar para moverse).
+export const MAX_PLAYERS = 8
+export const MAX_PLAYERS_BY_SIZE: Record<MapSize, number> = { small: 4, medium: 6, large: 8 }
 
 // ---------- tienda e ítems ----------
 
@@ -280,7 +286,7 @@ export interface SlotConfig {
 }
 
 export interface MatchConfig {
-  slots: SlotConfig[] // 2 a 4 casilleros ocupados; hot-seat = varios 'human'
+  slots: SlotConfig[] // 2 a MAX_PLAYERS_BY_SIZE[size] casilleros ocupados (v5: hasta 8); hot-seat = varios 'human'
   rounds: number // 1, 3, 5 o 10
   difficulty: Difficulty
   biome?: Biome | 'random' | 'rotate' // fijo, al azar por ronda, o rotando forest→jungle→industrial
@@ -416,4 +422,5 @@ export interface StepResult {
   flights?: Flight[]
 }
 
-export const TANK_COLORS = [0x3d8cf0, 0xe23d3d, 0xe2c13d, 0x3dbe5a]
+// Azul, rojo, amarillo, verde y (v5) violeta, naranja, turquesa y rosa. El índice es player.id.
+export const TANK_COLORS = [0x3d8cf0, 0xe23d3d, 0xe2c13d, 0x3dbe5a, 0xa65ae0, 0xf0903a, 0x3ad0c8, 0xe85aa0]
