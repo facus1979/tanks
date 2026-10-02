@@ -27,9 +27,12 @@ import {
   type WeaponId,
 } from './types'
 
+// v5: la normal pasa de ±6° / ±7 a ±7° / ±8. Con el desempate simétrico (flatTie) los tanques que tiran
+// hacia la izquierda dejaron de tirar globos verticales y las partidas se acortaban (Chico 2 tanques 9,9 →
+// 8,4 tiros); con este error vuelven al ritmo de antes.
 const ERROR: Record<Difficulty, { angle: number; power: number }> = {
   easy: { angle: 9, power: 12 },
-  normal: { angle: 6, power: 7 },
+  normal: { angle: 7, power: 8 },
   hard: { angle: 1, power: 1.5 },
 }
 
@@ -59,6 +62,50 @@ const COST: Record<WeaponId, number> = {
 // (el costo de cada arma se multiplica por esto) y la IA pesa el daño de lava que la espera.
 const LAVA_COST_SCALE = 0.25
 const SELF_WEIGHT = 18 // lo mismo que pesa un punto de autodaño en el puntaje
+
+// v5: desempate simétrico. Muchos tiros dan exactamente el mismo puntaje (un impacto directo hace el
+// daño entero del arma, con cualquier ángulo que pegue) y la búsqueda se quedaba con el primero que
+// encontraba: el de menor ángulo. Hacia la derecha eso es el tiro más plano; hacia la izquierda, el
+// globo más vertical (más expuesto al viento y al error). Resultado: el tanque de la punta izquierda
+// ganaba 2 de cada 3 rondas en todos los tamaños. Con este desempate gana el tiro más plano hacia los
+// dos lados (no cambia ningún puntaje de verdad: a lo sumo 0,0001 puntos; solo separa empates exactos).
+const TIE_EPS = 1e-6
+function flatTie(angle: number): number {
+  return -Math.min(angle, 180 - angle) * TIE_EPS
+}
+
+// v5: prioridad de cada rival (con 6 u 8 tanques importa a quién se le tira). Multiplica el daño que se
+// le hace en el puntaje. Con un solo rival vale 1 (2 tanques: como antes).
+// - cercanía: el rival más cerca es el tiro más seguro (el error de puntería crece con la distancia) y
+//   el que más rápido la puede lastimar: hasta +NEAR_W, que se va a 0 a NEAR_RANGE px;
+// - amenaza: el rival entero (vida + escudo) es el que más turnos le queda para tirarle: hasta +STRONG_W;
+// - líder: el que más rondas ganó (si le saca ventaja a todos): +LEADER_W.
+// El más débil pesa por su cuenta: matarlo suma KILL_BONUS (un rival menos que tira; antes 25 y solo en
+// simulate, así que un tiro que mataba casi nunca llegaba a verificarse).
+// Medido con 8 IA en Grande (40 rondas): con cercanía 0,3 y "amenaza = el que me tiene de blanco más
+// cercano" las puntas y el que abre la ronda ganaban la mitad; con estos pesos el ganador queda
+// repartido entre las posiciones.
+const NEAR_W = 0.15
+const NEAR_RANGE = 600
+const STRONG_W = 0.3
+const LEADER_W = 0.1
+const KILL_BONUS = 40 // en puntos de daño (· 10 en el puntaje; simulate suma lo mismo por kill)
+function priorities(actor: Player, targets: Player[]): Map<number, number> {
+  const out = new Map<number, number>()
+  if (targets.length < 2) {
+    for (const t of targets) out.set(t.id, 1)
+    return out
+  }
+  const topWins = Math.max(...targets.map((t) => t.roundsWon))
+  const leaders = targets.filter((t) => t.roundsWon === topWins).length
+  for (const t of targets) {
+    let w = 1 + NEAR_W * Math.max(0, 1 - Math.abs(t.x - actor.x) / NEAR_RANGE)
+    w += (STRONG_W * Math.min(PLAYER_HP, t.hp + t.shield)) / PLAYER_HP
+    if (topWins > 0 && leaders === 1 && t.roundsWon === topWins) w += LEADER_W
+    out.set(t.id, w)
+  }
+  return out
+}
 
 function costOf(state: GameState, id: WeaponId): number {
   return state.lava !== null ? COST[id] * LAVA_COST_SCALE : COST[id]
@@ -133,7 +180,7 @@ interface Search {
 export function chooseShot(state: GameState, difficulty: Difficulty, random?: () => number): ShotPlan {
   const actor = state.players[state.current]
   const rand = random ?? rngFor(state)
-  flowBudget = AI_FLOW_BUDGET
+  flowBudget = flowBudgetFor(state.terrain.w)
   const weapons = WEAPON_ORDER.filter((id) => actor.ammo[id] > 0 && WEAPONS[id].terrain !== 'build')
   const fallback = weapons[0] ?? WEAPON_ORDER.find((id) => actor.ammo[id] > 0) ?? 'normal'
   const targets = state.players.filter((p) => p.alive && p.id !== actor.id)
@@ -152,18 +199,21 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
   // así sale de la lava o se aleja de ella (hacia arriba) si puede, y no se mete caminando.
   const wander = rand() < 0.15
   const risk = lavaRisk(state, actor.y) + poolRisk(state, actor)
-  let total = best.score - risk
+  const total = best.score - risk
   if (actor.fuel > 0 && (best.score < 1000 || wander || risk > 0)) {
     const steps = risk > 0 ? [-60, -40, -20, 20, 40, 60] : best.score < 1000 ? [-40, -20, 20, 40] : [-20, 20]
+    // v5: se queda con la mejor posición de todas (antes, la primera que superaba por 60 a la actual, y
+    // como las de la izquierda se prueban primero, ganaban los empates: otro sesgo hacia un lado)
+    let top = total + 60
     for (const d of steps) {
       const moved = walk(state, d)
       if (!moved) continue
       const c = search(moved.state, weapons, false).best
       const mp = moved.state.players[moved.state.current]
       const score = c.score - lavaRisk(state, mp.y) - poolRisk(moved.state, mp)
-      if (score > total + 60) {
+      if (score > top) {
         best = c
-        total = score
+        top = score
         move = moved.dx
       }
     }
@@ -242,6 +292,7 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   let total = 0
   let blocked = 0
   const sky = skylineOf(state.terrain, state.players, state.props)
+  const prio = priorities(actor, targets)
   // v3: rivales que se sostienen sobre un abismo (ver ledgeOf): la estimación suma el tiro que les
   // rompe el piso, y la simulación completa confirma si de verdad caen.
   const ledges = ledgesOf(state.terrain, targets)
@@ -264,7 +315,7 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   const brinks = brinksOf(state.terrain, targets)
   const brinkAim = brinks.map(() => ({ angle: 0, power: 0, d: Infinity }))
   const consider = (angle: number, power: number) => {
-    const r = estimate(state, actor, targets, weapons, angle, power, sky, ledges)
+    const r = estimate(state, actor, targets, weapons, angle, power, sky, ledges, prio)
     total++
     if (r.at) {
       for (const l of ledges) {
@@ -330,7 +381,7 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   for (const la of lipAim) if (la.d < 16) pool.push({ angle: la.angle, power: la.power, weapon: lipWeapon, score: 0 })
   let verified: Candidate = { ...best, score: -Infinity }
   for (const c of pool) {
-    const score = simulate(state, c)
+    const score = simulate(state, c, prio)
     if (score > verified.score) verified = { ...c, score }
   }
   return { best: verified, blocked: total > 0 ? blocked / total : 0 }
@@ -345,6 +396,7 @@ function estimate(
   power: number,
   skyline?: Int16Array,
   ledges: Ledge[] = [],
+  prio?: Map<number, number>,
 ): { list: Candidate[]; blocked: boolean; at?: { x: number; y: number } } {
   const flight = fly({
     skyline,
@@ -375,7 +427,8 @@ function estimate(
     for (const t of targets) {
       let d = t.id === flight.impact.tankId ? w.damage : blastDamage(t, blast)
       if (w.burn && Math.abs(t.x - x) < NAPALM_SPREAD && Math.abs(t.y - y) < 30) d += NAPALM_DPS * w.burn
-      dmg += Math.min(t.hp + t.shield, d)
+      const hit = Math.min(t.hp + t.shield, d)
+      if (hit > 0) dmg += hit * (prio?.get(t.id) ?? 1) + (d >= t.hp + t.shield ? KILL_BONUS : 0)
     }
     // v3: el tiro le rompe el piso a un rival parado sobre el abismo: cae y muere (vale como matarlo)
     let push = false
@@ -388,7 +441,7 @@ function estimate(
     }
     const self = blastDamage(actor, blast)
     const cost = costOf(state, id)
-    const score = dmg > 0 ? 1000 + dmg * 10 - self * SELF_WEIGHT - cost : -near - self * SELF_WEIGHT - cost * 0.01
+    const score = (dmg > 0 ? 1000 + dmg * 10 - self * SELF_WEIGHT - cost : -near - self * SELF_WEIGHT - cost * 0.01) + flatTie(angle)
     list.push(push ? { angle, power, weapon: id, score, push } : { angle, power, weapon: id, score })
   }
   return { list, blocked, at: flight.impact }
@@ -468,7 +521,7 @@ function scratchState(state: GameState): GameState {
   }
 }
 
-function simulate(state: GameState, c: Candidate): number {
+function simulate(state: GameState, c: Candidate, prio?: Map<number, number>): number {
   const s = scratchState(state)
   const actor = s.players[s.current]
   actor.angle = c.angle
@@ -489,7 +542,7 @@ function simulate(state: GameState, c: Candidate): number {
   for (const p of s.players) {
     const b = before[p.id]
     if (p.id === actor.id || !b.alive) continue
-    dmg += b.hp - p.hp
+    dmg += (b.hp - p.hp) * (prio?.get(p.id) ?? 1)
     if (!p.alive) kills++
     else if (newlyInLava(state, s, p.id)) dmg += Math.min(p.hp + p.shield, AI_LAVA_HIT)
     for (const e of events) if (e.type === 'impact') near = Math.min(near, Math.hypot(p.x - e.x, p.y - TANK_H / 2 - e.y))
@@ -510,7 +563,7 @@ function simulate(state: GameState, c: Candidate): number {
     drift += p.id === actor.id ? -2 * (d0 - d1) * HAZARD_PULL : (d0 - d1) * HAZARD_PULL
   }
   const cost = costOf(state, c.weapon)
-  return (dmg > 0 ? 1000 + dmg * 10 + kills * 250 - self * SELF_WEIGHT - cost : -near - self * SELF_WEIGHT - cost * 0.01) + drift
+  return (dmg > 0 ? 1000 + dmg * 10 + kills * KILL_BONUS * 10 - self * SELF_WEIGHT - cost : -near - self * SELF_WEIGHT - cost * 0.01) + drift + flatTie(c.angle)
 }
 
 // Pulido v2: columnas peligrosas (abismo o lava arriba de todo) por grilla. Se calcula una vez por grilla
@@ -622,6 +675,12 @@ const AI_FLOW_ITERS = 200
 // flujos simulados por turno de la IA (se recarga en chooseShot): acota el peor caso con lava cerca
 const AI_FLOW_BUDGET = 8
 let flowBudget = AI_FLOW_BUDGET
+// v5: cada flujo simulado cuesta más cuanto más ancho el mapa (en Grande ~17 ms) y con 8 tanques hay más
+// bordes de pozo con un rival abajo: el tope baja con el cuadrado del ancho pasado Mediano (Grande: 4)
+// para que el turno siga bajo 250 ms. Chico y Mediano quedan en AI_FLOW_BUDGET.
+function flowBudgetFor(width: number): number {
+  return Math.min(AI_FLOW_BUDGET, Math.round(AI_FLOW_BUDGET * (1600 / width) ** 2))
+}
 
 // v4: el tanque id no tenía lava en la caja antes del tiro y después sí.
 function newlyInLava(before: GameState, after: GameState, id: number): boolean {

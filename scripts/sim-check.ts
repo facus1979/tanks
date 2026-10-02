@@ -24,6 +24,9 @@ import {
   SUDDEN_DEATH_CALM,
   MAP_SIZES,
   MAP_SIZE_ORDER,
+  MAX_PLAYERS,
+  MAX_PLAYERS_BY_SIZE,
+  TANK_COLORS,
   physicsFor,
   applyCommand,
   chooseShot,
@@ -75,9 +78,9 @@ import {
 } from '../src/sim'
 import { propSupported, resolveBlast, blastFor } from '../src/sim/physics'
 import { lavaRisk } from '../src/sim/ai'
-import { LAVA_DELAY } from '../src/sim/game'
+import { LAVA_DELAY, calmLockTurn, CALM_LOCK_MIN } from '../src/sim/game'
 import { skylineOf } from '../src/sim/ballistics'
-import { generate, padBounds, SPAWN_PIT_GAP, type Generated } from '../src/sim/gen'
+import { generate, padBounds, SPAWN_PIT_GAP, SPAWN_GAP_CROWD, spawnStats, type Generated } from '../src/sim/gen'
 import { Rng } from '../src/sim/rng'
 import { cloneTerrain, columnGround, createTerrain, deform, fillRect, hasLiquid } from '../src/sim/terrain'
 import { applyPatch, flowLiquids, liquidVolume } from '../src/sim/flow'
@@ -339,6 +342,46 @@ function liquidChecks(g: Generated, tag: string): void {
   }
 }
 
+// Cada tanque bien parado al empezar: dentro del mapa, apoyado, sin estructura en la caja, con el pad
+// empalmado al terreno y lejos de los demás (v5: también se usa con 6 y 8 tanques).
+function tankChecks(s: GameState, tag: string): void {
+  const t = s.terrain
+  const W = s.width
+  for (const p of s.players) {
+    check(p.x >= 20 && p.x <= W - 20, `tanque fuera del mapa ${tag} p${p.id}`)
+    let support = 0
+    for (let x = p.x - TANK_HALF_W; x < p.x + TANK_HALF_W; x++) if (isSolid(t, x, p.y)) support++
+    check(support >= 24, `tanque ${p.id} mal apoyado (${support}/28) ${tag}`)
+    check(groundAt(t, p.x, TANK_HALF_W, p.y - TANK_H - 2) === p.y, `piso del tanque ${p.id} no coincide ${tag}`)
+    // la caja del tanque, libre del todo; alrededor, sin materiales de estructura
+    let inside = 0
+    for (let y = p.y - TANK_H - 4; y < p.y; y++) {
+      for (let x = p.x - TANK_HALF_W - 4; x < p.x + TANK_HALF_W + 4; x++) {
+        const i = y * W + x
+        const body = y >= p.y - TANK_H && x >= p.x - TANK_HALF_W && x < p.x + TANK_HALF_W
+        if (body ? t.front[i] !== AIR || t.back[i] !== AIR : STRUCTURE.has(t.front[i]) || STRUCTURE.has(t.back[i])) inside++
+      }
+    }
+    check(inside === 0, `tanque ${p.id} dentro de una estructura (${inside} px) ${tag}`)
+    // el pad empalma con el terreno: sin paredes verticales en los bordes
+    const [px0, px1] = padBounds(p.x)
+    let worst = 0
+    const from = p.y - TANK_H - 4
+    const soil = (x: number) => {
+      const g = columnGround(t, x, from)
+      return STRUCTURE.has(t.front[g * W + x]) ? -1 : g
+    }
+    for (let x = Math.max(0, px0 - 8); x < Math.min(W - 1, px1 + 8); x++) {
+      const a = soil(x)
+      const b = soil(x + 1)
+      if (a >= 0 && b >= 0) worst = Math.max(worst, Math.abs(a - b))
+    }
+    check(worst <= MAX_CLIMB, `pad del tanque ${p.id} con escalón de ${worst} px ${tag}`)
+    check(p.crew !== undefined && p.color !== undefined, `tanque ${p.id} sin crew/color ${tag}`)
+    for (const q of s.players) if (q.id > p.id) check(Math.abs(q.x - p.x) >= 70, `tanques ${p.id} y ${q.id} muy cerca ${tag}`)
+  }
+}
+
 // ---------- 2. generación válida ----------
 const STRUCTURE = new Set([BRICK, WOOD, SLAT, BEAM, POST, METAL])
 const signature: Record<Biome, number[]> = { forest: [STONE, BRICK, SLAT], jungle: [STONE, SLAT], industrial: [BRICK, METAL] }
@@ -381,39 +424,7 @@ for (const size of MAP_SIZE_ORDER) for (const biome of BIOMES) {
         check(xs[0] < span && xs[xs.length - 1] > W - span, `spawns sin cubrir el ancho (${xs.join(',')}) ${tag}`)
         for (let i = 1; i < xs.length; i++) check(xs[i] - xs[i - 1] >= span * 0.3, `spawns amontonados (${xs.join(',')}) ${tag}`)
       }
-      for (const p of s.players) {
-        check(p.x >= 20 && p.x <= W - 20, `tanque fuera del mapa ${tag} p${p.id}`)
-        let support = 0
-        for (let x = p.x - TANK_HALF_W; x < p.x + TANK_HALF_W; x++) if (isSolid(t, x, p.y)) support++
-        check(support >= 24, `tanque ${p.id} mal apoyado (${support}/28) ${tag}`)
-        check(groundAt(t, p.x, TANK_HALF_W, p.y - TANK_H - 2) === p.y, `piso del tanque ${p.id} no coincide ${tag}`)
-        // la caja del tanque, libre del todo; alrededor, sin materiales de estructura
-        let inside = 0
-        for (let y = p.y - TANK_H - 4; y < p.y; y++) {
-          for (let x = p.x - TANK_HALF_W - 4; x < p.x + TANK_HALF_W + 4; x++) {
-            const i = y * W + x
-            const body = y >= p.y - TANK_H && x >= p.x - TANK_HALF_W && x < p.x + TANK_HALF_W
-            if (body ? t.front[i] !== AIR || t.back[i] !== AIR : STRUCTURE.has(t.front[i]) || STRUCTURE.has(t.back[i])) inside++
-          }
-        }
-        check(inside === 0, `tanque ${p.id} dentro de una estructura (${inside} px) ${tag}`)
-        // el pad empalma con el terreno: sin paredes verticales en los bordes
-        const [px0, px1] = padBounds(p.x)
-        let worst = 0
-        const from = p.y - TANK_H - 4
-        const soil = (x: number) => {
-          const g = columnGround(t, x, from)
-          return STRUCTURE.has(t.front[g * W + x]) ? -1 : g
-        }
-        for (let x = Math.max(0, px0 - 8); x < Math.min(W - 1, px1 + 8); x++) {
-          const a = soil(x)
-          const b = soil(x + 1)
-          if (a >= 0 && b >= 0) worst = Math.max(worst, Math.abs(a - b))
-        }
-        check(worst <= MAX_CLIMB, `pad del tanque ${p.id} con escalón de ${worst} px ${tag}`)
-        check(p.crew !== undefined && p.color !== undefined, `tanque ${p.id} sin crew/color ${tag}`)
-        for (const q of s.players) if (q.id > p.id) check(Math.abs(q.x - p.x) >= 70, `tanques ${p.id} y ${q.id} muy cerca ${tag}`)
-      }
+      tankChecks(s, tag)
       const kinds = new Set(s.props.map((p) => p.kind))
       for (const k of ['barrel', 'ladder', 'flag', 'windsock'] as const) check(kinds.has(k), `falta utilería ${k} ${tag}`)
       if (biome !== 'industrial') check(kinds.has('lamp') && kinds.has('crate'), `falta foco o caja ${tag}`)
@@ -442,6 +453,75 @@ for (const size of MAP_SIZE_ORDER) {
       for (const x of xs) check(spawnProblem(g, x) === null, `8 spawns: ${spawnProblem(g, x)} en x=${x} ${size}/${biome}/${seed}`)
     }
   }
+}
+
+// ---------- 2d. v5: hasta 8 jugadores (6 en Mediano, 8 en Grande) ----------
+{
+  // tope por tamaño en createMatch, colores y tripulantes distintos
+  check(MAX_PLAYERS === 8 && TANK_COLORS.length === 8 && CREWS.length === 8 && new Set(TANK_COLORS).size === 8, 'v5: 8 colores y 8 tripulantes')
+  for (const size of MAP_SIZE_ORDER) {
+    const s = createMatch({ slots: Array.from({ length: 8 }, () => ({ kind: 'ai' as const })), rounds: 1, difficulty: 'normal', seed: 3, size })
+    check(s.players.length === MAX_PLAYERS_BY_SIZE[size], `v5: ${size} recorta a ${MAX_PLAYERS_BY_SIZE[size]} jugadores (${s.players.length})`)
+    check(new Set(s.players.map((p) => p.color)).size === s.players.length && new Set(s.players.map((p) => p.crew)).size === s.players.length, `v5: colores y tripulantes repetidos en ${size}`)
+  }
+  // Chico no cambia: los mapas de 1 a 4 jugadores, byte a byte iguales a los de v1-v4 (hash de grillas,
+  // utilería y spawns de 30 seeds × 3 biomas × 1-4 jugadores, tomado antes de v5)
+  let all = 0x811c9dc5
+  for (const biome of BIOMES) {
+    for (let seed = 1; seed <= 30; seed++) {
+      for (let c = 1; c <= 4; c++) {
+        const g = generate(biome, new Rng(roundSeed(seed, 1)), c)
+        let h = 0x811c9dc5
+        const mix = (b: number) => {
+          h ^= b & 0xff
+          h = Math.imul(h, 0x01000193)
+        }
+        for (const b of g.terrain.front) mix(b)
+        for (const b of g.terrain.back) mix(b)
+        const rest = JSON.stringify({ props: g.props, spawns: g.spawns })
+        for (let i = 0; i < rest.length; i++) mix(rest.charCodeAt(i))
+        all = Math.imul(all ^ (h >>> 0), 0x01000193) >>> 0
+      }
+    }
+  }
+  check(all.toString(16) === '1a082a97', `v5: los mapas de Chico cambiaron (hash ${all.toString(16)}, esperaba 1a082a97)`)
+
+  // spawns con 6 en Mediano y 8 en Grande: válidos, repartidos a lo ancho y a SPAWN_GAP_CROWD o más
+  // (más que el alcance de cualquier arma al arrancar: ningún tiro llega a dos tanques a la vez)
+  const reach = Math.max(...WEAPON_ORDER.map((id) => WEAPONS[id].radius)) + 2 * TANK_HALF_W
+  check(SPAWN_GAP_CROWD > reach, `v5: SPAWN_GAP_CROWD (${SPAWN_GAP_CROWD}) mayor que el alcance de una explosión entre dos tanques (${reach})`)
+  let minGap = Infinity
+  let maps = 0
+  spawnStats.levels.fill(0)
+  for (const [size, n] of [['medium', 6], ['large', 8], ['large', 6]] as [MapSize, number][]) {
+    for (const biome of BIOMES) {
+      for (let seed = 1; seed <= 8; seed++) {
+        const s = createMatch({ slots: Array.from({ length: n }, () => ({ kind: 'ai' as const })), rounds: 1, difficulty: 'normal', biome, seed, size })
+        const tag = `${size}/${biome}/seed ${seed}/${n} jugadores`
+        maps++
+        check(s.players.length === n, `v5: cantidad de jugadores ${tag}`)
+        tankChecks(s, tag)
+        const g = generate(biome, new Rng(roundSeed(seed, 1)), n, s.width, s.height)
+        check(g.spawns.every((x, i) => x === s.players[i].x), `v5: generate no coincide con createMatch ${tag}`)
+        for (const x of g.spawns) check(spawnProblem(g, x) === null, `v5: spawn en x=${x}: ${spawnProblem(g, x)} ${tag}`)
+        for (const p of s.players) check(!hasLiquid(s.terrain, WATER, p.x - TANK_HALF_W, p.y - TANK_H, p.x + TANK_HALF_W, p.y + 1) && !hasLiquid(s.terrain, LAVA, p.x - TANK_HALF_W, p.y - TANK_H, p.x + TANK_HALF_W, p.y + 1), `v5: tanque nace en un líquido ${tag} p${p.id}`)
+        const xs = s.players.map((p) => p.x).sort((a, b) => a - b)
+        const span = s.width / n
+        check(xs[0] < span && xs[n - 1] > s.width - span, `v5: spawns sin cubrir el ancho (${xs.join(',')}) ${tag}`)
+        for (let i = 1; i < n; i++) {
+          minGap = Math.min(minGap, xs[i] - xs[i - 1])
+          check(xs[i] - xs[i - 1] >= SPAWN_GAP_CROWD, `v5: spawns a menos de ${SPAWN_GAP_CROWD} px (${xs.join(',')}) ${tag}`)
+        }
+        // repartidos: ningún hueco entre vecinos mayor que 2,5 veces el espacio parejo (en 300 mapas la
+        // mediana del hueco más grande es 1,4 y el peor 2,34: un lago y un abismo seguidos sin lugar)
+        for (let i = 1; i < n; i++) check(xs[i] - xs[i - 1] <= span * 2.5, `v5: hueco grande entre spawns (${xs.join(',')}) ${tag}`)
+      }
+    }
+  }
+  // spawnStats: niveles 4+ = sin lugar a la separación buscada o sin el chequeo de piso (cima, estructura)
+  const loose = spawnStats.levels.slice(4).reduce((a, b) => a + b, 0)
+  console.log(`v5 spawns: ${maps} mapas de 6-8 jugadores, separación mínima ${minGap} px, niveles de búsqueda ${spawnStats.levels.join('/')}`)
+  check(loose === 0, `v5: ${loose} spawns sin lugar bueno (cima, estructura o pegados)`)
 }
 
 // ---------- 3. IA ----------
@@ -708,12 +788,16 @@ interface MatchStats {
   lavaMs: number // v2: peor tiempo de la IA con la lava activa
   abyss: number // v3: muertes por abismo
   walked: number // v3: muertes por abismo de una IA que caminó hasta ahí (tiene que ser 0)
+  rank: number // v5: posición del ganador contando desde la izquierda al empezar (-1 sin ganador)
+  opener: boolean // v5: ganó el que abrió la ronda
 }
 // v4: eventos de líquidos en las partidas del balance (quemaduras de lava sin muerte súbita = pileta)
 const liquidEvents = { splash: 0, water: 0, lava: 0, steam: 0 }
 function match(bots: number, seed: number, size: MapSize = 'small'): MatchStats {
   const biome = BIOMES[seed % BIOMES.length]
   let s = createMatch(mk(bots, 'normal', biome, seed, 1, 0, size))
+  const order = s.players.map((p) => p.id).sort((a, b) => s.players[a].x - s.players[b].x)
+  const opener = s.current
   let shots = 0
   let byLava = false
   let lavaMs = 0
@@ -742,7 +826,8 @@ function match(bots: number, seed: number, size: MapSize = 'small'): MatchStats 
     if (r.state.phase !== 'aiming') byLava = lavaKill(r.events)
     s = r.state
   }
-  return { shots, turns: s.turn, winner: s.roundWinnerId, weapons, sudden: s.lava !== null, byLava, lavaMs, abyss, walked }
+  const w = s.roundWinnerId
+  return { shots, turns: s.turn, winner: w, weapons, sudden: s.lava !== null, byLava, lavaMs, abyss, walked, rank: w === null ? -1 : order.indexOf(w), opener: w === opener }
 }
 // Chico con 20 partidas (el balance de v1); Mediano y Grande con 10 (con --balance, 20).
 {
@@ -1274,6 +1359,20 @@ function lavaKill(events: GameEvent[]): boolean {
   }
   const r4 = miss(s4)
   check(r4.state.phase === 'roundover' && r4.state.roundWinnerId === null && r4.state.players.every((p) => !p.alive), 'lava: todos quemados → empate')
+  // v5: la lava no mata al último en pie: gana el que aguantó más (más vida a la misma altura, o menos hundido)
+  const v6 = cloneState(s4)
+  v6.players[0].hp = 18
+  const w6 = miss(v6)
+  check(w6.state.phase === 'roundover' && w6.state.roundWinnerId === 0 && w6.state.players[0].alive && w6.state.players[0].hp === 18 && !w6.state.players[1].alive, 'v5 lava: a la misma altura gana el que tenía más vida')
+  const v7 = cloneState(s4)
+  v7.players[0].y = 320
+  v7.players[1].y = 310
+  const w7 = miss(v7)
+  check(w7.state.phase === 'roundover' && w7.state.roundWinnerId === 1 && w7.state.players[1].alive && !w7.state.players[0].alive, 'v5 lava: gana el menos hundido')
+  const v8 = cloneState(s4)
+  v8.players[0].hp = 60
+  const w8 = miss(v8)
+  check(w8.state.phase === 'roundover' && w8.state.roundWinnerId === 0 && w8.state.players[0].hp === 60 - LAVA_DAMAGE, 'v5 lava: si la quemadura no lo mata, el último se quema igual')
   // el tanque que está arriba de la superficie no se quema
   const s5 = cloneState(s)
   s5.players[1].y = 300
@@ -2471,6 +2570,205 @@ function pushAt(weapon: WeaponId, x: number, y = 270, prep?: (s: GameState) => v
   }
   console.log(`IA: empuja al rival al abismo ${pushed}/6`)
   check(pushed >= 3, `IA: no usa el empuje (${pushed}/6)`)
+}
+// ---------- 17. v5: hasta 8 jugadores (IA, reglas, réplicas y balance) ----------
+// Mapa llano de prueba en Grande con 8 tanques en las x dadas (y = 300), toda la munición.
+function crowdMap(xs: number[], hp: number[] = []): GameState {
+  const s = cloneState(createMatch({ slots: xs.map(() => ({ kind: 'ai' as const })), rounds: 1, difficulty: 'hard', biome: 'forest', seed: 4, size: 'large' }))
+  const t = s.terrain
+  t.front.fill(AIR)
+  t.back.fill(AIR)
+  t.pits = new Uint8Array(t.w)
+  fillRect(t, 0, 300, t.w - 1, t.h - 1, DIRT, 'both')
+  fillRect(t, 0, t.h - 3, t.w - 1, t.h - 1, BEDROCK, 'both')
+  s.props = []
+  s.players.forEach((p, i) => {
+    p.x = xs[i]
+    p.y = 300
+    p.hp = hp[i] ?? 100
+    for (const id of WEAPON_ORDER) p.ammo[id] = WEAPONS[id].ammo
+  })
+  s.current = 0
+  s.wind = 0
+  return s
+}
+// A quién le pega el plan de la IA (sin error): el rival que más vida pierde, o -1.
+function targetOf(s: GameState, ammo?: Partial<Record<WeaponId, number>>): number {
+  if (ammo) for (const id of WEAPON_ORDER) s.players[s.current].ammo[id] = ammo[id] ?? 0
+  const plan = chooseShot(s, 'hard', () => 0.5)
+  let q = s
+  for (let i = 0; i < Math.abs(plan.move ?? 0); i++) q = applyCommand(q, { type: 'move', playerId: q.players[q.current].id, dir: (plan.move ?? 0) > 0 ? 1 : -1 }).state
+  const r = shoot(q, plan.weapon, plan.angle, plan.power)
+  let best = -1
+  let lost = 0
+  for (const p of r.state.players) {
+    if (p.id === s.players[s.current].id) continue
+    const d = s.players[p.id].hp - p.hp
+    if (d > lost) {
+      lost = d
+      best = p.id
+    }
+  }
+  return best
+}
+{
+  // IA con 8: elige blancos con sentido (solo normal, sin error de puntería; tres vientos)
+  let weak = 0
+  let near = 0
+  let strong = 0
+  for (const wind of [-6, 0, 6]) {
+    // el más débil (se lo mata de un tiro) antes que uno entero más cerca
+    const a = crowdMap([300, 520, 760, 1100, 1400, 1700, 2000, 2300], [100, 100, 15])
+    a.wind = wind
+    if (targetOf(a, { normal: 99 }) === 2) weak++
+    // todos enteros: el más cercano
+    const b = crowdMap([300, 520, 900, 1150, 1400, 1700, 2000, 2300])
+    b.wind = wind
+    if (targetOf(b, { normal: 99 }) === 1) near++
+    // a la misma distancia, el entero (la amenaza a la que más turnos le quedan) antes que uno a medio morir
+    const c = crowdMap([1200, 950, 1450, 300, 550, 1800, 2050, 2300], [100, 100, 50])
+    c.wind = wind
+    if (targetOf(c, { normal: 99 }) === 1) strong++
+  }
+  console.log(`v5 IA con 8: al más débil ${weak}/3, al más cercano ${near}/3, al entero antes que al tocado ${strong}/3`)
+  check(weak >= 2, `v5: la IA no remata al más débil (${weak}/3)`)
+  check(near >= 2, `v5: la IA no elige al más cercano (${near}/3)`)
+  check(strong >= 2, `v5: la IA no elige al rival entero (${strong}/3)`)
+}
+{
+  // IA simétrica: sin error, en el mapa espejado hace el tiro espejado (antes, los empates se los
+  // quedaba el ángulo más bajo y la punta izquierda ganaba 2 de cada 3 rondas)
+  const mirror = (s0: GameState): GameState => {
+    const s = cloneState(s0)
+    const t = s.terrain
+    for (const g of [t.front, t.back]) for (let y = 0; y < t.h; y++) g.subarray(y * t.w, (y + 1) * t.w).reverse()
+    if (t.pits) t.pits = t.pits.slice().reverse()
+    for (const p of s.players) {
+      p.x = t.w - p.x
+      p.angle = 180 - p.angle
+    }
+    for (const p of s.props) p.x = t.w - p.x - (p.kind === 'flag' || p.kind === 'windsock' ? 2 : p.w)
+    s.wind = -s.wind
+    return s
+  }
+  let same = 0
+  let total = 0
+  for (const size of ['small', 'large'] as MapSize[]) {
+    for (let seed = 1; seed <= 6; seed++) {
+      const s = createMatch(mk(3, 'normal', BIOMES[seed % 3], seed, 1, 0, size))
+      const a = chooseShot(s, 'normal', () => 0.5)
+      const b = chooseShot(mirror(s), 'normal', () => 0.5)
+      total++
+      if (a.weapon === b.weapon && Math.abs(a.angle - (180 - b.angle)) <= 0.6 && Math.abs(a.power - b.power) <= 0.6) same++
+    }
+  }
+  console.log(`v5 IA simétrica: ${same}/${total} tiros espejados`)
+  check(same >= total * 0.8, `v5: la IA no es simétrica (${same}/${total} tiros espejados)`)
+}
+{
+  // tope de calma: desde calmLockTurn el daño ya no reinicia la calma
+  check(calmLockTurn(2) === CALM_LOCK_MIN && calmLockTurn(4) === CALM_LOCK_MIN && calmLockTurn(8) === 32, `v5: calmLockTurn ${calmLockTurn(2)}/${calmLockTurn(4)}/${calmLockTurn(8)}`)
+  const s = flat()
+  s.calm = 2
+  s.turn = calmLockTurn(2) - 1
+  const before = shoot(s, 'normal', 90, 1)
+  check(before.events.some((e) => e.type === 'damage') && before.state.calm === 0, `v5: antes del tope el daño reinicia la calma (calm ${before.state.calm})`)
+  s.turn = calmLockTurn(2)
+  const after = shoot(s, 'normal', 90, 1)
+  check(after.events.some((e) => e.type === 'damage') && after.state.calm === 3 && calmEvents(after).some((e) => e.left === SUDDEN_DEATH_CALM - 3), `v5: desde el tope el daño ya no reinicia la calma (calm ${after.state.calm})`)
+}
+{
+  // réplicas y determinismo con 8 tanques en Grande: el log aplicado en otra réplica, con snapshot a mitad
+  const config: MatchConfig = { slots: [{ kind: 'human' }, ...Array.from({ length: 7 }, () => ({ kind: 'ai' as const }))], rounds: 2, difficulty: 'normal', biome: 'rotate', seed: 23, size: 'large' }
+  check(netHash(createMatch(config)) === netHash(createMatch(config)), 'v5: createMatch con 8 determinista')
+  let a = createMatch(config)
+  let b = decodeState(encodeState(a))
+  let steps = 0
+  let diverged = 0
+  let snap = false
+  let opener = -1
+  let guard = 0
+  const send = (cmd: Command) => {
+    a = applyCommand(a, cmd).state
+    b = applyCommand(b, cmd).state
+    steps++
+    if (netHash(a) !== netHash(b)) diverged++
+  }
+  while (a.phase !== 'gameover' && guard++ < 400) {
+    if (a.phase === 'aiming') {
+      if (a.round === 2 && opener < 0) opener = a.current
+      const p = a.players[a.current]
+      const plan = chooseShot(a, 'normal')
+      for (const item of plan.items ?? []) send({ type: 'useItem', playerId: p.id, item })
+      for (let i = 0; i < Math.abs(plan.move ?? 0); i++) send({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
+      if (a.current !== p.id || a.phase !== 'aiming') continue
+      send({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon })
+      send({ type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power })
+      send({ type: 'fire', playerId: p.id })
+      if (!snap && steps > 60) {
+        snap = true
+        b = decodeState(encodeState(b))
+      }
+    } else if (a.phase === 'roundover') send({ type: 'nextRound' })
+    else if (a.phase === 'shop') for (const p of a.players) if (a.phase === 'shop' && !p.ready) send({ type: 'ready', playerId: p.id })
+  }
+  check(a.phase === 'gameover' && a.round === 2 && a.players.length === 8, `v5: partida de 8 en Grande sin terminar (${a.phase}, ronda ${a.round})`)
+  check(diverged === 0 && netHash(a) === netHash(b), `v5: réplicas con 8: ${diverged} pasos distintos`)
+  // la segunda ronda la abre el jugador 1 ((ronda - 1) % jugadores), igual que con 4
+  check(opener === 1, `v5: la ronda 2 la abre el jugador ${opener}`)
+  console.log(`v5 réplicas con 8: ${steps} comandos, ${(encodeState(a).length / 1024).toFixed(0)} KB por snapshot`)
+}
+{
+  // tiempo de la IA con 6 en Mediano y 8 en Grande (la difícil, que busca más)
+  const worst: Record<string, number> = {}
+  for (const [size, n] of [['medium', 6], ['large', 8]] as [MapSize, number][]) {
+    const key = `${size} ${n}`
+    for (const biome of BIOMES) {
+      for (const seed of [2, 5, 9, 14]) {
+        let s = createMatch({ slots: Array.from({ length: n }, () => ({ kind: 'ai' as const })), rounds: 1, difficulty: 'hard', biome, seed, size })
+        for (let turn = 0; turn < 4 && s.phase === 'aiming'; turn++) {
+          const r = aiTurn(s, 'hard')
+          const tag = `${key}/${biome}/${seed}`
+          worst[key] = Math.max(worst[key] ?? 0, r.ms)
+          worstMs = Math.max(worstMs, r.ms)
+          check(r.ms < AI_BUDGET_MS, `v5: la IA tardó ${r.ms.toFixed(0)} ms ${tag}`)
+          check(r.events.some((e) => e.type === 'impact'), `v5: el tiro de la IA no explotó ${tag} turno ${turn}`)
+          s = r.state
+        }
+      }
+    }
+  }
+  console.log(`v5 IA peor caso: ${Object.entries(worst).map(([k, v]) => `${k} ${v.toFixed(0)} ms`).join(', ')}`)
+}
+{
+  // balance con 6 IA en Mediano y 8 en Grande (10 partidas; con --balance, 20)
+  const games = process.argv.includes('--balance') ? 20 : 10
+  for (const [size, n] of [['medium', 6], ['large', 8]] as [MapSize, number][]) {
+    const t0 = performance.now()
+    const res: MatchStats[] = []
+    for (let seed = 1; seed <= games; seed++) res.push(match(n - 1, 100 + seed, size))
+    const shots = res.map((r) => r.shots)
+    const avg = shots.reduce((a, b) => a + b, 0) / games
+    const turns = res.reduce((a, r) => a + r.turns, 0) / games
+    const ranks = new Array(n).fill(0)
+    for (const r of res) if (r.rank >= 0) ranks[r.rank]++
+    const edges = ranks[0] + ranks[n - 1]
+    const opener = res.filter((r) => r.opener).length
+    const sudden = res.filter((r) => r.sudden).length
+    const byLava = res.filter((r) => r.byLava).length
+    const draws = res.filter((r) => r.winner === null).length
+    const lavaMs = Math.max(...res.map((r) => r.lavaMs))
+    console.log(
+      `balance ${size} ${n} tanques: ${avg.toFixed(1)} tiros/partida (min ${Math.min(...shots)}, max ${Math.max(...shots)}, ${games} partidas), ${turns.toFixed(1)} turnos, empates ${draws}, muerte súbita en ${sudden}/${games} (terminan por la lava ${byLava})`,
+    )
+    console.log(`  ganador por posición desde la izquierda ${ranks.join('/')} (puntas ${edges}), gana el que abre ${opener}/${games}; IA con lava peor caso ${lavaMs.toFixed(0)} ms; ${((performance.now() - t0) / 1000).toFixed(1)} s`)
+    check(res.every((r) => r.walked === 0), `v5: la IA caminó al abismo (${size} ${n})`)
+    check(shots.every((x) => x < 120), `v5: partida de ${n} sin terminar (${size})`)
+    check(lavaMs < AI_BUDGET_MS, `v5: la IA con lava tardó ${lavaMs.toFixed(0)} ms (${size} ${n})`)
+    // objetivo: ~40 tiros con 8 (el tope de calma corta las rondas largas)
+    check(avg <= (n === 8 ? 40 : 34) && Math.max(...shots) <= (n === 8 ? 52 : 46), `v5: balance ${size} ${n} tanques: ${avg.toFixed(1)} tiros/partida, máximo ${Math.max(...shots)}`)
+    check(Math.max(...ranks) <= games * 0.6, `v5: una posición gana demasiado (${ranks.join('/')}) ${size} ${n}`)
+  }
 }
 console.log(`IA peor caso: ${worstMs.toFixed(0)} ms`)
 console.log(`${checks - failures}/${checks} chequeos OK`)
