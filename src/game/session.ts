@@ -127,8 +127,8 @@ const LAVA_TAIL = 0.4
 const ABYSS_G = 700
 const ABYSS_MIN = 0.5
 const ABYSS_MAX = 1.6
-const ABYSS_HOLD = 0.45
-const ABYSS_TAIL = 0.7
+const ABYSS_HOLD = 1.3
+const ABYSS_TAIL = 1.5
 // Pixels debajo del mapa donde termina la caída: el tanque, el tripulante y el cartel ya no se ven.
 const ABYSS_BELOW = TANK_H + 30
 
