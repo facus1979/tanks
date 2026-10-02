@@ -16,6 +16,9 @@ import {
   WOOD,
   WORLD_H,
   WORLD_W,
+  LAVA_DAMAGE,
+  LAVA_RISE,
+  SUDDEN_DEATH_CALM,
   MAP_SIZES,
   MAP_SIZE_ORDER,
   physicsFor,
@@ -58,6 +61,8 @@ import {
   type WeaponId,
 } from '../src/sim'
 import { propSupported, resolveBlast, blastFor } from '../src/sim/physics'
+import { lavaRisk } from '../src/sim/ai'
+import { LAVA_DELAY } from '../src/sim/game'
 import { skylineOf } from '../src/sim/ballistics'
 import { generate, padBounds } from '../src/sim/gen'
 import { Rng } from '../src/sim/rng'
@@ -509,20 +514,34 @@ check(WEAPON_ORDER.length === 8, 'WEAPON_ORDER tiene las 8 armas')
 }
 
 // ---------- 10. balance (F9): IA contra IA ----------
-function match(bots: number, seed: number, size: MapSize = 'small'): { shots: number; turns: number; winner: number | null; weapons: Record<string, number> } {
+interface MatchStats {
+  shots: number
+  turns: number
+  winner: number | null
+  weapons: Record<string, number>
+  sudden: boolean // v2: arrancó la muerte súbita
+  byLava: boolean // v2: la ronda terminó con una muerte por lava
+  lavaMs: number // v2: peor tiempo de la IA con la lava activa
+}
+function match(bots: number, seed: number, size: MapSize = 'small'): MatchStats {
   const biome = BIOMES[seed % BIOMES.length]
   let s = createMatch(mk(bots, 'normal', biome, seed, 1, 0, size))
   let shots = 0
+  let byLava = false
+  let lavaMs = 0
   const weapons: Record<string, number> = {}
   while (s.phase === 'aiming' && shots < 120) {
+    const lava = s.lava !== null
     const r = aiTurn(s, 'normal')
+    if (lava) lavaMs = Math.max(lavaMs, r.ms)
     if (r.flights) {
       shots++
       weapons[r.plan.weapon] = (weapons[r.plan.weapon] ?? 0) + 1
     }
+    if (r.state.phase !== 'aiming') byLava = lavaKill(r.events)
     s = r.state
   }
-  return { shots, turns: s.turn, winner: s.roundWinnerId, weapons }
+  return { shots, turns: s.turn, winner: s.roundWinnerId, weapons, sudden: s.lava !== null, byLava, lavaMs }
 }
 // Chico con 20 partidas (el balance de v1); Mediano y Grande con 10 (con --balance, 20).
 {
@@ -537,11 +556,18 @@ function match(bots: number, seed: number, size: MapSize = 'small'): { shots: nu
       const avg = shots.reduce((a, b) => a + b, 0) / shots.length
       const used: Record<string, number> = {}
       for (const r of res) for (const k in r.weapons) used[k] = (used[k] ?? 0) + r.weapons[k]
+      const sudden = res.filter((r) => r.sudden).length
+      const byLava = res.filter((r) => r.byLava).length
+      const lavaMs = Math.max(...res.map((r) => r.lavaMs))
       console.log(
         `balance ${size} ${bots + 1} tanques: ${avg.toFixed(1)} tiros/partida (min ${Math.min(...shots)}, max ${Math.max(...shots)}, ${games} partidas), empates ${res.filter((r) => r.winner === null).length}, armas ${JSON.stringify(used)}`,
       )
+      console.log(`  muerte súbita en ${sudden}/${games} rondas, terminan por la lava ${byLava}/${games}, IA con lava peor caso ${lavaMs.toFixed(0)} ms`)
       check(shots.every((n) => n < 120), `partida de ${bots + 1} sin terminar (${size})`)
-      if (bots === 1) check(avg >= 8 && avg <= (size === 'small' ? 15 : 20), `balance ${size} 2 tanques fuera de rango (${avg.toFixed(1)})`)
+      check(lavaMs < AI_BUDGET_MS, `la IA con lava tardó ${lavaMs.toFixed(0)} ms (${size})`)
+      // v2: con la muerte súbita ningún tamaño se estira (objetivo ~15 con 2 tanques y ~25 con 4)
+      if (bots === 1) check(avg >= 8 && avg <= (size === 'small' ? 15 : 16), `balance ${size} 2 tanques fuera de rango (${avg.toFixed(1)})`)
+      else check(avg <= 27, `balance ${size} 4 tanques: ${avg.toFixed(1)} tiros/partida (tope 27)`)
     }
     console.log(`balance ${size}: ${((performance.now() - t0) / 1000).toFixed(1)} s`)
   }
@@ -937,6 +963,242 @@ function toRoundover(): GameState {
   const per = (performance.now() - t1) / 20
   console.log(`hashState: ${per.toFixed(2)} ms por llamada (${hashMs.toFixed(0)} ms en las réplicas)`)
   check(per < 5, `hashState rápido (${per.toFixed(2)} ms)`)
+}
+
+// ---------- 13. muerte súbita (v2): calma, lava que sube, daño, proyectiles derretidos ----------
+type DamageEv = Extract<GameEvent, { type: 'damage' }>
+const lavaEvents = (r: StepResult) => r.events.filter((e): e is Extract<GameEvent, { type: 'lava' }> => e.type === 'lava')
+const calmEvents = (r: StepResult) => r.events.filter((e): e is Extract<GameEvent, { type: 'calm' }> => e.type === 'calm')
+// Tiro que se va del mapa por la izquierda: no daña a nadie ni toca el terreno.
+const miss = (s: GameState) => shoot(s, 'normal', s.players[s.current].x < s.width / 2 ? 178 : 2, 100)
+// Murió alguien quemado por la lava en estos eventos.
+function lavaKill(events: GameEvent[]): boolean {
+  return events.some((d) => d.type === 'death' && events.some((e) => e.type === 'damage' && e.cause === 'lava' && e.playerId === d.playerId))
+}
+{
+  // la calma sube con cada tiro sin daño y se resetea con daño
+  let s = flat()
+  check(s.calm === 0 && s.lava === null, 'muerte súbita: estado inicial calm 0, lava null')
+  let r = miss(s)
+  check(r.state.calm === 1 && calmEvents(r).length === 1 && calmEvents(r)[0].left === SUDDEN_DEATH_CALM - 1, `calma: un tiro sin daño suma 1 (calm ${r.state.calm})`)
+  check(r.flights![0].impact.kind === 'out' && r.state.players.every((p) => p.hp === 100), 'calma: el tiro de prueba sale del mapa sin daño')
+  s = miss(r.state).state
+  check(s.calm === 2, 'calma: dos tiros sin daño')
+  r = shoot(s, 'normal', 90, 1) // cae encima del que tira: autodaño
+  check(r.events.some((e) => e.type === 'damage'), 'calma: el tiro vertical hace daño')
+  check(r.state.calm === 0 && calmEvents(r).some((e) => e.left === SUDDEN_DEATH_CALM), `calma: el daño la vuelve a 0 (calm ${r.state.calm})`)
+  // el escudo cuenta como daño
+  const sh = cloneState(s)
+  sh.players[0].shield = 100
+  const rs = shoot(sh, 'normal', 90, 1)
+  check(rs.events.some((e) => e.type === 'shield') && !rs.events.some((e) => e.type === 'damage') && rs.state.calm === 0, 'calma: lo que absorbe el escudo cuenta como daño')
+  // un tiro sin cambio en la cuenta no emite 'calm'
+  const z = cloneState(flat())
+  const rz = shoot(z, 'normal', 90, 1)
+  check(rz.state.calm === 0 && calmEvents(rz).length === 0, 'calma: si no cambia lo que falta, no hay evento calm')
+
+  // SUDDEN_DEATH_CALM tiros sin daño: aparece la lava en el fondo y sube LAVA_RISE por turno
+  s = flat()
+  for (let i = 0; i < SUDDEN_DEATH_CALM - 1; i++) {
+    r = miss(s)
+    check(lavaEvents(r).length === 0 && r.state.lava === null, `muerte súbita: no empieza antes de tiempo (tiro ${i + 1})`)
+    s = r.state
+  }
+  r = miss(s)
+  const first = lavaEvents(r)
+  check(r.state.calm === SUDDEN_DEATH_CALM && calmEvents(r).some((e) => e.left === 0), 'muerte súbita: calm llega al tope y avisa left 0')
+  check(first.length === 1 && first[0].from === null && first[0].to === s.height - LAVA_RISE && first[0].warn === 0, `muerte súbita: la lava aparece en el fondo (${JSON.stringify(first[0])})`)
+  check(r.state.lava === s.height - LAVA_RISE, 'muerte súbita: state.lava = superficie')
+  const turnAt = r.events.findIndex((e) => e.type === 'turn')
+  const lavaAt = r.events.findIndex((e) => e.type === 'lava')
+  check(lavaAt >= 0 && turnAt > lavaAt, 'muerte súbita: la lava va antes del cambio de turno')
+  s = r.state
+  // ya empezada: el daño no la frena y sube en todos los turnos
+  r = shoot(s, 'normal', 90, 1)
+  check(r.events.some((e) => e.type === 'damage') && r.state.calm === SUDDEN_DEATH_CALM, 'muerte súbita: el daño ya no resetea la calma')
+  check(lavaEvents(r).length === 1 && r.state.lava === s.lava! - LAVA_RISE && lavaEvents(r)[0].from === s.lava, 'muerte súbita: sube LAVA_RISE en cada turno')
+  check(calmEvents(r).length === 0, 'muerte súbita: sin eventos calm después de empezar')
+  s = r.state
+  r = miss(s)
+  check(r.state.lava === s.lava! - LAVA_RISE, 'muerte súbita: sube también con tiros sin daño')
+}
+{
+  // daño de lava al empezar el turno: con t posterior al último impacto y cause 'lava'
+  const s = flat()
+  s.calm = SUDDEN_DEATH_CALM
+  s.lava = 440
+  s.players[1].y = 440 // por debajo de la superficie después de subir
+  s.players[1].shield = 0
+  const r = shoot(s, 'normal', 60, 30) // cae lejos de los dos
+  const imp = impactsOf(r)
+  check(imp.length >= 1 && r.state.players[0].hp === 100, 'lava: el tiro de prueba explota sin dañar')
+  const burn = r.events.filter((e): e is DamageEv => e.type === 'damage' && e.cause === 'lava')
+  check(burn.length === 1 && burn[0].playerId === 1 && burn[0].amount === LAVA_DAMAGE && r.state.players[1].hp === 100 - LAVA_DAMAGE, `lava: quema LAVA_DAMAGE al que está adentro (${JSON.stringify(burn)})`)
+  const lastImpact = Math.max(...imp.map((e) => e.t))
+  check(!!burn[0] && burn[0].t! >= lastImpact + LAVA_DELAY - 1e-9, `lava: el daño va después del último impacto (${burn[0]?.t} vs ${lastImpact})`)
+  const iLava = r.events.findIndex((e) => e.type === 'lava')
+  const iBurn = r.events.findIndex((e) => e.type === 'damage' && e.cause === 'lava')
+  const iImpact = r.events.findIndex((e) => e.type === 'impact')
+  check(iImpact < iLava && iLava < iBurn, 'lava: orden impacto → lava → daño')
+  check(r.state.earnings[0] === 0 && r.state.earnings[1] === 0, 'lava: el daño de lava no da ni quita plata')
+  // escudo: la lava pasa por el escudo como cualquier daño
+  const s2 = cloneState(s)
+  s2.players[1].shield = SHIELD_HP
+  const r2 = miss(s2)
+  const shield = r2.events.find((e): e is Extract<GameEvent, { type: 'shield' }> => e.type === 'shield' && e.playerId === 1)
+  check(!!shield && shield.absorbed === LAVA_DAMAGE && typeof shield.t === 'number' && r2.state.players[1].hp === 100, 'lava: el escudo absorbe la quemadura')
+  // mata, termina la ronda y no cuenta como kill; todos quemados = empate
+  const s3 = cloneState(s)
+  s3.players[1].hp = 10
+  const r3 = miss(s3)
+  check(r3.state.phase === 'roundover' && r3.state.roundWinnerId === 0 && lavaKill(r3.events), 'lava: mata y termina la ronda')
+  check(r3.state.players[0].kills === 0, 'lava: la muerte por lava no es kill de nadie')
+  const s4 = cloneState(s)
+  s4.lava = 305 // los dos en el suelo (300) quedan abajo al subir
+  for (const p of s4.players) {
+    p.y = 300
+    p.hp = 15
+  }
+  const r4 = miss(s4)
+  check(r4.state.phase === 'roundover' && r4.state.roundWinnerId === null && r4.state.players.every((p) => !p.alive), 'lava: todos quemados → empate')
+  // el tanque que está arriba de la superficie no se quema
+  const s5 = cloneState(s)
+  s5.players[1].y = 300
+  check(!miss(s5).events.some((e) => e.type === 'damage'), 'lava: arriba de la superficie no quema')
+}
+{
+  // proyectil derretido: lava por encima del suelo (300); los tanques asoman (boca a ~270)
+  const melt = (weapon: WeaponId, angle: number, power: number) => {
+    const s = flat()
+    s.calm = SUDDEN_DEATH_CALM
+    s.lava = 292
+    for (const p of s.players) p.hp = 100
+    const front = s.terrain.front.slice()
+    const back = s.terrain.back.slice()
+    const r = shoot(s, weapon, angle, power)
+    const last = r.flights![r.flights!.length - 1]
+    check(r.flights!.some((f) => f.impact.kind === 'lava'), `derretido ${weapon}: impacto 'lava'`)
+    check(impactsOf(r).length === 0 && !r.events.some((e) => e.type === 'burn'), `derretido ${weapon}: no explota`)
+    const t = r.state.terrain
+    check(t.front.every((m, i) => m === front[i]) && t.back.every((m, i) => m === back[i]), `derretido ${weapon}: no deforma`)
+    check(!r.events.some((e) => e.type === 'damage' && e.cause !== 'lava'), `derretido ${weapon}: no daña`)
+    check(last.impact.y >= s.lava - 1, `derretido ${weapon}: termina en la superficie (${last.impact.y.toFixed(1)})`)
+  }
+  melt('normal', 135, 30)
+  melt('heavy', 120, 40)
+  melt('napalm', 135, 30)
+  melt('digger', 135, 30)
+  melt('nuke', 135, 30)
+  melt('cluster', 135, 45)
+  melt('roller', 135, 30)
+  // rodadora que cae rodando a un pozo con lava
+  let rolled = false
+  for (let power = 20; power <= 60 && !rolled; power += 2) {
+    const s = flat()
+    fillRect(s.terrain, 330, 300, 380, 420, AIR, 'both')
+    s.calm = SUDDEN_DEATH_CALM
+    s.lava = 360
+    const r = shoot(s, 'roller', 45, power)
+    if (r.flights!.length === 2 && r.flights![0].impact.kind === 'terrain' && r.flights![1].impact.kind === 'lava') {
+      rolled = true
+      check(impactsOf(r).length === 0, 'rodadora: la que rueda a la lava no explota')
+    }
+  }
+  check(rolled, 'rodadora: hay un tiro que rueda hasta el pozo de lava')
+  // vuelo con y sin skyline: misma respuesta también con lava
+  const s = createMatch(mk(1, 'normal', 'forest', 3, 1, 0, 'medium'))
+  const sky = skylineOf(s.terrain, s.players, s.props)
+  const p = s.players[0]
+  let same = 0
+  let melted = 0
+  for (let angle = 20; angle <= 160; angle += 20) {
+    for (let power = 30; power <= 100; power += 10) {
+      const base = { terrain: s.terrain, players: s.players, props: s.props, ownerId: p.id, angle, power, wind: s.wind, lava: 340 }
+      const a = fly(base)
+      const b = fly({ ...base, skyline: sky })
+      if (JSON.stringify(a) === JSON.stringify(b)) same++
+      if (a.impact.kind === 'lava') melted++
+    }
+  }
+  check(same === 64 && melted > 0, `lava + skyline: vuelos iguales (${same}/64, ${melted} derretidos)`)
+}
+{
+  // mover hacia la lava: se puede entrar y quema al empezar el turno siguiente
+  const s = flat()
+  fillRect(s.terrain, 230, 300, 300, 330, AIR, 'both') // pozo pegado al tanque 0 (x 200)
+  s.calm = SUDDEN_DEATH_CALM
+  s.lava = 340
+  let m = s
+  for (let i = 0; i < 60; i++) m = applyCommand(m, { type: 'move', playerId: 0, dir: 1 }).state
+  check(m.players[0].y > s.players[0].y, `move: el tanque cae al pozo (y ${m.players[0].y})`)
+  const r = miss(m)
+  check(m.players[0].y > r.state.lava! && r.events.some((e) => e.type === 'damage' && e.cause === 'lava' && e.playerId === 0), 'move: el que se metió en la lava se quema')
+}
+{
+  // IA: sale de la lava hacia arriba (rampa a la izquierda), no se mete y no tira a la lava
+  const s = flat()
+  s.terrain.front.fill(AIR)
+  s.terrain.back.fill(AIR)
+  for (let x = 0; x < WORLD_W; x++) {
+    const top = x < 400 ? 300 - Math.floor((400 - x) / 5) : 300
+    fillRect(s.terrain, x, top, x, WORLD_H - 1, DIRT, 'both')
+  }
+  s.players[0].x = 420
+  s.players[0].y = 300
+  s.players[1].x = 720
+  s.players[1].y = 300
+  s.calm = SUDDEN_DEATH_CALM
+  s.lava = 310 // todavía no lo toca, pero al subir sí
+  check(lavaRisk(s, 300) > lavaRisk(s, 288) && lavaRisk(s, 200) === 0, 'IA: lavaRisk pesa solo lo que la lava alcanza')
+  const plan = chooseShot(s, 'normal')
+  check((plan.move ?? 0) < 0, `IA: se aleja de la lava subiendo la rampa (move ${plan.move})`)
+  // sin lava, el mismo lugar no la hace moverse por la lava
+  const calm = cloneState(s)
+  calm.lava = null
+  calm.calm = 0
+  check(lavaRisk(calm, 300) === 0, 'IA: sin muerte súbita no hay riesgo de lava')
+  // con la lava alta casi todo se derrite: la IA (difícil) igual busca los tiros que pegan en lo que asoma
+  const t = flat()
+  t.calm = SUDDEN_DEATH_CALM
+  t.lava = 295
+  let lavaShots = 0
+  for (let i = 0; i < 4; i++) {
+    const r = aiTurn(t, 'hard')
+    if (r.flights?.every((f) => f.impact.kind === 'lava')) lavaShots++
+    t.wind = (t.wind + 3) % 10
+  }
+  check(lavaShots <= 1, `IA: no elige tiros que se derriten (${lavaShots}/4 derretidos)`)
+}
+{
+  // toda ronda termina: nadie se daña (sin munición, pasan) y la lava los quema a todos en un tope de turnos
+  for (const size of MAP_SIZE_ORDER) {
+    for (const bots of [1, 3]) {
+      const run = () => {
+        let s = cloneState(createMatch(mk(bots, 'normal', 'forest', 21, 1, 0, size)))
+        for (const p of s.players) for (const id of WEAPON_ORDER) p.ammo[id] = 0
+        const events: GameEvent[] = []
+        let turns = 0
+        while (s.phase === 'aiming' && turns < 200) {
+          const r = applyCommand(s, { type: 'fire', playerId: s.players[s.current].id })
+          events.push(...r.events)
+          s = r.state
+          turns++
+        }
+        return { s, events, turns }
+      }
+      const a = run()
+      const highest = Math.min(...createMatch(mk(bots, 'normal', 'forest', 21, 1, 0, size)).players.map((p) => p.y))
+      // turnos hasta que la lava pase al tanque más alto, más los que tarda en quemarlo entero (+1 de margen)
+      const bound = SUDDEN_DEATH_CALM + Math.ceil((a.s.height - highest) / LAVA_RISE) + Math.ceil(100 / LAVA_DAMAGE) + 1
+      check(a.s.phase === 'roundover' && a.turns <= bound, `ronda pacífica ${size} ${bots + 1}: termina por la lava en ${a.turns} turnos (tope ${bound})`)
+      check(lavaKill(a.events), `ronda pacífica ${size} ${bots + 1}: muertes por lava`)
+      const b = run()
+      check(hashState(a.s) === hashState(b.s) && JSON.stringify(a.events) === JSON.stringify(b.events), `ronda pacífica ${size} ${bots + 1}: determinista`)
+      const back = decodeState(encodeState(a.s))
+      check(back.lava === a.s.lava && back.calm === a.s.calm && netHash(back) === netHash(a.s), `ronda pacífica ${size}: snapshot conserva lava y calma`)
+      if (bots === 3) console.log(`ronda pacífica ${size} ${bots + 1}: ${a.turns} turnos, lava en y ${a.s.lava}`)
+    }
+  }
 }
 
 console.log(`IA peor caso: ${worstMs.toFixed(0)} ms`)
