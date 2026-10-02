@@ -2,11 +2,18 @@
 // Botones en pantalla que se mantienen apretados (mover, ángulo, potencia) o se tocan (fuego, arma, ítem, pausa),
 // y apuntado arrastrando sobre el campo de batalla: la dirección del arrastre es el ángulo y el largo la potencia.
 // v2: con dos dedos se arrastra el mundo (paneo de la cámara) y el botón ◎ recentra en tu tanque.
+// v2 ajuste fino: en los botones de ángulo y potencia, un toque corto mueve un paso fino (FINE_STEP) y
+// mantener mueve continuo: arranca a 1/5 de velocidad y a los RAMP segundos pasa a velocidad plena.
 import type { Vec2 } from '../sim/types'
 import type { PadAction, PadState } from './gamepad'
 
 // Largo del arrastre (en pixels de mundo) que equivale a potencia 100.
 const DRAG_FULL = 160
+// Toque más corto que esto = un paso fino; más largo = continuo (segundos).
+const TAP_TIME = 0.25
+const FINE_STEP = 0.2 // grados o puntos de potencia por toque corto
+const RAMP = 0.6 // segundos de continuo lento antes de ir a velocidad plena
+const SLOW = 0.2
 
 export interface TouchAim {
   angle: number
@@ -26,6 +33,8 @@ export class TouchControls {
   private guide = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
   private line = document.createElementNS('http://www.w3.org/2000/svg', 'line')
   private held = new Set<Hold>()
+  private heldAt = new Map<Hold, number>() // cuándo se apoyó cada botón (performance.now, ms)
+  private steps = { angle: 0, power: 0 } // pasos finos de toques cortos sin levantar todavía
   private pressed = new Set<PadAction>()
   private drag: { id: number; x0: number; y0: number; aim: TouchAim | null } | null = null
   private active = false
@@ -75,6 +84,8 @@ export class TouchControls {
     document.documentElement.classList.toggle('touch-playing', on)
     if (!on) {
       this.held.clear()
+      this.heldAt.clear()
+      this.steps = { angle: 0, power: 0 }
       this.pressed.clear()
       this.endDrag()
       this.fingers.clear()
@@ -97,16 +108,33 @@ export class TouchControls {
 
   // Mismo formato que el gamepad, así main.ts lo suma sin casos especiales.
   poll(): PadState {
-    const state: PadState = { angle: 0, power: 0, move: 0, pan: 0, pressed: this.pressed }
+    const state: PadState = {
+      angle: 0,
+      power: 0,
+      move: 0,
+      pan: 0,
+      fine: false,
+      stepAngle: this.steps.angle,
+      stepPower: this.steps.power,
+      pressed: this.pressed,
+    }
     this.pressed = new Set()
-    if (this.held.has('angUp')) state.angle += 1
-    if (this.held.has('angDown')) state.angle -= 1
-    if (this.held.has('powUp')) state.power += 1
-    if (this.held.has('powDown')) state.power -= 1
+    this.steps = { angle: 0, power: 0 }
+    state.angle += this.speed('angUp') - this.speed('angDown')
+    state.power += this.speed('powUp') - this.speed('powDown')
     const l = this.held.has('left')
     const r = this.held.has('right')
     if (l !== r) state.move = l ? -1 : 1
     return state
+  }
+
+  // Velocidad continua de un botón de ángulo o potencia: 0 durante el toque corto, después lenta y plena.
+  private speed(kind: Hold): number {
+    const at = this.heldAt.get(kind)
+    if (!this.held.has(kind) || at == null) return 0
+    const held = (performance.now() - at) / 1000
+    if (held < TAP_TIME) return 0
+    return held < TAP_TIME + RAMP ? SLOW : 1
   }
 
   // Ángulo y potencia absolutos mientras se arrastra, o null.
@@ -117,19 +145,34 @@ export class TouchControls {
   private hold(kind: Hold, text: string): HTMLButtonElement {
     const b = btn(text)
     const off = (): void => {
+      // pointerup y lostpointercapture llegan los dos: solo el primero cuenta
+      if (this.held.has(kind)) {
+        const at = this.heldAt.get(kind) ?? 0
+        if ((performance.now() - at) / 1000 < TAP_TIME) this.tapStep(kind)
+      }
       this.held.delete(kind)
+      this.heldAt.delete(kind)
       b.classList.remove('on')
     }
     b.addEventListener('pointerdown', (e) => {
       e.preventDefault()
       b.setPointerCapture(e.pointerId)
       this.held.add(kind)
+      this.heldAt.set(kind, performance.now())
       b.classList.add('on')
     })
     b.addEventListener('pointerup', off)
     b.addEventListener('pointercancel', off)
     b.addEventListener('lostpointercapture', off)
     return b
+  }
+
+  // Toque corto en ángulo o potencia: un paso fino.
+  private tapStep(kind: Hold): void {
+    if (kind === 'angUp') this.steps.angle += FINE_STEP
+    else if (kind === 'angDown') this.steps.angle -= FINE_STEP
+    else if (kind === 'powUp') this.steps.power += FINE_STEP
+    else if (kind === 'powDown') this.steps.power -= FINE_STEP
   }
 
   private tap(action: PadAction, text: string, cls = ''): HTMLButtonElement {

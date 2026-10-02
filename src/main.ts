@@ -61,6 +61,8 @@ const demo =
 // ?play=<seed>: QA, entra directo a una partida sin pasar por el título ni el menú.
 // &humans=N (hot-seat), &bots=N, &rounds=N, &size=.
 const playParam = demo || uitest ? null : params.get('play')
+// &calm=N (solo con ?play=): la primera ronda arranca con N tiros sin daño ya contados (QA de la muerte súbita)
+const calmParam = playParam != null && params.has('calm') ? Math.max(0, Math.round(Number(params.get('calm')) || 0)) : null
 // &aisync=1: QA, la IA calcula en el hilo principal (para comparar contra el worker)
 const aiSync = params.get('aisync') === '1'
 // Online: ?host=1, ?join=CODIGO, ?net=local, ?autotest=1 (scripts/net-test.mjs)
@@ -75,6 +77,8 @@ const ITEM_KEYS: Record<string, ItemId> = { KeyQ: 'shield', KeyF: 'fuel', KeyR: 
 // de la barra de armas), stick derecho del gamepad (R3 recentra), dos dedos en táctil (◎ recentra),
 // click o arrastre sobre el minimapa (doble click o doble toque recentra).
 const PAN_SPEED = 700 // pixels de pantalla por segundo con Z / X, el borde o el stick
+// v2 ajuste fino: con Shift (o L3 / Select en el gamepad) ángulo y potencia van a 1/5 de velocidad.
+const FINE = 0.2
 const DOUBLE_TAP = 0.35 // segundos entre dos toques del minimapa para recentrar
 
 const renderer = new PixiRenderer()
@@ -256,6 +260,7 @@ if (!uitest) {
         size: sizeParam,
         seed: (Number(playParam) >>> 0) || 1,
       })
+      if (calmParam != null) session.qaCalm(calmParam)
     }
   })
 }
@@ -564,6 +569,12 @@ function step1(dt: number, live: boolean, draw = true): void {
   }
 
   for (const shot of session.pullShots()) sfx.fire(shot.weapon)
+  for (const _ of session.pullMelts()) sfx.melt()
+  if (session.pullSuddenDeath() && live) {
+    // empieza la muerte súbita: sirena corta y vibración en táctil
+    sfx.suddenDeath()
+    vibrate([60, 40, 60, 40, 120])
+  }
   sfx.engine(live && session.moving)
   if (!draw) {
     session.pullFx()
@@ -592,6 +603,9 @@ function mergePad(a: PadState, b: PadState): PadState {
     power: clamp1(a.power + b.power),
     move: a.move || b.move,
     pan: clamp1(a.pan + b.pan),
+    fine: a.fine || b.fine,
+    stepAngle: a.stepAngle + b.stepAngle,
+    stepPower: a.stepPower + b.stepPower,
     pressed: new Set([...a.pressed, ...b.pressed]),
   }
 }
@@ -627,7 +641,10 @@ function handleInput(dt: number, pressed: Set<string>, padState: ReturnType<Game
     dAngle += padState.angle * ANGLE_SPEED * dt
     dPower += padState.power * POWER_SPEED * dt
   }
-  session.nudge(dAngle, dPower)
+  // ajuste fino: Shift mantenido (o L3 / Select) a 1/5; los pasos táctiles ya vienen en grados
+  const fine = keys.isDown('ShiftLeft') || keys.isDown('ShiftRight') || !!padState?.fine
+  const k = fine ? FINE : 1
+  session.nudge(dAngle * k + (padState?.stepAngle ?? 0), dPower * k + (padState?.stepPower ?? 0))
   const drag = touch.dragAim()
   if (drag) session.aimTo(drag.angle, drag.power)
   const left = keys.isDown('KeyA') || padState?.move === -1
@@ -674,6 +691,12 @@ function playSounds(events: GameEvent[]): void {
         break
       case 'death':
         sfx.death()
+        break
+      case 'damage':
+        if (e.cause === 'lava') sfx.lavaBurn()
+        break
+      case 'lava':
+        sfx.lavaRise(e.from == null ? 1.4 : 1)
         break
       case 'empty':
         sfx.empty()
