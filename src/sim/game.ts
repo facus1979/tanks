@@ -1,9 +1,11 @@
+import { PATH_DT } from './ballistics'
 import { generate } from './gen'
-import { tankFloor } from './physics'
+import { flowLiquids } from './flow'
+import { dropIntoAbyss, hurt, inLava, inWater, overAbyss, settleAfterFlow, tankFloor } from './physics'
 import { resolveShot } from './weapons'
 import { Rng, hashSeed, irange } from './rng'
 import { aiShop, buyEntry, sellEntry, shopEntry } from './shop'
-import { cloneTerrain, isSolid } from './terrain'
+import { cloneTerrain, isSolid, takeDirty } from './terrain'
 import {
   BIOMES,
   CREWS,
@@ -11,21 +13,25 @@ import {
   FALL_DAMAGE,
   FUEL_PER_TURN,
   ITEM_ORDER,
+  LAVA_DAMAGE,
+  LAVA_RISE,
   MAX_CLIMB,
   PLAYER_HP,
   REPAIR_HP,
   SHIELD_HP,
   START_MONEY,
+  SUDDEN_DEATH_CALM,
   TANK_COLORS,
   TANK_H,
   TANK_HALF_W,
   WEAPONS,
   WEAPON_ORDER,
-  WORLD_H,
-  WORLD_W,
+  MAP_SIZES,
   type Biome,
+  type MapSize,
   type Command,
   type CrewId,
+  type Flight,
   type GameEvent,
   type GameState,
   type ItemId,
@@ -67,6 +73,7 @@ export function createMatch(config: MatchConfig): GameState {
   while (slots.length < 2) slots.push({ kind: 'ai' })
   const rounds = Math.max(1, Math.floor(config.rounds || 1))
   const biomeMode = config.biome ?? BIOMES[0]
+  const size: MapSize = config.size && MAP_SIZES[config.size] ? config.size : 'small'
   const players: Player[] = slots.map((slot, i) => {
     const crew = slot.crew && CREWS.includes(slot.crew) ? slot.crew : CREWS[i % CREWS.length]
     return {
@@ -96,8 +103,9 @@ export function createMatch(config: MatchConfig): GameState {
   const state: GameState = {
     seed,
     rng: 0,
-    width: WORLD_W,
-    height: WORLD_H,
+    size,
+    width: MAP_SIZES[size].w,
+    height: MAP_SIZES[size].h,
     biome: BIOMES[0],
     terrain: undefined as never,
     props: [],
@@ -113,6 +121,8 @@ export function createMatch(config: MatchConfig): GameState {
     difficulty: config.difficulty ?? 'normal',
     biomeMode,
     earnings: {},
+    calm: 0,
+    lava: null,
   }
   setupRound(state)
   return state
@@ -122,7 +132,7 @@ export function createMatch(config: MatchConfig): GameState {
 function setupRound(state: GameState): void {
   const rng = new Rng(roundSeed(state.seed, state.round))
   const biome = biomeFor(state.biomeMode, state.seed, state.round)
-  const gen = generate(biome, rng, state.players.length)
+  const gen = generate(biome, rng, state.players.length, state.width, state.height)
   state.biome = biome
   state.terrain = gen.terrain
   state.props = gen.props
@@ -132,7 +142,7 @@ function setupRound(state: GameState): void {
     p.y = tankFloor(gen.terrain, x, 0)
     p.hp = PLAYER_HP
     p.alive = true
-    p.angle = x < WORLD_W / 2 ? 55 : 125
+    p.angle = x < state.width / 2 ? 55 : 125
     p.power = 60
     p.fuel = FUEL_PER_TURN
     p.shield = 0
@@ -148,6 +158,8 @@ function setupRound(state: GameState): void {
   state.phase = 'aiming'
   state.roundWinnerId = null
   state.turn = 1
+  state.calm = 0
+  state.lava = null
   state.earnings = Object.fromEntries(state.players.map((p) => [p.id, 0]))
 }
 
@@ -242,7 +254,7 @@ function move(state: GameState, dir: -1 | 1): StepResult {
   const actor = state.players[state.current]
   if (actor.fuel <= 0 || (dir !== 1 && dir !== -1)) return { state, events: [] }
   const nx = actor.x + dir
-  if (nx < TANK_HALF_W || nx > WORLD_W - TANK_HALF_W) return { state, events: [] }
+  if (nx < TANK_HALF_W || nx > state.width - TANK_HALF_W) return { state, events: [] }
   const t = state.terrain
   const edge = dir > 0 ? nx + TANK_HALF_W - 1 : nx - TANK_HALF_W
   for (let y = actor.y - TANK_H; y < actor.y - MAX_CLIMB; y++) if (isSolid(t, edge, y)) return { state, events: [] }
@@ -264,7 +276,17 @@ function move(state: GameState, dir: -1 | 1): StepResult {
   const events: GameEvent[] = []
   p.x = nx
   p.fuel -= 1
-  if (floor > p.y + MAX_CLIMB) {
+  if (overAbyss(t, nx, floor)) {
+    // v3: caminó hasta el abismo y se cayó (la sesión frena antes al que no lo hace a propósito,
+    // ver abyssAhead; la IA nunca camina hacia un abismo). Termina el turno como una muerte por caída.
+    dropIntoAbyss(t, p, events)
+    return endTurn(next, events, [], true)
+  }
+  if (floor > p.y + MAX_CLIMB && inWater(t, nx, floor)) {
+    // v4: se tiró al agua: sin daño de caída ni paracaídas
+    events.push({ type: 'fall', playerId: p.id, from: p.y, to: floor, water: true })
+    p.y = floor
+  } else if (floor > p.y + MAX_CLIMB) {
     const drop = floor - p.y
     const amount = Math.min(p.hp, Math.round(Math.max(0, drop - 12) * FALL_DAMAGE))
     const chute = amount > 0 && p.items.parachute > 0
@@ -277,7 +299,8 @@ function move(state: GameState, dir: -1 | 1): StepResult {
       if (p.hp <= 0) {
         p.alive = false
         events.push({ type: 'death', playerId: p.id })
-        return advance(next, events)
+        // se mató cayendo: termina el turno como un tiro que dañó a un tanque
+        return endTurn(next, events, [], true)
       }
     }
   } else p.y = floor
@@ -286,7 +309,7 @@ function move(state: GameState, dir: -1 | 1): StepResult {
 
 function fire(state: GameState, actor: Player): StepResult {
   if (actor.ammo[actor.weapon] <= 0) {
-    if (!hasAmmo(actor)) return advance(cloneState(state), [{ type: 'empty', playerId: actor.id }])
+    if (!hasAmmo(actor)) return endTurn(cloneState(state), [{ type: 'empty', playerId: actor.id }], [], false)
     return { state, events: [{ type: 'empty', playerId: actor.id }] }
   }
   const next = cloneState(state)
@@ -296,12 +319,20 @@ function fire(state: GameState, actor: Player): StepResult {
   const weapon = shooter.weapon
   const before = next.players.map((p) => ({ hp: p.hp + p.shield, alive: p.alive }))
   const { flights, events } = resolveShot(next, shooter, weapon)
+  // v4: los líquidos corren y se asientan después de los impactos (y lo que eso derrumbe o queme)
+  settleLiquids(next, events, flights)
+  // v3: los que cayeron al abismo con este tiro. La vida que perdieron no es daño que se cobre;
+  // si los tiró otro, igual cuenta como kill (y como daño para la calma de la muerte súbita).
+  const abyss = new Set<number>()
+  for (const e of events) if (e.type === 'death' && e.cause === 'abyss') abyss.add(e.playerId)
   // plata de la ronda: daño a otros, kills y autodaño
   let earned = 0
+  let damaged = abyss.size > 0
   for (const p of next.players) {
     const b = before[p.id]
     if (!b.alive) continue
-    const dmg = b.hp - (p.hp + p.shield)
+    const dmg = abyss.has(p.id) ? hitBeforeFall(events, p.id) : b.hp - (p.hp + p.shield)
+    if (dmg > 0) damaged = true // el escudo cuenta: lo que absorbió también es daño
     if (p.id === shooter.id) earned += dmg * EARN.selfDamage
     else {
       earned += dmg * EARN.perDamage
@@ -316,7 +347,135 @@ function fire(state: GameState, actor: Player): StepResult {
     const fallback = WEAPON_ORDER.find((id) => shooter.ammo[id] > 0)
     if (fallback) shooter.weapon = fallback
   }
-  return { ...advance(next, events), flights }
+  return { ...endTurn(next, events, flights, damaged), flights }
+}
+
+// ---------- líquidos (v4) ----------
+
+// Segundos entre el último impacto (o quema) del tiro y el primer parche del flujo, y entre parches.
+export const FLOW_DELAY = 0.15
+export const FLOW_DT = 1 / 30
+
+// Medición del costo del flujo (para sim-check; no afecta la simulación): fires, cuántos movieron
+// algún líquido, ms totales y peor caso.
+export const flowStats = { fires: 0, flows: 0, ms: 0, worst: 0 }
+
+// Corre el flujo después de un fire. Siembra desde todo el mapa (no solo lo que tocó el tiro): así lo
+// que haya quedado sin asentar en un flujo anterior cortado por el tope sigue cayendo. Emite un solo
+// 'flow' (t después de todo lo del tiro, un parche cada FLOW_DT), un 'steam' por cuadro con reacción
+// agua + lava y un 'burn' por cuadro en que la lava quemó algo; después asienta utilería y tanques
+// (lo que la lava quemó puede dejarlos sin apoyo) con t = fin del flujo. Sin cambios, no emite nada.
+function settleLiquids(state: GameState, events: GameEvent[], flights: Flight[]): void {
+  takeDirty(state.terrain)
+  const t0 = performance.now()
+  const report = flowLiquids(state.terrain, { seed: null, record: true })
+  const ms = performance.now() - t0
+  flowStats.fires++
+  flowStats.ms += ms
+  flowStats.worst = Math.max(flowStats.worst, ms)
+  if (!report.changed) return
+  flowStats.flows++
+  const t = shotEnd(events, flights) + FLOW_DELAY
+  events.push({ type: 'flow', t, dt: FLOW_DT, patches: report.patches })
+  for (const s of report.steam) events.push({ type: 'steam', x: Math.round(s.x), y: Math.round(s.y), n: s.n, t: t + s.frame * FLOW_DT })
+  for (const b of report.burns) events.push({ type: 'burn', x: b.x, y: b.y, w: b.w, t: t + b.frame * FLOW_DT })
+  settleAfterFlow(state, events, t + (report.patches.length - 1) * FLOW_DT)
+}
+
+// v3: daño (escudo incluido) que recibió un tanque en estos eventos antes de caer al abismo.
+function hitBeforeFall(events: GameEvent[], id: number): number {
+  let n = 0
+  for (const e of events) {
+    if (e.type === 'damage' && e.playerId === id) n += e.amount
+    else if (e.type === 'shield' && e.playerId === id) n += e.absorbed
+  }
+  return n
+}
+
+// v3: si el tanque del turno avanza `steps` pasos de 1 px hacia dir (sin mirar escalones ni
+// combustible), ¿alguno lo deja sin piso sobre un abismo? La sesión lo usa para frenar al que
+// camina hacia el borde manteniendo la tecla (tiene que soltar y volver a apretar para tirarse);
+// la IA, para no acercarse nunca.
+export function abyssAhead(state: GameState, dir: -1 | 1, steps = 1): boolean {
+  const p = state.players[state.current]
+  const t = state.terrain
+  if (!p || !t.pits) return false
+  for (let k = 1; k <= steps; k++) {
+    const nx = p.x + dir * k
+    if (nx < TANK_HALF_W || nx > state.width - TANK_HALF_W) return false
+    if (overAbyss(t, nx, tankFloor(t, nx, p.y - MAX_CLIMB))) return true
+  }
+  return false
+}
+
+// ---------- muerte súbita (v2) ----------
+
+// Segundos entre el último impacto del tiro y la subida de la lava (el playback la muestra después).
+export const LAVA_DELAY = 0.4
+
+// La muerte súbita ya empezó: la lava sube en cada turno hasta el fin de la ronda.
+export function suddenDeath(state: GameState): boolean {
+  return state.calm >= SUDDEN_DEATH_CALM
+}
+
+// Cierra el turno que termina con este fire (o pase sin munición, o muerte por caída al moverse):
+// 1. cuenta de calma: sin daño a ningún tanque suma 1, con daño vuelve a 0 (salvo muerte súbita ya
+//    empezada, donde queda fija en SUDDEN_DEATH_CALM). Emite 'calm' si cambió lo que falta.
+// 2. si la muerte súbita está activa y la ronda sigue (2+ vivos), empieza el turno siguiente: la lava
+//    aparece en el fondo (la primera vez) o sube LAVA_RISE, y quema LAVA_DAMAGE a cada tanque vivo con
+//    el piso por debajo de la superficie. Esos eventos van al final, LAVA_DELAY s después del último
+//    impacto (o del fin del vuelo).
+// 3. advance: fin de ronda si queda uno o ninguno (todos quemados → empate), si no pasa el turno.
+// La lava no da ni quita plata: el daño no es de nadie y una muerte por lava no cuenta como kill.
+function endTurn(state: GameState, events: GameEvent[], flights: Flight[], damaged: boolean): StepResult {
+  const leftBefore = SUDDEN_DEATH_CALM - state.calm
+  if (!suddenDeath(state)) state.calm = damaged ? 0 : state.calm + 1
+  const left = Math.max(0, SUDDEN_DEATH_CALM - state.calm)
+  if (left !== leftBefore) events.push({ type: 'calm', left })
+  if (state.players.filter((p) => p.alive).length > 1) {
+    const t = shotEnd(events, flights) + LAVA_DELAY
+    if (suddenDeath(state)) riseLava(state, events)
+    burnInLava(state, events, t)
+  }
+  return advance(state, events)
+}
+
+// Momento en que termina lo que se ve del tiro: el último evento con t o el final del último vuelo.
+function shotEnd(events: GameEvent[], flights: Flight[]): number {
+  let end = 0
+  for (const f of flights) end = Math.max(end, (f.startT ?? 0) + Math.max(0, f.path.length - 1) * PATH_DT)
+  for (const e of events) {
+    if ('t' in e && typeof e.t === 'number') end = Math.max(end, e.t)
+    // v4: el flujo dura un parche cada dt
+    if (e.type === 'flow') end = Math.max(end, e.t + Math.max(0, e.patches.length - 1) * e.dt)
+  }
+  return end
+}
+
+function riseLava(state: GameState, events: GameEvent[]): void {
+  const from = state.lava
+  const to = Math.max(0, (from ?? state.height) - LAVA_RISE)
+  state.lava = to
+  events.push({ type: 'lava', from, to, warn: 0 })
+}
+
+// Al empezar el turno, LAVA_DAMAGE a cada tanque vivo con el piso por debajo de la banda de muerte
+// súbita (si empezó) o (v4) con lava de la grilla bajo o dentro de su caja. Si las dos aplican, una vez.
+function burnInLava(state: GameState, events: GameEvent[], t: number): void {
+  const band = suddenDeath(state) ? state.lava : null
+  for (const p of state.players) {
+    if (!p.alive) continue
+    if (!((band !== null && p.y > band) || inLava(state.terrain, p))) continue
+    const mark = events.length
+    hurt(p, LAVA_DAMAGE, events)
+    for (let i = mark; i < events.length; i++) {
+      const e = events[i]
+      if (e.type === 'damage') {
+        e.t = t
+        e.cause = 'lava'
+      } else if (e.type === 'death' || e.type === 'shield') e.t = t
+    }
+  }
 }
 
 function advance(state: GameState, events: GameEvent[]): StepResult {

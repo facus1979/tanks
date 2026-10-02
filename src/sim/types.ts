@@ -2,12 +2,40 @@
 // Coordenadas: x crece a la derecha, y crece hacia ABAJO (igual que la grilla y la pantalla).
 // Ángulo: 0 es horizontal a la derecha, 90 arriba, 180 horizontal a la izquierda.
 
+// Tamaño del mapa Chico (el de v1). Desde v2 el mapa de cada partida mide state.width × state.height
+// (= terrain.w × terrain.h); la pantalla lógica es VIEW_W × VIEW_H en src/render/types.ts.
 export const WORLD_W = 800
 export const WORLD_H = 450
 
+// v2: tamaño de mapa por partida (MatchConfig.size). Alto fijo.
+export type MapSize = 'small' | 'medium' | 'large'
+export const MAP_SIZES: Record<MapSize, { w: number; h: number }> = {
+  small: { w: 800, h: 450 },
+  medium: { w: 1600, h: 450 },
+  large: { w: 2400, h: 450 },
+}
+export const MAP_SIZE_ORDER: MapSize[] = ['small', 'medium', 'large']
+
+// Física del mapa Chico. Para otros anchos usar physicsFor(width).
 export const GRAVITY = 220
 export const POWER_SCALE = 4.03
 export const WIND_ACCEL = 9
+
+export interface Physics {
+  gravity: number
+  powerScale: number
+  windAccel: number
+}
+
+// Física derivada del ancho del mapa (k = width / 800): potencia 100 a 45° cruza el mapa entero
+// (alcance ∝ k), el vuelo de punta a punta dura 2,6 s · k^0,25 y la deriva del viento escala con el mapa.
+// gravedad 220·√k, POWER_SCALE 4,03·k^0,75, viento 9·√k. Con 800 da exactamente los valores de v1.
+export function physicsFor(width: number): Physics {
+  const k = width / WORLD_W
+  if (k === 1) return { gravity: GRAVITY, powerScale: POWER_SCALE, windAccel: WIND_ACCEL }
+  const r = Math.sqrt(k)
+  return { gravity: GRAVITY * r, powerScale: POWER_SCALE * k ** 0.75, windAccel: WIND_ACCEL * r }
+}
 export const SUBSTEP = 1 / 240
 export const MAX_FLIGHT = 14
 
@@ -21,6 +49,15 @@ export const PIVOT_Y = 17 // desde el piso hacia arriba
 export const BARREL_LEN = 14 // del pivote a la boca, incluido el freno
 
 export const PLAYER_HP = 100
+
+// v2 muerte súbita: tras SUDDEN_DEATH_CALM tiros seguidos sin daño a ningún tanque, al empezar cada turno
+// la lava sube LAVA_RISE px desde el fondo del mapa (GameState.lava = y de su superficie). Un tanque con el
+// piso por debajo de la superficie (y > lava) pierde LAVA_DAMAGE al empezar cada turno. Un proyectil que toca
+// la lava se derrite: termina el vuelo sin explotar (impacto 'lava'). Una vez que empezó, sigue subiendo
+// hasta el fin de la ronda. En V4 la lava pasa a ser material de la grilla; las constantes quedan.
+export const SUDDEN_DEATH_CALM = 5
+export const LAVA_RISE = 18
+export const LAVA_DAMAGE = 20
 export const FALL_DAMAGE = 0.45
 export const FUEL_PER_TURN = 60 // pixels que puede avanzar por turno (F6)
 export const MAX_CLIMB = 3 // escalón máximo que sube sin frenarse
@@ -40,6 +77,10 @@ export const BEAM = 6 // vigas horizontales
 export const POST = 7 // postes verticales
 export const METAL = 8 // chapa; muy dura
 export const BEDROCK = 9 // fondo del mapa; indestructible
+// v4: líquidos. Van en front pero NO colisionan (isSolid los trata como aire para tanques, proyectiles y
+// apoyo); fluyen con un autómata celular determinista. No tienen textura en el manifiesto: los dibuja el render.
+export const WATER = 10
+export const LAVA = 11
 
 export type Material = number
 
@@ -49,6 +90,7 @@ export interface MaterialDef {
   // Fracción del radio de la explosión que llega a romperlo. 1 = se rompe todo el radio.
   toughness: number
   flammable: boolean
+  liquid?: boolean // v4: agua y lava
 }
 
 export const MATERIALS: MaterialDef[] = [
@@ -62,7 +104,35 @@ export const MATERIALS: MaterialDef[] = [
   { id: POST, name: 'poste', toughness: 0.9, flammable: true },
   { id: METAL, name: 'metal', toughness: 0.35, flammable: false },
   { id: BEDROCK, name: 'roca madre', toughness: 0, flammable: false },
+  // v4. Los nombres 'agua' y 'lava' los usa el minimapa para elegir color. Las explosiones no los rompen.
+  { id: WATER, name: 'agua', toughness: 0, flammable: false, liquid: true },
+  { id: LAVA, name: 'lava', toughness: 0, flammable: false, liquid: true },
 ]
+
+// v4 reglas de líquidos (ver PROYECTO.md, v2 "Reglas nuevas"):
+// - Agua: un tanque que cae al agua no recibe daño de caída. Un proyectil dentro del agua pierde velocidad
+//   (multiplica la velocidad por WATER_DRAG por segundo). Una explosión con centro sumergido usa
+//   radius * WATER_BLAST_SCALE para el terreno y el daño.
+// - Lava (material): un tanque con alguna celda de lava bajo o dentro de su caja recibe LAVA_DAMAGE al empezar
+//   cada turno (damage.cause 'lava'); el proyectil que la toca se derrite (impacto 'lava'); enciende lo
+//   inflamable que toca al fluir.
+// - Tierra (arma Tierra o derrumbe) que cae sobre lava → piedra. Agua que toca lava → piedra (evento 'steam').
+// - Flujo: al final de cada fire que cambió el terreno, hasta FLOW_MAX_ITERS iteraciones; cada FLOW_FRAME_ITERS
+//   se emite un parche para animar (evento 'flow').
+export const WATER_DRAG = 0.25
+export const WATER_BLAST_SCALE = 0.5
+export const FLOW_MAX_ITERS = 400
+export const FLOW_FRAME_ITERS = 8
+
+// Rectángulo de grilla que cambió (front y back completos de ese rectángulo, fila por fila).
+export interface TerrainPatch {
+  x: number
+  y: number
+  w: number
+  h: number
+  front: Uint8Array
+  back: Uint8Array
+}
 
 // Grilla por pixel. front es lo sólido (colisiona). back es lo que había detrás
 // (se dibuja oscuro donde front es AIR: la "pared de fondo" de Broforce). back no colisiona.
@@ -71,6 +141,10 @@ export interface Terrain {
   h: number
   front: Uint8Array
   back: Uint8Array
+  // v3: columnas de abismo (1 = sin fondo). Ahí no hay roca madre y debajo del mapa no es sólido:
+  // lo que cae por debajo de h en esas columnas se pierde (tanque muerto, proyectil 'out', utilería
+  // destruida). Ausente o todo 0 = como v1. Viaja en snapshots y hash.
+  pits?: Uint8Array
 }
 
 export type Biome = 'forest' | 'jungle' | 'industrial'
@@ -196,6 +270,7 @@ export interface MatchConfig {
   difficulty: Difficulty
   biome?: Biome | 'random' | 'rotate' // fijo, al azar por ronda, o rotando forest→jungle→industrial
   seed?: number
+  size?: MapSize // v2; sin size, 'small'
 }
 
 export interface Player {
@@ -225,7 +300,8 @@ export interface Player {
 export interface GameState {
   seed: number
   rng: number
-  width: number
+  size: MapSize
+  width: number // = MAP_SIZES[size].w = terrain.w
   height: number
   biome: Biome
   terrain: Terrain
@@ -242,6 +318,8 @@ export interface GameState {
   difficulty: Difficulty
   biomeMode: Biome | 'random' | 'rotate'
   earnings: Record<number, number> // plata ganada en la última ronda, por id de jugador
+  calm: number // v2: tiros seguidos sin daño a ningún tanque en la ronda
+  lava: number | null // v2: y de la superficie de la lava de muerte súbita; null = todavía no apareció
 }
 
 export type Command =
@@ -262,7 +340,7 @@ export interface Vec2 {
   y: number
 }
 
-export type ImpactKind = 'terrain' | 'tank' | 'prop' | 'out'
+export type ImpactKind = 'terrain' | 'tank' | 'prop' | 'out' | 'lava' // lava: se derritió, sin explosión
 
 export interface Impact {
   kind: ImpactKind
@@ -277,6 +355,7 @@ export interface Flight {
   path: Vec2[] // un punto cada PATH_DT segundos
   impact: Impact
   startT?: number // segundos desde el disparo en que arranca este tramo (racimo, rodadora)
+  splashes?: { x: number; y: number; t: number }[] // v4: dónde y cuándo (desde el inicio del tramo) entró al agua
 }
 
 export type GameEvent =
@@ -293,15 +372,20 @@ export type GameEvent =
       source?: 'shot' | 'barrel' // 'barrel': explosión en cadena de un barril
     }
   // t opcional: momento de playback. Sin t, el evento va con el impacto anterior de la lista.
-  | { type: 'damage'; playerId: number; amount: number; hp: number; t?: number }
-  | { type: 'death'; playerId: number; t?: number }
-  | { type: 'fall'; playerId: number; from: number; to: number; parachute?: boolean; t?: number }
+  | { type: 'damage'; playerId: number; amount: number; hp: number; t?: number; cause?: 'lava' } // cause: v2, quemado por la lava
+  | { type: 'death'; playerId: number; t?: number; cause?: 'abyss' | 'lava' } // cause: v3/v2, sin explosión de restos si es 'abyss'
+  | { type: 'fall'; playerId: number; from: number; to: number; parachute?: boolean; t?: number; water?: boolean } // water: v4, cayó al agua (sin daño)
   | { type: 'prop'; propId: number; kind: PropKind; x: number; y: number; destroyed: boolean; t?: number }
   | { type: 'burn'; x: number; y: number; w: number; t?: number } // napalm quemando una franja
   | { type: 'shield'; playerId: number; absorbed: number; left: number; t?: number } // el escudo paró daño
   | { type: 'item'; playerId: number; item: ItemId } // useItem aplicado
   | { type: 'turn'; playerId: number }
   | { type: 'wind'; value: number }
+  // v4: los líquidos se asentaron. patches[i] se aplica a la grilla en t + i * dt (el último deja el estado final).
+  | { type: 'flow'; t: number; dt: number; patches: TerrainPatch[] }
+  | { type: 'steam'; x: number; y: number; n: number; t?: number } // v4: agua y lava hicieron piedra (n celdas)
+  | { type: 'lava'; from: number | null; to: number; warn: number } // v2: la lava subió (from null = apareció); warn = tiros sin daño que faltan para la muerte súbita (0 si ya empezó)
+  | { type: 'calm'; left: number } // v2: tiros sin daño que faltan para que empiece la muerte súbita (se emite al cambiar, 0 = empezó)
   | { type: 'roundover'; winnerId: number | null; earnings: Record<number, number>; last: boolean }
   | { type: 'round'; round: number; biome: Biome } // arrancó una ronda nueva (mapa nuevo)
   | { type: 'shop' }

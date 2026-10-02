@@ -8,3 +8,4 @@ dist-sim
 preview/*
 !preview/look-test.png
 !preview/look-test-1080.png
+.claude/worktrees/

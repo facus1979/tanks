@@ -1,7 +1,8 @@
 // Tanques con tripulante, utilería y globos.
 import { Container, Graphics, Sprite, Texture } from 'pixi.js'
 import type { Player, Prop, Terrain } from '../../sim/types'
-import { AIR, TANK_H, TANK_W, WORLD_W } from '../../sim/types'
+import { TANK_H, TANK_W } from '../../sim/types'
+import { solidCell } from './liquids'
 import type { Art, Font } from './assets'
 import { GLYPHS, OUT } from './fallback'
 import { mul } from './raster'
@@ -35,7 +36,7 @@ export function restTilt(t: Terrain, x0: number, floor: number): { angle: number
     let y = floor + TILT_REACH
     if (x >= 0 && x < t.w) {
       for (let yy = floor - 2; yy < floor + TILT_REACH && yy < t.h; yy++) {
-        if (yy >= 0 && t.front[yy * t.w + x] !== AIR) {
+        if (yy >= 0 && solidCell(t.front[yy * t.w + x])) {
           y = Math.max(floor, yy)
           break
         }
@@ -208,7 +209,7 @@ export class TankView {
       const fits = (dx: number, dy: number): boolean => {
         const x = bx + dx
         const y = by + dy
-        return x >= 0 && y >= 0 && x + b.width <= WORLD_W && !blocked?.(x, y, b.width, b.height)
+        return x >= 0 && y >= 0 && x + b.width <= (terrain?.w ?? Infinity) && !blocked?.(x, y, b.width, b.height)
       }
       const spot = BUBBLE_SPOTS.find(([dx, dy]) => fits(dx, dy))
       if (spot) {
@@ -340,6 +341,12 @@ export class PropView {
 
   destroy(): void {
     this.root.destroy({ children: true })
+  }
+
+  // v3: sprites visibles tal como se dibujaron el último frame (coordenadas de mundo), para soltarlos al abismo.
+  snapshot(): { tex: Texture; x: number; y: number; flip: boolean }[] {
+    if (!this.root.visible) return []
+    return this.sprites.filter((s) => s.visible).map((s) => ({ tex: s.texture, x: s.scale.x < 0 ? s.x - s.texture.width : s.x, y: s.y, flip: s.scale.x < 0 }))
   }
 
   private need(n: number): void {

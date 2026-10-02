@@ -1,8 +1,10 @@
 // F10/F11: escudo, trazador, tripulante eyectado y cortina entre rondas. Todo con el dt que recibe el renderer.
 import { Container, Graphics, Sprite, Texture } from 'pixi.js'
 import type { GameEvent, Player, Terrain, Vec2 } from '../../sim/types'
-import { AIR, SHIELD_HP, WORLD_H, WORLD_W } from '../../sim/types'
+import { SHIELD_HP } from '../../sim/types'
+import { solidCell } from './liquids'
 import type { RenderFrame } from '../types'
+import { VIEW_H, VIEW_W } from '../types'
 import type { Art } from './assets'
 import type { Fx } from './fx'
 import { Rng } from './raster'
@@ -107,6 +109,10 @@ export class Extras {
   private crews: Crew[] = []
   private curtainT = 0
   private rng = new Rng(4242)
+  // v3: tanques perdidos en el abismo (sin tripulante eyectado desde los restos ni escudo que estalla abajo)
+  // y oscuridad del abismo en un punto (tiñe al tripulante que cae).
+  isLost: (id: number) => boolean = () => false
+  darkAt: (x: number, y: number) => number = () => 0
 
   constructor(private fx: Fx) {
     this.layer.addChild(this.tracerG, this.shardG)
@@ -123,7 +129,7 @@ export class Extras {
     this.tracerG.clear()
   }
 
-  // Cortina que barre de izquierda a derecha mostrando el mapa nuevo.
+  // Cortina que barre de izquierda a derecha mostrando el mapa nuevo (cubre la pantalla, no el mundo).
   startTransition(): void {
     this.curtainT = CURTAIN_TIME
     this.drawCurtain()
@@ -150,16 +156,17 @@ export class Extras {
       if (ev.left <= 0) s.breakNow = true
     } else if (ev.type === 'death') {
       const p = frame.players.find((q) => q.id === ev.playerId)
-      if (p) this.eject(p, art)
+      if (p && !this.isLost(p.id)) this.eject(p, art)
     }
   }
 
-  private eject(p: Player, art: Art): void {
+  // from: v3, el tripulante salta del tanque que cae al abismo (con menos impulso: se pierde abajo).
+  eject(p: Player, art: Art, from?: { x: number; y: number }): void {
     const sprite = new Sprite(art.crews[p.crew] ?? art.crews.bandana)
     sprite.anchor.set(0.5)
     const dir = this.rng.next() < 0.5 ? -1 : 1
-    const x = p.x
-    const y = p.y - 24
+    const x = from ? from.x : p.x
+    const y = from ? from.y : p.y - 24
     sprite.x = Math.round(x)
     sprite.y = Math.round(y)
     this.layer.addChild(sprite)
@@ -168,7 +175,7 @@ export class Extras {
       x,
       y,
       vx: dir * (40 + this.rng.next() * 40),
-      vy: -(150 + this.rng.next() * 50),
+      vy: -(150 + this.rng.next() * 50) * (from ? 0.55 : 1),
       vr: dir * (7 + this.rng.next() * 4),
       bounced: false,
       age: 0,
@@ -180,7 +187,7 @@ export class Extras {
     this.updateShields(frame, dt, time, dropOf)
     this.updateShards(dt)
     this.updateCrews(frame.terrain, dt)
-    this.drawTracer(frame.aimPreview ?? null, time)
+    this.drawTracer(frame.aimPreview ?? null, time, frame.terrain)
     this.updateCurtain(dt)
     void art
   }
@@ -192,7 +199,7 @@ export class Extras {
       const cx = Math.round(p.x)
       const cy = Math.round(p.y - 12 - dropOf(p.id))
       if (s.active && (s.breakNow || !p.alive)) {
-        this.breakShield(cx, cy)
+        if (!this.isLost(p.id)) this.breakShield(cx, cy)
         s.active = false
       }
       s.breakNow = false
@@ -267,7 +274,7 @@ export class Extras {
     const xi = Math.round(x)
     const yi = Math.round(y)
     if (xi < 0 || xi >= t.w || yi < 0 || yi >= t.h) return false
-    return t.front[yi * t.w + xi] !== AIR
+    return solidCell(t.front[yi * t.w + xi])
   }
 
   private updateCrews(t: Terrain, dt: number): void {
@@ -281,7 +288,7 @@ export class Extras {
       c.x += c.vx * dt
       c.y += c.vy * dt
       c.sprite.rotation += c.vr * dt
-      let done = c.age > 5 || c.y > WORLD_H + 24 || c.x < -24 || c.x > WORLD_W + 24
+      let done = c.age > 5 || c.y > t.h + 24 || c.x < -24 || c.x > t.w + 24
       if (!done && c.vy > 0 && this.solid(t, c.x, c.y + 5)) {
         if (c.bounced) {
           this.puff(c.x, c.y + 4)
@@ -297,9 +304,18 @@ export class Extras {
       }
       // estela de humo cada pocos pixels recorridos
       c.trail += Math.hypot(c.x - px, c.y - py)
+      // en la oscuridad del abismo no deja estela (el humo claro se vería flotando en lo negro)
+      const deep = this.darkAt(c.x, c.y) > 0.12
       while (c.trail >= 4) {
         c.trail -= 4
-        this.fx.trailPoint(c.x, c.y)
+        if (!deep) this.fx.trailPoint(c.x, c.y)
+      }
+      // v3: en el abismo se oscurece con la profundidad y se desvanece antes del borde de abajo
+      const k = this.darkAt(c.x, c.y)
+      if (k > 0) {
+        const g = Math.round(255 * (1 - Math.min(1, k * 1.15)))
+        c.sprite.tint = (g << 16) | (g << 8) | g
+        c.sprite.alpha = Math.max(0, Math.min(1, (t.h + 6 - c.y) / 30))
       }
       if (done) c.sprite.destroy()
       else {
@@ -317,7 +333,7 @@ export class Extras {
   }
 
   // Puntos cada ~3.5 px que titilan, y una cruz donde termina el tiro.
-  private drawTracer(path: Vec2[] | null, time: number): void {
+  private drawTracer(path: Vec2[] | null, time: number, t: Terrain): void {
     const g = this.tracerG
     g.clear()
     if (!path || path.length < 2) return
@@ -335,7 +351,7 @@ export class Extras {
         const x = Math.round(a.x + ((b.x - a.x) * pos) / len)
         const y = Math.round(a.y + ((b.y - a.y) * pos) / len)
         n++
-        if (y < -2 || x < -2 || x > WORLD_W + 2) continue
+        if (x < -2 || x > t.w + 2) continue
         const ph = (n * 0.37 + time * 3.3) % 1
         const on = ph < 0.6
         g.rect(x, y, 2, 2).fill({ color: on ? 0xfff3a8 : 0xffffff, alpha: on ? 1 : 0.4 })
@@ -343,7 +359,7 @@ export class Extras {
       toNext -= len - pos
     }
     const end = path[path.length - 1]
-    if (end.y >= 0 && end.y < WORLD_H && end.x >= 0 && end.x < WORLD_W) {
+    if (end.y >= 0 && end.y < t.h && end.x >= 0 && end.x < t.w) {
       const ex = Math.round(end.x)
       const ey = Math.round(end.y)
       const r = 3 + (Math.floor(time * 4) % 2)
@@ -370,12 +386,12 @@ export class Extras {
     }
     g.visible = true
     const u = 1 - this.curtainT / CURTAIN_TIME
-    const w = WORLD_W / CURTAIN_COLS
+    const w = VIEW_W / CURTAIN_COLS
     for (let i = 0; i < CURTAIN_COLS; i++) {
       const start = (i / CURTAIN_COLS) * 0.6
       const local = Math.min(1, Math.max(0, (u - start) / 0.4))
-      const h = Math.ceil(((1 - local) * WORLD_H) / 6) * 6
-      if (h > 0) g.rect(i * w, 0, w, Math.min(WORLD_H, h)).fill(CURTAIN_COLOR)
+      const h = Math.ceil(((1 - local) * VIEW_H) / 6) * 6
+      if (h > 0) g.rect(i * w, 0, w, Math.min(VIEW_H, h)).fill(CURTAIN_COLOR)
     }
   }
 }

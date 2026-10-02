@@ -1,9 +1,13 @@
 // Resolución de un impacto: terreno, daño, utilería, barriles en cadena, caída y aplastamiento.
-import { deform, isSolid, solidRunUp } from './terrain'
+import { deform, hasLiquid, isPit, isSolid, liquidAt, solidRunUp } from './terrain'
 import {
   FALL_DAMAGE,
+  LAVA,
   TANK_H,
   TANK_HALF_W,
+  TANK_W,
+  WATER,
+  WATER_BLAST_SCALE,
   WEAPONS,
   type BlastStyle,
   type GameEvent,
@@ -20,6 +24,9 @@ export const CHAIN_DELAY = 0.18
 export const CRUSH_DEPTH = 8
 export const CRUSH_DAMAGE = 2 // por pixel pasado de CRUSH_DEPTH
 export const MIN_SUPPORT = 3 // columnas sólidas que sostienen al tanque
+// v3: un tanque que cae a un abismo termina ABYSS_DROP px por debajo del borde inferior del mapa
+// (fall.to = h + ABYSS_DROP): el render lo anima cayendo hasta perderse de vista.
+export const ABYSS_DROP = 60
 
 export interface Blast {
   x: number
@@ -82,6 +89,8 @@ export function resolveBlast(state: GameState, first: Blast, after?: (events: Ga
   const queue: Blast[] = [first]
   while (queue.length > 0) {
     const b = queue.shift()!
+    // v4: explosión con el centro sumergido: radio de terreno y de daño × WATER_BLAST_SCALE
+    if (submerged(state.terrain, b.x, b.y)) b.radius *= WATER_BLAST_SCALE
     const debris = deform(state.terrain, b.x, b.y, b.radius, b.terrain)
     events.push({
       type: 'impact',
@@ -130,6 +139,41 @@ export function resolveBlast(state: GameState, first: Blast, after?: (events: Ga
   settleProps(state, events)
   settleTanks(state, coverBefore, events)
   return events
+}
+
+// v4: el punto (x, y) está bajo el agua: la celda o alguna de sus 4 vecinas es agua. Las vecinas
+// cuentan porque el impacto contra el lecho de un lago queda en la primera celda sólida, justo debajo
+// del agua.
+export function submerged(t: Terrain, x: number, y: number): boolean {
+  return (
+    liquidAt(t, x, y) === WATER ||
+    liquidAt(t, x, y - 1) === WATER ||
+    liquidAt(t, x - 1, y) === WATER ||
+    liquidAt(t, x + 1, y) === WATER ||
+    liquidAt(t, x, y + 1) === WATER
+  )
+}
+
+// v4: un tanque con el piso en floor quedó en el agua: hay al menos WATER_FALL_CELLS celdas de agua
+// en su caja (unas 3 filas de hondo a lo ancho). Así una caída al agua no hace daño (fall.water).
+export const WATER_FALL_CELLS = 3 * TANK_W
+export function inWater(t: Terrain, x: number, floor: number): boolean {
+  const cx = Math.round(x)
+  let n = 0
+  const { w, front } = t
+  for (let y = Math.max(0, floor - TANK_H); y < Math.min(t.h, floor); y++) {
+    for (let ix = Math.max(0, cx - TANK_HALF_W); ix < Math.min(w, cx + TANK_HALF_W); ix++) {
+      if (front[y * w + ix] === WATER && ++n >= WATER_FALL_CELLS) return true
+    }
+  }
+  return false
+}
+
+// v4: el tanque tiene alguna celda de lava bajo o dentro de su caja (columnas [x - 14, x + 14),
+// filas [y - TANK_H, y]): la lava lo quema al empezar cada turno.
+export function inLava(t: Terrain, p: { x: number; y: number }): boolean {
+  const cx = Math.round(p.x)
+  return hasLiquid(t, LAVA, cx - TANK_HALF_W, p.y - TANK_H, cx + TANK_HALF_W, p.y + 1)
 }
 
 function cover(t: Terrain, p: Player): number {
@@ -187,8 +231,60 @@ function settleProps(state: GameState, events: GameEvent[]): void {
       y++
       prop.y = y
     }
-    events.push({ type: 'prop', propId: prop.id, kind: prop.kind, x: prop.x, y: prop.y, destroyed: false })
+    // v3: llegó al fondo sin apoyo = cayó a un abismo y se pierde
+    const lost = !rowSupported(state, prop, prop.y + prop.h)
+    if (lost) prop.alive = false
+    events.push({ type: 'prop', propId: prop.id, kind: prop.kind, x: prop.x, y: prop.y, destroyed: lost })
   }
+  burnCrates(state, events)
+}
+
+// v4: una caja (madera) con lava en su caja o justo debajo se quema. Los barriles se hunden sin explotar.
+function burnCrates(state: GameState, events: GameEvent[]): void {
+  for (const prop of state.props) {
+    if (!prop.alive || prop.kind !== 'crate') continue
+    if (!hasLiquid(state.terrain, LAVA, prop.x, prop.y, prop.x + prop.w, prop.y + prop.h + 1)) continue
+    prop.alive = false
+    events.push({ type: 'prop', propId: prop.id, kind: prop.kind, x: prop.x, y: prop.y, destroyed: true })
+  }
+}
+
+// v4: después del flujo (la lava quemó madera, el agua y la lava hicieron piedra) se asientan de nuevo
+// utilería y tanques. Sin aplastamiento: el flujo no tapa a nadie con tierra. Los eventos nuevos van en t.
+export function settleAfterFlow(state: GameState, events: GameEvent[], t: number): void {
+  const mark = events.length
+  settleProps(state, events)
+  settleTanks(
+    state,
+    state.players.map(() => Infinity),
+    events,
+  )
+  for (let i = mark; i < events.length; i++) {
+    const e = events[i]
+    if (e.type === 'prop' || e.type === 'fall' || e.type === 'damage' || e.type === 'death' || e.type === 'shield') e.t = t
+  }
+}
+
+// v3: el tanque en x quedó sin ningún piso (tankFloor dio el borde del mapa) y tiene columnas de
+// abismo debajo: cae y se pierde. Sin pits nunca pasa (debajo del mapa es roca madre).
+export function overAbyss(t: Terrain, x: number, floor: number): boolean {
+  if (floor < t.h || !t.pits) return false
+  const cx = Math.round(x)
+  for (let ix = cx - TANK_HALF_W; ix < cx + TANK_HALF_W; ix++) if (isPit(t, ix)) return true
+  return false
+}
+
+// v3: el tanque cae al abismo. Eventos fall (to = h + ABYSS_DROP) y, si estaba vivo, death con
+// cause 'abyss'. Sin daño de caída (la vida queda en 0 sin evento damage) y el paracaídas no lo salva
+// ni se gasta. La plata la resuelve fire: si lo tiró el tiro de otro cuenta como kill (sin plata por daño).
+export function dropIntoAbyss(t: Terrain, p: Player, events: GameEvent[]): void {
+  const from = p.y
+  p.y = t.h + ABYSS_DROP
+  events.push({ type: 'fall', playerId: p.id, from, to: p.y })
+  if (!p.alive) return
+  p.alive = false
+  p.hp = 0
+  events.push({ type: 'death', playerId: p.id, cause: 'abyss' })
 }
 
 // Fila de apoyo del tanque buscando desde y hacia abajo.
@@ -205,10 +301,19 @@ export function tankFloor(t: Terrain, x: number, y: number): number {
 function settleTanks(state: GameState, coverBefore: number[], events: GameEvent[]): void {
   for (const p of state.players) {
     const floor = tankFloor(state.terrain, p.x, p.y)
+    if (p.y < state.terrain.h && overAbyss(state.terrain, p.x, floor)) {
+      dropIntoAbyss(state.terrain, p, events)
+      continue
+    }
     if (floor > p.y) {
       const from = p.y
       p.y = floor
       const drop = floor - from
+      // v4: cayó al agua: sin daño de caída y sin gastar el paracaídas
+      if (inWater(state.terrain, p.x, floor)) {
+        events.push({ type: 'fall', playerId: p.id, from, to: floor, water: true })
+        continue
+      }
       const harmful = p.alive && drop > 2 && Math.round(drop * FALL_DAMAGE) > 0
       if (harmful && p.items.parachute > 0) {
         p.items.parachute -= 1

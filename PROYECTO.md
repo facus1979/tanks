@@ -15,13 +15,13 @@ Broforce: pixel art moderno, personajes con personalidad, explosiones exageradas
 ## Decisiones cerradas
 
 - Cliente: TypeScript + Vite. Render: PixiJS. Física propia, determinista, timestep fijo. Sin motor de cuerpos rígidos.
-- **Resolución lógica 800×450**, una sola pantalla, sin cámara. Se escala con nearest-neighbor al tamaño de la ventana.
+- **Resolución lógica de pantalla 800×450**, escalada con nearest-neighbor al tamaño de la ventana. Hasta v1 el mundo medía lo mismo que la pantalla; desde v2 el mundo es variable (ver v2) y la pantalla es una cámara sobre él.
 - **Terreno por pixel con materiales** (`Terrain.front` y `Terrain.back`, `Uint8Array` de 800×450). `front` colisiona. `back` es lo que había detrás y se dibuja oscuro donde `front` es aire. Esa es la pared de fondo de Broforce.
 - Materiales: tierra, piedra, ladrillo, madera, tabla, viga, poste, metal, roca madre. Cada uno con dureza; ver `MATERIALS`.
 - **Tanque de 28×20** con tripulante de 12×12 asomado por la escotilla. Cada jugador tiene color y tripulante propios.
-- **`POWER_SCALE` 4.03**, gravedad 220: potencia 100 cruza el mapa. Si el proyectil sale por arriba, se muestra una flecha en el borde.
+- **`POWER_SCALE` 4.03**, gravedad 220: potencia 100 cruza el mapa. En v2 los dos se derivan del ancho del mapa para que esto siga valiendo. Si el proyectil sale por arriba, se muestra una flecha en el borde.
 - Biomas: bosque con niebla (el de la referencia), jungla, atardecer industrial.
-- Máximo 4 jugadores. Arte propio generado por código (`scripts/paint-assets.mjs`); sin assets de terceros.
+- Máximo 4 jugadores (8 desde v2). Arte propio generado por código (`scripts/paint-assets.mjs`); sin assets de terceros.
 - Sangre: no. Chispas, humo, escombros y fuego.
 - El online no se construye ahora, pero no puede exigir reescribir las reglas.
 
@@ -86,10 +86,15 @@ Balance medido con `npm run sim-check -- --balance` (30 partidas de 3 rondas, 3-
 | A / D (mantener) | Mueve el tanque gastando combustible (barra COMB en el HUD) |
 | 1 a 8 o click en el selector | Elige arma (orden de `WeaponId`; sin munición queda gris) |
 | Espacio | Disparar |
+| Shift (mantener) | Ajuste fino: ángulo y potencia a 1/5 de velocidad |
 | M | Silencia / activa el sonido |
 | Q / F / R / T | Ítems: escudo, combustible, reparación, trazador (solo en tu turno; el paracaídas es pasivo) |
 | P | Pausa |
+| Z / X | Mueve la cámara a la izquierda / derecha (mapas Mediano y Grande) |
+| C | Recentra la cámara en el tanque del turno |
 | Esc | En la tabla, vuelve al menú |
+
+Cámara (v2): mouse contra el borde o arrastrando el mundo (botón del medio, o el izquierdo fuera del tanque, la barra y el minimapa); click/toque en el minimapa centra, arrastrarlo mueve la vista, doble click/toque recentra; stick derecho panea y R3 recentra; en táctil, dos dedos y el botón ◎.
 
 Gamepad: stick o cruz = ángulo y potencia, gatillos o bumpers = mover, A dispara, X/Y arma anterior/siguiente, B primer ítem usable (escudo, reparación, combustible, trazador), Start pausa. En las pantallas: A elige/compra, B atrás/vende, Start LISTO/JUGAR.
 
@@ -180,6 +185,71 @@ Las fases F1 a F4 forman la primera muestra, que tiene que parecerse a la refere
   - Criterio: una partida completa, incluida la tienda, jugable solo con el dedo en un celular de 6" y en una tablet, a 60 fps en un celular de gama media.
 - **Online con servidor** (más adelante, si hace falta): el mismo código del anfitrión corriendo en Node detrás de otro `Transport`.
 - **Online**, como antes: servidor autoritativo que corre el mismo `sim`, sin lockstep.
+
+## v2: mundo grande
+
+Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 4 jugadores".
+
+### Decisiones
+
+- **Tamaño por partida**, elegido en el menú: Chico 800×450 (el mapa de v1), Mediano 1600×450, Grande 2400×450. Alto fijo. El tamaño viaja en el estado (`terrain.w/h`); `WORLD_W/WORLD_H` dejan de usarse fuera de la pantalla.
+- **Alcance**: potencia 100 llega siempre de punta a punta. `POWER_SCALE` y `GRAVITY` se derivan del ancho del mapa de modo que un tiro de lado a lado a 45° dure ~3 s; con 800 dan los valores de v1. `WIND_ACCEL` escala igual. Shift ajusta ángulo y potencia a 1/5 de velocidad.
+- **Muerte súbita**: tras 5 tiros seguidos sin daño a tanques, la lava sube 18 px desde el fondo en cada turno y quema 20 por turno a los tanques sumergidos; los proyectiles que la tocan se derriten sin explotar. La lava no da ni quita plata ni cuenta como kill. Toda ronda termina.
+- **Hasta 8 jugadores**: 4 colores y 4 tripulantes nuevos; HUD rediseñado para 5-8 placas. Spawns repartidos a lo ancho.
+- **Líquidos que fluyen**: agua y lava son materiales de la grilla. Se asientan con un autómata celular determinista al final de cada `fire`, con tope de iteraciones; los cambios salen como evento para que el render los anime.
+
+### Reglas nuevas
+
+- **Abismo**: tramo sin fondo (`Terrain.pits`). Lo que cae por debajo del mapa en un abismo se pierde: el tanque muere (`death.cause = 'abyss'`, el paracaídas no lo salva), el proyectil sale ('out') y la utilería se destruye. Fuera de los abismos, debajo del mapa sigue siendo roca madre.
+- **Agua**: no colisiona. Amortigua caídas (sin daño de caída), frena los proyectiles que entran y reduce a la mitad el radio de las explosiones sumergidas.
+- **Lava**: no colisiona. Un tanque que la toca recibe daño por turno, enciende lo inflamable vecino y derrite los proyectiles (no explotan). La tierra (arma Tierra o derrumbe) sobre lava se vuelve piedra; agua y lava en contacto dan piedra.
+
+### Contratos v2
+
+- `src/sim/types.ts`: `MapSize`, `MAP_SIZES`, `MAP_SIZE_ORDER`, `MatchConfig.size`, `GameState.size` (con `width`/`height`), `Physics` y `physicsFor(width)`. `WORLD_W/WORLD_H` quedan como el tamaño del mapa Chico; nada fuera de `sim` los usa como tamaño del mundo.
+- `src/render/types.ts`: `VIEW_W/VIEW_H` (pantalla lógica 800×450), `Camera { cx, cy, zoom }`, `RenderFrame.camera`, `GameRenderer.screenToWorld`. La cámara la decide el flujo; el renderer la aplica y suma el sacudón.
+- `src/ui/types.ts`: `HudExtras.minimap` (`MinimapModel`, `MinimapTank`), `MinimapInput.minimapAt` (lo implementa `Hud`), `DEFAULT_CONFIG.size` = `'medium'`, `setOption('size')` en el lobby.
+- `src/net/types.ts`: `LobbyState.size`.
+- QA: `?play=...&size=small|medium|large`, `?demo=...&size=...`.
+- V4 (`src/sim/types.ts`): `WATER` (10) y `LAVA` (11) con `MaterialDef.liquid`, `WATER_DRAG`, `WATER_BLAST_SCALE`, `FLOW_MAX_ITERS`, `FLOW_FRAME_ITERS`, `TerrainPatch`, eventos `flow` (parches para animar el asentamiento) y `steam`, `Flight.splashes`, `fall.water`. Los líquidos no tienen textura en el manifiesto: los dibuja el render.
+- V3 (`src/sim/types.ts`): `Terrain.pits` (columnas de abismo), `death.cause` (`'abyss' | 'lava'`).
+- V2 muerte súbita (`src/sim/types.ts`): `SUDDEN_DEATH_CALM` (5), `LAVA_RISE` (18 px por turno), `LAVA_DAMAGE` (20 por turno), `GameState.calm` y `GameState.lava` (y de la superficie o null), `ImpactKind` `'lava'` (proyectil derretido, sin explosión), eventos `lava` y `calm`, `damage.cause = 'lava'`. `RenderFrame.lava`, `HudExtras.suddenDeath`, `MinimapModel.lava`.
+
+### Fases
+
+- **V1 Mundo variable y cámara.** Tamaño en el estado y en el menú; cámara que sigue al tanque activo y al proyectil (se aleja en vuelos largos) y vuelve; paneo libre (mouse al borde, arrastre, Z / X, stick derecho, dos dedos); minimapa (ver abajo); indicadores de enemigos fuera de pantalla; fondos con parallax. Render del terreno en trozos, solo lo visible o lo que cambió; efectos en buffer de pantalla. Criterio: el mapa Grande a 60 fps con el mismo presupuesto que v1.
+  - **Minimapa**: franja arriba al centro del HUD con el mapa entero a escala 1/10 (160×45 en Mediano, 240×45 en Grande; no aparece en Chico, que no scrollea). Muestra la silueta del terreno (se actualiza con cada deformación), agua y lava con su color, los tanques como puntos de su color (el del turno titila, los muertos como ×), el proyectil en vuelo y la marca del último impacto de cada jugador, y el viewport como un rectángulo.
+  - Click o toque en el minimapa centra la cámara ahí; arrastrar el rectángulo mueve el viewport. Con gamepad, el stick derecho mueve el viewport y se ve en el minimapa.
+  - Mientras apuntás, la cámara se queda donde la dejaste (para mirar al objetivo mientras ajustás); `C`, doble toque en el minimapa o el botón de recentrar la devuelven a tu tanque. Al disparar sigue al proyectil; al terminar el tiro vuelve al tanque del turno siguiente.
+  - Estado: hecha (2026-10-01), repartida en cuatro agentes (sim, render, vistas, flujo) sobre el contrato v2 e integrada en la rama `v2-mundo`.
+    - sim: `generate(biome, rng, count, width, height)` arma el mapa con tramos de `TRAMO_W` = 800 (Chico = 1 tramo, byte a byte igual que v1; Mediano 2, Grande 3, empalmados meseta→plataforma); spawns repartidos a lo ancho (válidos hasta 8). `fly` y la rodadora usan `physicsFor(terrain.w)`. IA: error de puntería dividido por k, búsqueda más fina en mapas anchos, `skylineOf` + `FlyOptions.skyline` para saltear vuelo por encima del terreno. `sim-check` 31645/31645 OK; tiros por partida con 2 / 4 tanques: Chico 11.1 / 20.6, Mediano 12.7 / 31.3, Grande 14.6 / 31.2; alcance de potencia 100 a 45° en llano: 796/800, 1501/1600, 2239/2400 (2.8 / 3.1 / 3.5 s); IA peor caso 71 / 85 / 84 ms.
+    - render: terreno en trozos de 256 px con culling y repintado por trozo; partículas y luces en buffers de pantalla (808×458) con coordenadas de mundo; focos como sprites aditivos; parallax por capa (cielo 0,04 a 0,7), repitiendo cada capa con su copia espejada. CPU de `render()` en Chrome headless: Chico 5,5 ms medio (base 5,9), Grande paneando 3,2 ms. Chico idéntico pixel a pixel a v1.
+    - vistas: `src/ui/minimap.ts` (minimapa y flechas), fila MAPA en menú y lobby, `?uitest=hud&size=`.
+    - flujo: `src/game/camera.ts` (amortiguado crítico: 0,45 s al tanque, 0,2 s al proyectil, 0,55 s el zoom; zoom del tiro `min(1, 640/ancho del vuelo, 450/(alto − apogeo + 30))`, mínimo 0,5), `src/input/mouse.ts`, paneo y recentrar en gamepad y táctil, último impacto por jugador, `&size=` en `?play=` y `?demo=`.
+    - Pendientes: el fondo `forest-4` tiene un pino cortado en el borde derecho que al repetirse espejado se ve doble en la unión (arte: capas repetibles a lo ancho); el pilar con dintel de la jungla queda pegado a cada empalme; las partidas de 4 tanques en Mediano/Grande duran 1,5× (V2); el snapshot de red pesa 705 KB en Chico y ~3× en Grande (comprimir la grilla si el online se resiente). Acuerdo para V4: el minimapa reconoce agua y lava por `MATERIALS[].name` = `'agua'` y `'lava'`.
+- **V2 Alcance y balance de distancias.** Física derivada del ancho, ajuste fino, IA que apunta a cualquier distancia y decide moverse, muerte súbita. `sim-check` por tamaño.
+  - Estado: hecha (2026-10-01), en cuatro agentes sobre el contrato de muerte súbita, integrada en `v2-mundo`.
+    - sim: `endTurn` cierra el turno (fire, pase sin munición, muerte al moverse). Orden: eventos del tiro → `calm` → `lava` → daño/escudo/muerte de la lava (con `t` = fin del tiro + `LAVA_DELAY` 0,4 s) → `turn`/`wind` o `roundover`. El escudo cuenta como daño para la calma; una vez empezada, la calma queda fija. La lava aparece en `height − LAVA_RISE`. `FlyOptions.lava`, `lavaRisk` en la IA (se aleja hacia arriba, no tira a la lava, gasta munición especial). `sim-check` 31752/31752; tiros por partida 2 / 4 tanques: Chico 10,6 / 18,9, Mediano 9,9 / 25,1, Grande 12,4 / 21,1 (máximo de Grande con 4: 77 → 28). Ronda sin disparos: termina por la lava en 16 turnos.
+    - render: `src/render/pixi/lava.ts`: franja animada de 16 filas a 30 Hz más dos texturas profundas que fluyen, resplandor aditivo, tinte cálido con la lava alta, olas y goterones al subir, chispas y humo en tanques quemados, chisporroteo al derretirse un proyectil (desaparece a < 26 px de la superficie sin `impact`). Cuesta ~0,23 ms de CPU de `render()` en Grande.
+    - vistas: aviso "MUERTE SÚBITA EN N" (N ≤ 3) y cartel titilante cuando está activa; banda de lava en el minimapa; `?uitest=hud&sd=N|lava`.
+    - flujo: ajuste fino (Shift, L3/Select, toque corto de 0,2 en táctil; el tiro humano sale con un decimal y el HUD muestra décimas), lava animada en 0,8 s, sonidos `lavaRise`, `melt`, `lavaBurn`, `suddenDeath` y vibración, `?play=...&calm=N`.
+    - Pendientes: propuesta de combustible `FUEL_PER_TURN · √k` en mapas anchos (no aplicada); el napalm que cae debajo de la lava (V4); en la captura con lava alta el fondo de la lava muestra vetas verticales marcadas, revisar en juego.
+- **V3 Geografía por tramos.** El generador arma el mapa como secuencia de tramos por bioma: montaña, valle, meseta, abismo, lago, pozo de lava, más búnker/torre/cuevas.
+  - Alcance (2026-10-01): Chico sigue idéntico a v1 (referencia de look y tests); la geografía nueva va en Mediano y Grande. Lago y pozo de lava quedan como cuencas secas registradas por el generador; V4 las llena. Arte: capas de fondo repetibles a lo ancho (sin elementos cortados en los bordes).
+  - Estado: hecha (2026-10-02), en cuatro agentes (sim, render, flujo, arte), integrada en `v2-mundo`.
+    - sim: tramos de ancho variable con pesos por bioma (`SEG_WEIGHT`): plataforma, valle, cerro, montaña (cima y 110–150, uno o dos picos, rocas, a veces cueva), meseta (búnker, torre o ambos; siempre al menos una, nunca dos a menos de 800 px), colinas con ruinas, abismo (60–130 px), lago y pozo de lava (100–200 × 30–60, secos; `Generated.basins` para V4). Bosque: montañas y lagos; jungla: abismos, ruinas y lagos; industrial: pozos de lava con labios de chapa, pozos de mina con castillete. Abismo: `isSolid`/`columnGround`/`groundAt`/`tankFloor` respetan `pits`; caer da `fall` con `to = h + 60` (`ABYSS_DROP`) y `death` con `cause: 'abyss'` (hp 0, y >= h); tirado por un tiro ajeno es kill (cobra el daño previo) y cuenta como tiro con daño para la calma; el paracaídas no salva ni se gasta; proyectiles 'out'; utilería `prop` destruida con su x/y. `pits` en snapshot (`tp`) y hash; `cloneTerrain` lo copia. IA: frena 24 px antes del abismo (`abyssAhead`), busca romper el saliente bajo un rival (`ledgesOf`, `dropsInto`), `ERROR_SCALE_EXP` 1,15. `sim-check` 29022/29022: tiros 2 / 4 tanques Chico 10,6 / 18,9, Mediano 10,4 / 18,1, Grande 15,8 / 20,6 (con 20 partidas: 10,9 / 21,6 y 14,0 / 21,9); IA tira al rival al abismo 4/6 y pasa la montaña 6/6; peor caso 80 ms. Chico byte a byte igual (300 seeds × 3 biomas × 1–8 jugadores). `scripts/lookdev/v3-maps.mjs` → `preview/v3-maps.png`.
+    - arte: capas de fondo de los tres biomas repetibles con el esquema copia/espejo: lo que toca un borde entra entero o queda centrado en él (`edgeSafe`, `pineHalfW` en `pixel.mjs`, `palmFit` en `biomes.mjs`); el pino gigante de `forest-4` centrado en x = 800. `scripts/lookdev/v3-bg-strip.mjs` arma la tira de verificación de 2400 px. Propuesta pendiente (cambia el manifiesto): repetición sin espejo por capa (`repeat: 'mirror' | 'wrap'`) o capas cercanas de 1600 px.
+    - render: `src/render/pixi/abyss.ts` (`PitMap`): pared de fondo de tierra hasta abajo con rocas y raíces, niebla del bioma que se pierde a negro en 8 pasos con Bayer, borde suavizado 18 px; integrado al pintado por trozos. `AbyssFalls`: el tanque cae girando y se oscurece, destello lejano y columna de humo, tripulante que se pierde, utilería que cae con su sprite. Chico idéntico byte a byte.
+    - flujo: caída animada hasta `h + TANK_H + 30` (muerte al final de la caída), cámara que acompaña si el que cae es el del turno o estaba en pantalla, `ABYSS_HOLD` 1,5 s mirando el fondo y `ABYSS_TAIL` 1,7 s de espera del turno; sonidos `abyssFall`, `abyssThud`, `edgeWarn`; tope en el borde solo para el humano ("Abismo! Apreta otra vez"; soltar y volver a apretar cae).
+    - Pendientes: Grande con 2 tanques queda justo bajo el tope del chequeo de balance (15,8 contra 16 en 10 partidas; conviene correr 20 en Grande o revisar el tope); las muertes por abismo casi no ocurren en partidas reales (0 en el balance: las paredes son tierra hasta el fondo y solo cae quien queda sobre un saliente; si se quiere que mate más, hace falta empuje o labios más finos); globo "!" en el borde del abismo (necesita algo como `RenderFrame.alerts`); si la caída al abismo cierra la ronda, la cámara lenta del golpe final arranca cuando el tanque ya desapareció.
+- **V4 Agua y lava.** Materiales, flujo, reglas, texturas y animación (superficie, burbujas, vapor al enfriarse), sonido.
+  - Alcance (2026-10-02): el generador llena con agua o lava las cuencas de V3 (`Generated.basins`); Chico sigue sin líquidos (idéntico a v1). La lava de muerte súbita (`GameState.lava`) sigue siendo una banda aparte. Las explosiones no destruyen líquidos: al romper el borde de una cuenca, el líquido corre.
+  - Estado: hecha (2026-10-02), en tres agentes (sim, render, flujo), integrada en `v2-mundo`.
+    - sim: `src/sim/flow.ts` (`flowLiquids`, `applyPatch`, `liquidVolume`): cola activa de abajo hacia arriba; por celda, reacciones con los 4 vecinos (agua + lava → la lava se hace piedra y el agua se evapora; la lava quema lo inflamable vecino), caída (agua 3, lava 2 por iteración), diagonal y escurrido hacia la caída más cercana (alcance 48 / 20). Determinista, idempotente, el volumen no crece (lo que cae a un abismo se pierde). Parches: `patches[0]` es el estado previo al flujo del rectángulo total; luego uno cada `FLOW_FRAME_ITERS`; `t` = fin del tiro + 0,15 s, `dt` 1/30. Si a las 400 iteraciones animadas no asentó, hasta 800 más sin animar al último parche. Cuencas llenas al generar (inundación desde `level`); Chico byte a byte igual. `build` sobre lava = piedra; sobre agua pone tierra y el agua sube por la columna. Tanques: agua sin daño de caída ni paracaídas (`fall.water` con ≥ 3·TANK_W celdas de agua en la caja); lava en la caja = `LAVA_DAMAGE` al empezar el turno (una sola vez con la banda). Proyectiles: arrastre `WATER_DRAG^dt`, `Flight.splashes`, la lava derrite, explosión sumergida (centro o 4 vecinas de agua) × `WATER_BLAST_SCALE` salvo el impacto directo; napalm no quema sumergido. Cajas en lava se queman, barriles se hunden sin explotar. IA: no entra a la lava, sale si está adentro (`poolRisk`), rompe el borde de un pozo de lava hacia un rival (6/6 en la prueba). `sim-check` 31706/31706; tiros 2 / 4: Chico 10,6 / 18,9, Mediano 10,4 / 18,1, Grande 15,8 / 20,4; flujo por `fire` medio 1,5 ms (Mediano) y 2,4 ms (Grande), al romper cuencas 17 ms medio y hasta ~66 ms; IA peor caso 154 ms.
+    - render: `src/render/pixi/liquids.ts`: cuerpo de líquidos en una tercera capa de trozos (encima de los tanques, que se ven teñidos), agua translúcida con el look del lookdev, lava material con las tablas de `lava.ts`, `LiquidView` anima solo la superficie visible a 30 Hz, resplandor por pozo, terreno cocido junto a la lava; diff de grilla con `Int32Array` y acotado al rectángulo del flujo. Efectos: salpicadura y ondas, burbujas, explosión sumergida sin fuego con géiser, vapor, espuma/chispas en el frente del flujo. CPU de `render()` en Grande: 0,75 → 1,03 ms con líquidos quietos, 2,4 ms medio durante un flujo.
+    - flujo: aplica cada parche en su `t`, los daños posteriores van al fin del flujo + 0,25 s, el turno espera el flujo; cámara `watch` sobre flujos de ≥ 300 celdas a la vista o cerca (zoom ≥ 0,5); sonidos `splash`, `boomUnder`, `steam`, `flow` (agua o lava), `plunge`.
+    - Pendientes: vetas en la lava honda (tablas de la banda, ya anotado en V2); no hay derrumbe de tierra en la sim, así que "tierra sobre lava → piedra" solo aplica al `build`; posibles mejoras de contrato: `Impact.water` (explosión sumergida exacta) y salpicaduras en `RenderFrame`.
+- **V5 Hasta 8 jugadores.** Arte, HUD, lobby local y online.
 
 ## Cómo se agrega algo
 

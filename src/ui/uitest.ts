@@ -1,6 +1,6 @@
 // Página de prueba de las vistas: ?uitest=online|lobby|title|menu|banner|score|final|shop|hud con modelos falsos.
 // index.html la carga solo si la query trae uitest; main.ts puede llamar mountUiTest(name) si prefiere.
-import { ITEM_ORDER, SHOP, type ShopId } from '../sim/types'
+import { BEDROCK, BRICK, DIRT, ITEM_ORDER, MAP_SIZES, SHOP, STONE, WOOD, type MapSize, type ShopId, type Terrain } from '../sim/types'
 import { loadUiAssets } from './assets'
 import { Hud } from './hud'
 import { refreshLabels } from './kit'
@@ -11,7 +11,7 @@ import { createOnlineMenuView } from './online'
 import { createScoreboardView } from './scoreboard'
 import { createShopView } from './shop'
 import { createTitleView } from './title'
-import type { LobbyModel, ScoreModel, ShopModel } from './types'
+import type { LobbyModel, MinimapModel, ScoreModel, ShopModel } from './types'
 
 const ROWS = [
   { id: 0, name: 'BANDANA', color: 0x3d8cf0, crew: 'bandana' as const, alive: true, roundsWon: 2, kills: 3, earned: 1150, money: 1750 },
@@ -53,6 +53,8 @@ function lobbyModel(role: 'host' | 'client'): LobbyModel {
       difficulty: 'normal',
       biome: 'rotate',
       turnSeconds: 45,
+      // sin &size= el lobby no trae size (como un anfitrión anterior a v2): se ve CHICO
+      ...(params.get('size') ? { size: params.get('size') as MapSize } : {}),
       slots: [
         { kind: 'human', name: 'Facu', crew: 'bandana', owner: 'host', connected: true },
         { kind: 'human', name: 'Sargento', crew: 'sarge', owner: 'peer1', connected: true },
@@ -94,9 +96,19 @@ export async function mountUiTest(name: string): Promise<boolean> {
     document.body.append(root)
     const hud = new Hud(root)
     const items = Object.fromEntries(ITEM_ORDER.map((id, i) => [id, i % 3])) as Record<(typeof ITEM_ORDER)[number], number>
-    hud.place({ x: 0, y: 0, w: 800, h: 450 } as never)
+    // escala entera que entre en la ventana, como el juego
+    const k = Math.max(1, Math.floor(Math.min(innerWidth / 800, innerHeight / 450)))
+    hud.place({ x: Math.round((innerWidth - 800 * k) / 2), y: Math.round((innerHeight - 450 * k) / 2), w: 800 * k, h: 450 * k } as never)
+    // ?uitest=hud usa un minimapa falso de mapa Grande; &size=medium|small lo cambia (small = sin minimapa)
+    const size = (params.get('size') ?? 'large') as MapSize
+    const minimap = size in MAP_SIZES && size !== 'small' ? fakeMinimap(size) : null
+    // v2 muerte súbita: &sd=N muestra "MUERTE SÚBITA EN N" (calmLeft = N); &sd=lava la muestra activa
+    // con la banda de lava en el minimapa, 80 px de mundo sobre el fondo. &status=TEXTO prueba la convivencia.
+    const sdParam = params.get('sd')
+    const suddenDeath = sdParam == null ? null : sdParam === 'lava' ? { active: true, calmLeft: 0 } : { active: false, calmLeft: Number(sdParam) || 0 }
+    if (minimap && suddenDeath?.active) minimap.lava = MAP_SIZES[size].h - 80
     const side = (n: number, name: string, color: number, crew: 'bandana' | 'sarge') => ({ name, tag: `P${n}`, color, crew, hp: 80, alive: true, active: n === 1, you: n === 1 })
-    hud.update({
+    const model: Parameters<Hud['update']>[0] = {
       human: side(1, 'Bandana', 0x3d8cf0, 'bandana'),
       rival: side(2, 'Sargento', 0xe23d3d, 'sarge'),
       others: [],
@@ -105,7 +117,7 @@ export async function mountUiTest(name: string): Promise<boolean> {
       weapon: 'heavy',
       ammo: 2,
       wind: 4,
-      status: '',
+      status: params.get('status') ?? '',
       showAim: true,
       ammoAll: { normal: 99, heavy: 2, dirt: 3, cluster: 0, napalm: 2, digger: 2, roller: 2, nuke: 1 },
       fuel: 0.7,
@@ -120,8 +132,17 @@ export async function mountUiTest(name: string): Promise<boolean> {
         net: params.has('net')
           ? { role: 'host', code: 'TANK-4F7K', peers: [{ name: 'Sargento', connected: true, ping: 48 }, { name: 'Novato', connected: false, ping: null }], turnLeft: Number(params.get('net')) || 27, waiting: 'ESPERANDO A SARGENTO…' }
           : null,
+        minimap,
+        suddenDeath,
       },
-    })
+    }
+    // el flujo llama a update en cada frame; acá también, para ver el titileo del turno
+    const tick = () => {
+      hud.update(model)
+      requestAnimationFrame(tick)
+    }
+    tick()
+    root.addEventListener('pointerdown', (e) => console.log('minimapAt', JSON.stringify(hud.minimapAt(e.clientX, e.clientY))))
   } else if (name === 'online') {
     const view = createOnlineMenuView()
     const handlers = { host: () => console.log('host'), join: (c: string) => { console.log('join', c); view.error('SALA NO ENCONTRADA') }, back: () => console.log('back') }
@@ -147,3 +168,62 @@ export async function mountUiTest(name: string): Promise<boolean> {
 
 const q = new URLSearchParams(location.search).get('uitest')
 if (q) void mountUiTest(q)
+
+// ---------- minimapa falso (v2) ----------
+
+// Terreno inventado con relieve: meseta, montaña con cueva, búnker de ladrillo, torre, colinas y un cráter.
+function fakeTerrain(w: number, h: number): Terrain {
+  const front = new Uint8Array(w * h)
+  const g = (x: number, c: number, s: number) => Math.exp(-(((x - c) / s) ** 2))
+  const k = w / 2400 // los accidentes se reparten a lo ancho de cualquier tamaño
+  const surf = (x: number) => {
+    const u = x / k
+    let y = 362 + Math.sin(u / 37) * 6 + Math.sin(u / 11) * 2
+    y -= 225 * g(u, 790, 95) + 70 * g(u, 900, 40)
+    if (u < 250) y = 330
+    if (u >= 1150 && u < 1470) y = 300
+    y -= 70 * g(u, 1960, 60) + 45 * g(u, 2130, 45)
+    y += 40 * g(u, 466, 70) + 34 * g(u, 1683, 52)
+    return Math.round(Math.max(110, Math.min(h - 30, y)))
+  }
+  const fill = (x0: number, y0: number, x1: number, y1: number, m: number) => {
+    for (let y = Math.max(0, y0); y <= Math.min(h - 1, y1); y++) for (let x = Math.max(0, x0); x <= Math.min(w - 1, x1); x++) front[y * w + x] = m
+  }
+  for (let x = 0; x < w; x++) fill(x, surf(x), x, h - 1, DIRT)
+  fill(10, 330, Math.round(249 * k), 343, STONE)
+  const mesa = (u: number) => Math.round(u * k)
+  fill(mesa(1150), 300, mesa(1470) - 1, 307, STONE)
+  fill(mesa(1240), 308, mesa(1240) + 150, 368, BRICK)
+  fill(mesa(1240) + 10, 318, mesa(1240) + 140, 356, 0)
+  fill(mesa(1360), 218, mesa(1360) + 58, 299, WOOD)
+  fill(mesa(760) - 60, 380, mesa(760) + 60, 400, 0) // cueva
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const d = Math.hypot(x - mesa(1878), y - (surf(mesa(1878)) + 3))
+    if (d < 14 && front[y * w + x] === DIRT) front[y * w + x] = 0
+  }
+  fill(0, h - 6, w - 1, h - 1, BEDROCK)
+  return { w, h, front, back: new Uint8Array(w * h) }
+}
+
+function fakeMinimap(size: MapSize): MinimapModel {
+  const { w, h } = MAP_SIZES[size]
+  const terrain = fakeTerrain(w, h)
+  const floor = (x: number) => {
+    let y = 0
+    while (y < h - 1 && terrain.front[y * w + x] === 0) y++
+    return y
+  }
+  const k = w / 2400
+  const colors = [0x3d8cf0, 0xe23d3d, 0xe2c13d, 0x3dbe5a, 0xa65ae0, 0xf0903a]
+  const xs = [130, 830, 1205, 1500, 1955, 2290].map((x) => Math.round(x * k))
+  const view = { x: Math.round(1060 * k), y: 0, w: 800, h: 450 }
+  const tanks = xs.map((x, id) => ({ id, x, y: floor(x), color: colors[id], alive: id !== 1, current: id === 2 }))
+  return {
+    terrain,
+    terrainVersion: 1,
+    view,
+    tanks,
+    projectiles: [{ x: view.x + 640, y: 92 }],
+    lastImpacts: [{ playerId: 2, x: Math.round(1878 * k), y: floor(Math.round(1878 * k)), color: colors[2] }],
+  }
+}

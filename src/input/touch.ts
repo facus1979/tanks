@@ -1,10 +1,19 @@
 // Controles táctiles (tablet y celular). Solo aparecen en pantallas táctiles (pointer: coarse) o con ?touch=1.
 // Botones en pantalla que se mantienen apretados (mover, ángulo, potencia) o se tocan (fuego, arma, ítem, pausa),
 // y apuntado arrastrando sobre el campo de batalla: la dirección del arrastre es el ángulo y el largo la potencia.
+// v2: con dos dedos se arrastra el mundo (paneo de la cámara) y el botón ◎ recentra en tu tanque.
+// v2 ajuste fino: en los botones de ángulo y potencia, un toque corto mueve un paso fino (FINE_STEP) y
+// mantener mueve continuo: arranca a 1/5 de velocidad y a los RAMP segundos pasa a velocidad plena.
+import type { Vec2 } from '../sim/types'
 import type { PadAction, PadState } from './gamepad'
 
-// Largo del arrastre (en pixels lógicos de 800×450) que equivale a potencia 100.
+// Largo del arrastre (en pixels de mundo) que equivale a potencia 100.
 const DRAG_FULL = 160
+// Toque más corto que esto = un paso fino; más largo = continuo (segundos).
+const TAP_TIME = 0.25
+const FINE_STEP = 0.2 // grados o puntos de potencia por toque corto
+const RAMP = 0.6 // segundos de continuo lento antes de ir a velocidad plena
+const SLOW = 0.2
 
 export interface TouchAim {
   angle: number
@@ -24,9 +33,20 @@ export class TouchControls {
   private guide = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
   private line = document.createElementNS('http://www.w3.org/2000/svg', 'line')
   private held = new Set<Hold>()
+  private heldAt = new Map<Hold, number>() // cuándo se apoyó cada botón (performance.now, ms)
+  private steps = { angle: 0, power: 0 } // pasos finos de toques cortos sin levantar todavía
   private pressed = new Set<PadAction>()
   private drag: { id: number; x0: number; y0: number; aim: TouchAim | null } | null = null
   private active = false
+  // dedos apoyados en el campo; con dos o más, se panea hasta levantarlos todos
+  private fingers = new Map<number, { x: number; y: number }>()
+  private twoFinger = false
+  private panDx = 0
+  private recenterBtn: HTMLButtonElement | null = null
+  // Punto de la ventana → mundo (renderer.screenToWorld). Sin él, mundo = pantalla lógica de 800 px.
+  toWorld: ((clientX: number, clientY: number) => Vec2) | null = null
+  // true: ese toque es de otro control (el minimapa) y no apunta.
+  ignore: (e: PointerEvent) => boolean = () => false
 
   constructor(private stage: HTMLElement) {
     if (!this.enabled) return
@@ -45,7 +65,9 @@ export class TouchControls {
       row(this.tap('fire', 'FUEGO', 'fire')),
     )
     const top = div('touch-top')
-    top.append(this.tap('pause', 'II'), fullscreenButton())
+    this.recenterBtn = this.tap('recenter', '◎')
+    this.recenterBtn.style.display = 'none'
+    top.append(this.tap('pause', 'II'), this.recenterBtn, fullscreenButton())
     this.guide.classList.add('touch-guide')
     this.line.setAttribute('stroke-dasharray', '4 4')
     this.guide.append(this.line)
@@ -62,23 +84,57 @@ export class TouchControls {
     document.documentElement.classList.toggle('touch-playing', on)
     if (!on) {
       this.held.clear()
+      this.heldAt.clear()
+      this.steps = { angle: 0, power: 0 }
       this.pressed.clear()
       this.endDrag()
+      this.fingers.clear()
+      this.twoFinger = false
+      this.panDx = 0
     }
+  }
+
+  // Botón de recentrar: solo en mapas que no entran en pantalla.
+  setRecenter(visible: boolean): void {
+    if (this.recenterBtn) this.recenterBtn.style.display = visible ? '' : 'none'
+  }
+
+  // Paneo con dos dedos desde la última llamada, en pixels de la ventana (positivo: los dedos fueron a la derecha).
+  pollPan(): number {
+    const dx = this.panDx
+    this.panDx = 0
+    return dx
   }
 
   // Mismo formato que el gamepad, así main.ts lo suma sin casos especiales.
   poll(): PadState {
-    const state: PadState = { angle: 0, power: 0, move: 0, pressed: this.pressed }
+    const state: PadState = {
+      angle: 0,
+      power: 0,
+      move: 0,
+      pan: 0,
+      fine: false,
+      stepAngle: this.steps.angle,
+      stepPower: this.steps.power,
+      pressed: this.pressed,
+    }
     this.pressed = new Set()
-    if (this.held.has('angUp')) state.angle += 1
-    if (this.held.has('angDown')) state.angle -= 1
-    if (this.held.has('powUp')) state.power += 1
-    if (this.held.has('powDown')) state.power -= 1
+    this.steps = { angle: 0, power: 0 }
+    state.angle += this.speed('angUp') - this.speed('angDown')
+    state.power += this.speed('powUp') - this.speed('powDown')
     const l = this.held.has('left')
     const r = this.held.has('right')
     if (l !== r) state.move = l ? -1 : 1
     return state
+  }
+
+  // Velocidad continua de un botón de ángulo o potencia: 0 durante el toque corto, después lenta y plena.
+  private speed(kind: Hold): number {
+    const at = this.heldAt.get(kind)
+    if (!this.held.has(kind) || at == null) return 0
+    const held = (performance.now() - at) / 1000
+    if (held < TAP_TIME) return 0
+    return held < TAP_TIME + RAMP ? SLOW : 1
   }
 
   // Ángulo y potencia absolutos mientras se arrastra, o null.
@@ -89,19 +145,34 @@ export class TouchControls {
   private hold(kind: Hold, text: string): HTMLButtonElement {
     const b = btn(text)
     const off = (): void => {
+      // pointerup y lostpointercapture llegan los dos: solo el primero cuenta
+      if (this.held.has(kind)) {
+        const at = this.heldAt.get(kind) ?? 0
+        if ((performance.now() - at) / 1000 < TAP_TIME) this.tapStep(kind)
+      }
       this.held.delete(kind)
+      this.heldAt.delete(kind)
       b.classList.remove('on')
     }
     b.addEventListener('pointerdown', (e) => {
       e.preventDefault()
       b.setPointerCapture(e.pointerId)
       this.held.add(kind)
+      this.heldAt.set(kind, performance.now())
       b.classList.add('on')
     })
     b.addEventListener('pointerup', off)
     b.addEventListener('pointercancel', off)
     b.addEventListener('lostpointercapture', off)
     return b
+  }
+
+  // Toque corto en ángulo o potencia: un paso fino.
+  private tapStep(kind: Hold): void {
+    if (kind === 'angUp') this.steps.angle += FINE_STEP
+    else if (kind === 'angDown') this.steps.angle -= FINE_STEP
+    else if (kind === 'powUp') this.steps.power += FINE_STEP
+    else if (kind === 'powDown') this.steps.power -= FINE_STEP
   }
 
   private tap(action: PadAction, text: string, cls = ''): HTMLButtonElement {
@@ -118,17 +189,46 @@ export class TouchControls {
   private bindDrag(): void {
     const target = this.stage
     target.addEventListener('pointerdown', (e) => {
-      if (!this.active || this.drag || e.pointerType === 'mouse') return
+      if (!this.active || e.pointerType === 'mouse' || this.ignore(e)) return
       target.setPointerCapture(e.pointerId)
+      this.fingers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+      if (this.fingers.size >= 2) {
+        // segundo dedo: deja de apuntar y arrastra el mundo
+        this.twoFinger = true
+        this.endDrag()
+        return
+      }
+      if (this.drag || this.twoFinger) return
       this.drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, aim: null }
     })
     target.addEventListener('pointermove', (e) => {
+      const f = this.fingers.get(e.pointerId)
+      if (f && this.twoFinger) {
+        // el paneo sigue al punto medio de los dedos: cada dedo aporta su parte
+        this.panDx += (e.clientX - f.x) / this.fingers.size
+        f.x = e.clientX
+        f.y = e.clientY
+        return
+      }
+      if (f) {
+        f.x = e.clientX
+        f.y = e.clientY
+      }
       const d = this.drag
       if (!d || d.id !== e.pointerId) return
-      const rect = target.getBoundingClientRect()
-      const scale = rect.width / 800 || 1
-      const dx = (e.clientX - d.x0) / scale
-      const dy = (e.clientY - d.y0) / scale
+      let dx: number
+      let dy: number
+      if (this.toWorld) {
+        // en mundo: con la cámara del último frame, los dos puntos se mapean igual
+        const a = this.toWorld(d.x0, d.y0)
+        const b = this.toWorld(e.clientX, e.clientY)
+        dx = b.x - a.x
+        dy = b.y - a.y
+      } else {
+        const scale = target.getBoundingClientRect().width / 800 || 1
+        dx = (e.clientX - d.x0) / scale
+        dy = (e.clientY - d.y0) / scale
+      }
       const len = Math.hypot(dx, dy)
       if (len < 6) return
       let angle = (Math.atan2(-dy, dx) * 180) / Math.PI
@@ -137,6 +237,8 @@ export class TouchControls {
       this.drawGuide(d.x0, d.y0, e.clientX, e.clientY)
     })
     const end = (e: PointerEvent): void => {
+      this.fingers.delete(e.pointerId)
+      if (this.fingers.size === 0) this.twoFinger = false
       if (this.drag?.id === e.pointerId) this.endDrag()
     }
     target.addEventListener('pointerup', end)

@@ -1,9 +1,10 @@
 // HUD al estilo Broforce: un canvas de 800×450 sobre el del juego, escalado igual y pixelado.
-import { ITEM_ORDER, WEAPONS, WORLD_H, WORLD_W, type CrewId, type ItemId, type WeaponId } from '../sim/types'
-import type { Viewport } from '../render/types'
+import { ITEM_ORDER, WEAPONS, type CrewId, type ItemId, type Vec2, type WeaponId } from '../sim/types'
+import { VIEW_H, VIEW_W, type Viewport } from '../render/types'
 import { uiAssets, type UiAssets } from './assets'
 import { OUT, css, drawText, measure } from './pixelfont'
-import type { HudExtras, HudNet } from './types'
+import { MinimapTerrain, drawEdgeArrows, drawMinimap, minimapLayout, minimapPoint, type MinimapLayout } from './minimap'
+import type { HudExtras, HudNet, MinimapInput } from './types'
 
 // Tecla de cada ítem usable (el paracaídas es pasivo). La lee también el flujo de entrada.
 export const ITEM_KEYS: Partial<Record<ItemId, string>> = { shield: 'Q', fuel: 'F', repair: 'R', tracer: 'T' }
@@ -50,18 +51,29 @@ const SLOT = 18
 const BAR_W = SLOT * WEAPON_SLOTS.length + 6
 const BAR_H = 38
 const BOX = 16
+const BLINK_MS = 280 // titileo del tanque del turno en el minimapa
+const MM_GAP = 6 // del borde de abajo del minimapa (marco incluido) al panel de puntería
+// v2 muerte súbita
+const SD_WARN_AT = 3 // el aviso "MUERTE SÚBITA EN N" aparece con calmLeft <= 3
+const SD_PULSE_MS = 1400 // período del titileo suave del indicador de lava activa
+const SD_STEPS = 5 // niveles del titileo (cada cambio de nivel redibuja el HUD)
+const LAVA = 0xff7a2a // el mismo naranja de la lava del minimapa
+const LAVA_HOT = 0xffd27a
+const LAVA_DEEP = 0xd0362c
 
-export class Hud {
+export class Hud implements MinimapInput {
   private canvas: HTMLCanvasElement
   private ctx: CanvasRenderingContext2D
   private key = ''
   private vp: Viewport | null = null
   private barVisible = false
+  private mm: MinimapLayout | null = null // dónde quedó el minimapa en el último dibujo
+  private mmTerrain = new MinimapTerrain()
 
   constructor(private root: HTMLElement) {
     this.canvas = document.createElement('canvas')
-    this.canvas.width = WORLD_W
-    this.canvas.height = WORLD_H
+    this.canvas.width = VIEW_W
+    this.canvas.height = VIEW_H
     this.canvas.className = 'hud-canvas'
     const ctx = this.canvas.getContext('2d')
     if (!ctx) throw new Error('Sin canvas 2D para el HUD')
@@ -91,31 +103,68 @@ export class Hud {
   }
 
   update(model: HudModel): void {
-    const key = JSON.stringify(model)
+    const mm = model.extras?.minimap ?? null
+    // la grilla no entra en la clave (son bytes); su cambio lo marca terrainVersion
+    const blink = !!mm && mm.tanks.some((t) => t.current && t.alive) && Math.floor(performance.now() / BLINK_MS) % 2 === 0
+    // muerte súbita activa: el indicador titila suave; el nivel del pulso entra en la clave
+    const sd = model.extras?.suddenDeath ?? null
+    const pulse = sd?.active ? sdPulse(performance.now()) : -1
+    const key = JSON.stringify(model, (k, v) => (k === 'terrain' ? undefined : v)) + (blink ? '*' : '') + pulse
     if (key === this.key) return
     this.key = key
     const ctx = this.ctx
     const assets = uiAssets()
-    ctx.clearRect(0, 0, WORLD_W, WORLD_H)
+    ctx.clearRect(0, 0, VIEW_W, VIEW_H)
     if (model.human) this.side(assets, model.human, false)
-    const right = model.rival ? this.side(assets, model.rival, true) : WORLD_W - 2
+    const right = model.rival ? this.side(assets, model.rival, true) : VIEW_W - 2
     this.compacts(assets, model.others, right, model.showBar)
-    this.top(assets, model)
-    if (model.extras) this.extras(assets, model.extras, model.showBar)
-    if (model.extras?.net) this.net(assets, model.extras.net)
+    // v2: el minimapa va arriba al centro y el panel de puntería baja debajo de él
+    this.mm = mm ? minimapLayout(mm.terrain) : null
+    let topY = 3
+    if (mm && this.mm) {
+      drawMinimap(ctx, this.mm, mm, this.mmTerrain.image(mm.terrain, mm.terrainVersion), blink)
+      topY = this.mm.y + this.mm.h + MM_GAP
+    }
+    let below = this.top(assets, model, topY)
+    // el aviso de muerte súbita va centrado debajo del panel de puntería (y del estado, si hay);
+    // el "ESPERANDO A..." de la red se corre debajo de él
+    if (sd) below = this.suddenDeath(assets, sd, below, pulse)
+    let leftBottom = 3
+    let rightBottom = 3
+    if (model.extras) leftBottom = this.extras(assets, model.extras, model.showBar)
+    if (model.extras?.net) rightBottom = this.net(assets, model.extras.net, below)
+    if (mm) {
+      const pad = Math.max(10, assets.font.h + 4)
+      drawEdgeArrows(ctx, assets.font, mm, { leftTop: leftBottom + pad, rightTop: rightBottom + pad, bottom: VIEW_H - 64 })
+    }
     this.barVisible = model.showBar
     if (model.showBar) this.weaponBar(assets, model)
+  }
+
+  // Punto de la ventana → mundo si cae sobre el minimapa (con margen táctil); si no, null.
+  minimapAt(clientX: number, clientY: number): Vec2 | null {
+    const mm = this.mm
+    if (!mm || !this.vp || this.root.hidden) return null
+    const p = this.toLogical(clientX, clientY)
+    return p ? minimapPoint(mm, p.x, p.y) : null
+  }
+
+  private toLogical(clientX: number, clientY: number): { x: number; y: number } | null {
+    const rect = this.root.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) return null
+    return { x: ((clientX - rect.left) / rect.width) * VIEW_W, y: ((clientY - rect.top) / rect.height) * VIEW_H }
   }
 
   // Arma bajo un punto de la ventana (clientX/Y), o null.
   weaponAt(clientX: number, clientY: number): WeaponId | null {
     const vp = this.vp
     if (!vp || !this.barVisible || this.root.hidden) return null
-    const rect = this.root.getBoundingClientRect()
-    const lx = ((clientX - rect.left) / rect.width) * WORLD_W
-    const ly = ((clientY - rect.top) / rect.height) * WORLD_H
+    const p = this.toLogical(clientX, clientY)
+    if (!p) return null
+    const lx = p.x
+    const ly = p.y
     const bx = barX()
-    const by = WORLD_H - 2 - BAR_H
+    const by = VIEW_H - 2 - BAR_H
     if (ly < by + 2 || ly > by + 4 + BOX + 8 || lx < bx + 3) return null
     const i = Math.floor((lx - bx - 3) / SLOT)
     return i >= 0 && i < WEAPON_SLOTS.length ? WEAPON_SLOTS[i] : null
@@ -125,7 +174,7 @@ export class Hud {
     const ctx = this.ctx
     const font = assets.font
     const bx = barX()
-    const by = WORLD_H - 2 - BAR_H
+    const by = VIEW_H - 2 - BAR_H
     rect(ctx, bx, by, BAR_W, BAR_H, OUT)
     rect(ctx, bx + 1, by + 1, BAR_W - 2, BAR_H - 2, BRONZE)
     rect(ctx, bx + 2, by + 2, BAR_W - 4, BAR_H - 4, DARK)
@@ -175,8 +224,8 @@ export class Hud {
     const ctx = this.ctx
     const font = assets.font
     const size = 36
-    const fx = flip ? WORLD_W - 2 - size : 2
-    const fy = WORLD_H - 2 - size
+    const fx = flip ? VIEW_W - 2 - size : 2
+    const fy = VIEW_H - 2 - size
     rect(ctx, fx, fy, size, size, OUT)
     rect(ctx, fx + 1, fy + 1, size - 2, size - 2, side.alive ? side.color : 0x4a4440)
     rect(ctx, fx + 2, fy + 2, size - 4, size - 4, 0x1c1614)
@@ -200,7 +249,7 @@ export class Hud {
     const bw = Math.max(80, measure(font, name) + 12)
     const bh = Math.max(22, font.h + 17)
     const bx = flip ? fx - bw + 1 : fx + size - 1
-    const by = WORLD_H - 2 - bh
+    const by = VIEW_H - 2 - bh
     rect(ctx, bx, by, bw, bh, OUT)
     rect(ctx, bx + 1, by + 1, bw - 2, bh - 2, side.alive ? side.color : 0x4a4440)
     rect(ctx, bx + 2, by + 2, bw - 4, bh - 4, DARK)
@@ -239,9 +288,9 @@ export class Hud {
     const font = assets.font
     const ps = 20
     const h = 20
-    const limit = bar ? barX() + BAR_W + 4 : WORLD_W / 2 - 40
+    const limit = bar ? barX() + BAR_W + 4 : VIEW_W / 2 - 40
     let x = right - 4
-    let y = WORLD_H - 2 - h
+    let y = VIEW_H - 2 - h
     for (const side of list) {
       const name = side.name.toUpperCase()
       const pipW = PIPS * 7 - 3
@@ -313,7 +362,8 @@ export class Hud {
     return width
   }
 
-  private top(assets: UiAssets, model: HudModel): void {
+  // Panel de puntería centrado en y0 y el cartel de estado debajo. Devuelve la y donde terminan.
+  private top(assets: UiAssets, model: HudModel, y0: number): number {
     const ctx = this.ctx
     const font = assets.font
     const h = Math.max(20, font.h + 13)
@@ -322,8 +372,10 @@ export class Hud {
     const weaponName = (weapon?.name ?? model.weapon).toUpperCase()
     const ammoText = model.ammo >= 50 ? '' : `x${model.ammo}`
     const slot = WEAPON_SLOTS.indexOf(model.weapon) + 1
-    const angle = `${Math.round(model.angle)}°`
-    const power = `${Math.round(model.power)}`
+    // v2: con el ajuste fino el valor puede tener décimas; se muestran solo si las hay
+    const fine = (v: number) => (Math.abs(v - Math.round(v)) < 0.05 ? `${Math.round(v)}` : v.toFixed(1).replace('.', ','))
+    const angle = `${fine(model.angle)}°`
+    const power = fine(model.power)
     const bar = 48
     const windN = Math.min(3, Math.ceil(Math.abs(model.wind) / 3.4))
     const windArrows = model.wind === 0 ? '' : (model.wind > 0 ? '>' : '<').repeat(windN)
@@ -331,15 +383,14 @@ export class Hud {
 
     const lbl = (s: string) => measure(font, s)
     const sections: number[] = [
-      lbl('ANG') + 4 + lbl('180°'),
-      lbl('POT') + 4 + bar + 4 + lbl('100'),
+      lbl('ANG') + 4 + lbl('180,0°'),
+      lbl('POT') + 4 + bar + 4 + lbl('100,0'),
       12 + 4 + lbl(`${slot}`) + 4 + lbl(weaponName) + (ammoText ? 4 + lbl(ammoText) : 0),
       lbl('VIENTO') + 4 + lbl('>>>') + 3 + lbl('10'),
     ]
     const pad = 7
     const total = sections.reduce((a, b) => a + b, 0) + pad * (sections.length + 1)
-    const x0 = Math.round((WORLD_W - total) / 2)
-    const y0 = 3
+    const x0 = Math.round((VIEW_W - total) / 2)
     rect(ctx, x0, y0, total, h, OUT)
     rect(ctx, x0 + 1, y0 + 1, total - 2, h - 2, BRONZE)
     rect(ctx, x0 + 2, y0 + 2, total - 4, h - 4, DARK)
@@ -393,16 +444,67 @@ export class Hud {
     if (model.status) {
       const text = model.status.toUpperCase()
       const w = measure(font, text)
-      const sx = Math.round((WORLD_W - w) / 2)
+      const sx = Math.round((VIEW_W - w) / 2)
       const sy = y0 + h + 4
       rect(ctx, sx - 5, sy - 3, w + 10, font.h + 6, OUT)
       rect(ctx, sx - 4, sy - 2, w + 8, font.h + 4, DARK)
       drawText(ctx, font, text, sx, sy, GOLD)
+      return sy + font.h + 3
     }
+    return y0 + h
   }
 
-  // Esquina superior izquierda: ronda y plata, y debajo los ítems con cantidad y tecla.
-  private extras(assets: UiAssets, ex: HudExtras, showItems: boolean): void {
+  // Muerte súbita, centrado debajo de y0. Antes: chip chico "MUERTE SÚBITA EN N" (solo con calmLeft <= 3).
+  // Activa: cartel más grande con marco de lava que titila suave y una franja de lava abajo.
+  // pulse: nivel 0..SD_STEPS-1 del titileo. Devuelve la y donde termina (y0 si no dibuja nada).
+  private suddenDeath(assets: UiAssets, sd: NonNullable<HudExtras['suddenDeath']>, y0: number, pulse: number): number {
+    const ctx = this.ctx
+    const font = assets.font
+    if (!sd.active) {
+      if (sd.calmLeft > SD_WARN_AT) return y0
+      const n = Math.max(0, Math.ceil(sd.calmLeft))
+      const text = `MUERTE SÚBITA EN ${n}`
+      const w = measure(font, text)
+      const sx = Math.round((VIEW_W - w) / 2)
+      const sy = y0 + 5
+      // con 1 tiro de margen el borde pasa de naranja a rojo
+      rect(ctx, sx - 5, sy - 3, w + 10, font.h + 6, OUT)
+      rect(ctx, sx - 4, sy - 2, w + 8, font.h + 4, n <= 1 ? LAVA_DEEP : LAVA)
+      rect(ctx, sx - 3, sy - 1, w + 6, font.h + 2, DARK)
+      const lw = drawText(ctx, font, 'MUERTE SÚBITA EN ', sx, sy, LAVA_HOT)
+      drawText(ctx, font, `${n}`, sx + lw, sy, 0xffffff)
+      return sy + font.h + 3
+    }
+    const t = pulse / Math.max(1, SD_STEPS - 1) // 0..1
+    const text = 'MUERTE SÚBITA'
+    const w = measure(font, text)
+    const bw = w + 24
+    const bh = font.h + 14
+    const bx = Math.round((VIEW_W - bw) / 2)
+    const by = y0 + 5
+    rect(ctx, bx, by, bw, bh, OUT)
+    rect(ctx, bx + 1, by + 1, bw - 2, bh - 2, mix(LAVA_DEEP, LAVA, t))
+    rect(ctx, bx + 2, by + 2, bw - 4, bh - 4, OUT)
+    rect(ctx, bx + 3, by + 3, bw - 6, bh - 6, 0x2a0c08)
+    // franja de lava al pie del cartel: superficie ondulada más clara, cuerpo naranja
+    const ly = by + bh - 6
+    rect(ctx, bx + 3, ly + 1, bw - 6, 2, LAVA)
+    for (let x = bx + 3; x < bx + bw - 3; x++) {
+      const crest = (x + Math.round(t * 4)) % 6 < 2
+      rect(ctx, x, crest ? ly : ly + 1, 1, 1, mix(LAVA, LAVA_HOT, 0.6))
+    }
+    // gotitas de lava a los costados del texto
+    const ty = by + 4
+    for (const dx of [6, bw - 8]) {
+      rect(ctx, bx + dx, ty + 1, 2, 2, mix(LAVA, LAVA_HOT, t))
+      rect(ctx, bx + dx, ty + 3, 2, 1, LAVA_DEEP)
+    }
+    drawText(ctx, font, text, bx + Math.round((bw - w) / 2), ty, mix(LAVA, LAVA_HOT, t))
+    return by + bh
+  }
+
+  // Esquina superior izquierda: ronda y plata, y debajo los ítems con cantidad y tecla. Devuelve la y de abajo.
+  private extras(assets: UiAssets, ex: HudExtras, showItems: boolean): number {
     const ctx = this.ctx
     const font = assets.font
     const round = `RONDA ${ex.round}/${ex.rounds}`
@@ -433,7 +535,7 @@ export class Hud {
       drawText(ctx, font, t, x0 + 4, y + 3, 0xffffff)
       y += font.h + 9
     }
-    if (!showItems) return
+    if (!showItems) return y - 3
     for (const id of ITEM_ORDER) {
       const n = ex.items[id] ?? 0
       const key = ITEM_KEYS[id]
@@ -453,12 +555,14 @@ export class Hud {
       }
       y += 17
     }
+    return y - 1
   }
 
 
   // Esquina superior derecha: código de sala, peers con conexión y ping, cuenta regresiva del turno.
   // Debajo del panel superior, centrado: "ESPERANDO A <NOMBRE>...".
-  private net(assets: UiAssets, net: HudNet): void {
+  // below: la y donde terminan el panel de puntería y el estado. Devuelve la y de abajo de la columna derecha.
+  private net(assets: UiAssets, net: HudNet, below: number): number {
     const ctx = this.ctx
     const font = assets.font
     const code = net.code
@@ -471,7 +575,7 @@ export class Hud {
     for (const r of rows) inner = Math.max(inner, 9 + measure(font, r.name) + 8 + measure(font, r.ping))
     const w = inner + 10
     const h = 4 + font.h + (rows.length ? 4 + rows.length * (font.h + 3) : 0) + 4
-    const x0 = WORLD_W - 3 - w
+    const x0 = VIEW_W - 3 - w
     const y0 = 3
     rect(ctx, x0, y0, w, h, OUT)
     rect(ctx, x0 + 1, y0 + 1, w - 2, h - 2, BRONZE)
@@ -487,7 +591,7 @@ export class Hud {
       drawText(ctx, font, r.ping, x0 + w - 5 - pw, y, !r.ok ? 0xd0362c : slow ? 0xff6a3a : GREY)
       y += font.h + 3
     }
-    let below = y0 + h + 3
+    let right = y0 + h + 3
     if (net.turnLeft != null) {
       const secs = Math.max(0, Math.ceil(net.turnLeft))
       const urgent = secs <= 10
@@ -496,24 +600,26 @@ export class Hud {
       const tw = measure(font, text) * scale
       const bw = Math.max(tw + 12, 30)
       const bh = (font.h + 2) * scale + 6
-      const bx = WORLD_W - 3 - bw
-      rect(ctx, bx, below, bw, bh, OUT)
-      rect(ctx, bx + 1, below + 1, bw - 2, bh - 2, urgent ? 0xd0362c : BRONZE)
-      rect(ctx, bx + 2, below + 2, bw - 4, bh - 4, urgent ? 0x3a0e0a : DARK)
-      bigText(ctx, font, text, bx + Math.floor((bw - tw) / 2), below + 3, scale, urgent ? 0xff5a4a : 0xffffff)
-      below += bh + 3
+      const bx = VIEW_W - 3 - bw
+      rect(ctx, bx, right, bw, bh, OUT)
+      rect(ctx, bx + 1, right + 1, bw - 2, bh - 2, urgent ? 0xd0362c : BRONZE)
+      rect(ctx, bx + 2, right + 2, bw - 4, bh - 4, urgent ? 0x3a0e0a : DARK)
+      bigText(ctx, font, text, bx + Math.floor((bw - tw) / 2), right + 3, scale, urgent ? 0xff5a4a : 0xffffff)
+      right += bh + 3
     }
     if (net.waiting) {
       const text = net.waiting.toUpperCase().replace(/…/g, '...')
       const tw = measure(font, text)
-      const sx = Math.round((WORLD_W - tw) / 2)
-      const sy = 44
+      const sx = Math.round((VIEW_W - tw) / 2)
+      const sy = Math.max(44, below + 8)
       rect(ctx, sx - 6, sy - 4, tw + 12, font.h + 8, OUT)
       rect(ctx, sx - 5, sy - 3, tw + 10, font.h + 6, BRONZE)
       rect(ctx, sx - 4, sy - 2, tw + 8, font.h + 4, DARK)
       drawText(ctx, font, text, sx, sy, /RECONECT|DESCONECT/.test(text) ? 0xff8a6a : GOLD)
     }
+    return right - 3
   }
+
   private itemIcon(assets: UiAssets, id: ItemId, x: number, y: number): void {
     const ctx = this.ctx
     const icons = assets.itemIcons
@@ -543,12 +649,23 @@ export class Hud {
 }
 
 function barX(): number {
-  return Math.round((WORLD_W - BAR_W) / 2)
+  return Math.round((VIEW_W - BAR_W) / 2)
 }
 
 function rect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, c: number): void {
   ctx.fillStyle = css(c)
   ctx.fillRect(x, y, w, h)
+}
+
+// Nivel del titileo de la muerte súbita activa: seno cuantizado en SD_STEPS escalones.
+function sdPulse(now: number): number {
+  const s = (Math.sin((now / SD_PULSE_MS) * Math.PI * 2) + 1) / 2
+  return Math.min(SD_STEPS - 1, Math.floor(s * SD_STEPS))
+}
+
+function mix(a: number, b: number, t: number): number {
+  const ch = (s: number) => Math.round(((a >> s) & 255) * (1 - t) + ((b >> s) & 255) * t)
+  return (ch(16) << 16) | (ch(8) << 8) | ch(0)
 }
 
 function sep(ctx: CanvasRenderingContext2D, x: number, y: number, h: number): void {

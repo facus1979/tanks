@@ -14,8 +14,17 @@ import {
   TANK_H,
   TANK_HALF_W,
   WOOD,
+  WATER,
+  LAVA,
+  WATER_BLAST_SCALE,
   WORLD_H,
   WORLD_W,
+  LAVA_DAMAGE,
+  LAVA_RISE,
+  SUDDEN_DEATH_CALM,
+  MAP_SIZES,
+  MAP_SIZE_ORDER,
+  physicsFor,
   applyCommand,
   chooseShot,
   cloneState,
@@ -40,12 +49,18 @@ import {
   START_MONEY,
   biomeFor,
   owned,
+  roundSeed,
+  abyssAhead,
+  materialAt,
+  ABYSS_DROP,
+  tankFloor,
   type Biome,
   type Command,
   type Difficulty,
   type GameEvent,
   type GameState,
   type ItemId,
+  type MapSize,
   type ShopId,
   type MatchConfig,
   type SlotConfig,
@@ -54,13 +69,22 @@ import {
   type WeaponId,
 } from '../src/sim'
 import { propSupported, resolveBlast, blastFor } from '../src/sim/physics'
-import { padBounds } from '../src/sim/gen'
-import { columnGround, createTerrain, deform, fillRect } from '../src/sim/terrain'
+import { lavaRisk } from '../src/sim/ai'
+import { LAVA_DELAY } from '../src/sim/game'
+import { skylineOf } from '../src/sim/ballistics'
+import { generate, padBounds, SPAWN_PIT_GAP, type Generated } from '../src/sim/gen'
+import { Rng } from '../src/sim/rng'
+import { cloneTerrain, columnGround, createTerrain, deform, fillRect, hasLiquid } from '../src/sim/terrain'
+import { applyPatch, flowLiquids, liquidVolume } from '../src/sim/flow'
+import { flowStats } from '../src/sim/game'
+import { inLava, inWater } from '../src/sim/physics'
 
-function mk(bots: number, difficulty: Difficulty, biome: MatchConfig['biome'], seed: number, rounds = 1, humans = 0): MatchConfig {
+function mk(bots: number, difficulty: Difficulty, biome: MatchConfig['biome'], seed: number, rounds = 1, humans = 0, size?: MapSize): MatchConfig {
   const slots: SlotConfig[] = []
   for (let i = 0; i <= bots; i++) slots.push({ kind: i < humans ? 'human' : 'ai' })
-  return { slots, rounds, difficulty, biome, seed }
+  const cfg: MatchConfig = { slots, rounds, difficulty, biome, seed }
+  if (size) cfg.size = size
+  return cfg
 }
 
 let failures = 0
@@ -146,25 +170,213 @@ for (const biome of BIOMES) {
   check(hashState(a) !== hashState(b), 'seeds distintas dan el mismo mapa')
 }
 
+// ---------- 2b. v3: tramos, abismos y cuencas (Mediano y Grande) ----------
+let tramoMaps = 0
+const tramoKinds: Record<string, number> = {}
+const tramoSeqs = new Set<string>()
+let abyssCount = 0
+let basinCount = 0
+// Por qué un spawn en x no sirve (null si sirve): abismo a menos de SPAWN_PIT_GAP de la caja del
+// tanque o adentro de una cuenca (con 20 px de margen).
+function spawnProblem(g: Generated, x: number): string | null {
+  const t = g.terrain
+  for (let i = Math.max(0, x - TANK_HALF_W - SPAWN_PIT_GAP); i <= Math.min(t.w - 1, x + TANK_HALF_W + SPAWN_PIT_GAP); i++) if (t.pits?.[i]) return 'abismo cerca'
+  for (const q of g.basins ?? []) if (x + TANK_HALF_W + 20 > q.x0 && x - TANK_HALF_W - 20 < q.x1) return 'en una cuenca'
+  return null
+}
+function tramoChecks(g: Generated, biome: Biome, size: MapSize, seed: number): void {
+  const t = g.terrain
+  const W = t.w
+  const H = t.h
+  const tag = `${size}/${biome}/seed ${seed}`
+  const segs = g.segments ?? []
+  tramoMaps++
+  tramoSeqs.add(segs.map((q) => q.kind).join(','))
+  for (const q of segs) tramoKinds[`${biome}:${q.kind}`] = (tramoKinds[`${biome}:${q.kind}`] ?? 0) + 1
+  // los tramos cubren el mapa sin huecos ni solapes, con anchos variados
+  const sorted = segs.slice().sort((a, b) => a.x0 - b.x0)
+  check(sorted.length >= 4 && sorted[0].x0 === 0 && sorted[sorted.length - 1].x1 === W && sorted.every((q, i) => i === 0 || q.x0 === sorted[i - 1].x1), `tramos que no cubren el mapa ${tag}`)
+  check(new Set(segs.map((q) => q.x1 - q.x0)).size > 2, `tramos todos del mismo ancho ${tag}`)
+  // a lo sumo una meseta con búnker y torre cada 800 px, y al menos una
+  const full = segs.filter((q) => q.bunker && q.tower).map((q) => (q.x0 + q.x1) / 2)
+  check(full.length >= 1 && full.every((c, i) => full.every((d, j) => i === j || Math.abs(c - d) >= WORLD_W)), `mesetas con búnker y torre (${full.join(',')}) ${tag}`)
+  const top = (x: number) => {
+    const y = columnGround(t, x)
+    return { y, m: y < H ? t.front[y * W + x] : AIR }
+  }
+  const pitNear = (x: number, d: number) => {
+    for (let i = Math.max(0, x - d); i <= Math.min(W - 1, x + d); i++) if (t.pits?.[i]) return true
+    return false
+  }
+  // empalmes sin escalones: en la unión de dos tramos (x0 - 2 .. x0 + 1) la superficie no salta más
+  // de 12 px; y en todo el mapa tampoco, entre dos columnas vecinas con tierra arriba (fuera de
+  // estructuras, losas y ruinas, y de las paredes del abismo)
+  for (const q of sorted.slice(1)) {
+    let jump = 0
+    for (let x = q.x0 - 2; x < q.x0 + 1; x++) {
+      const a = top(x)
+      const b = top(x + 1)
+      if (a.m === DIRT && b.m === DIRT) jump = Math.max(jump, Math.abs(a.y - b.y))
+    }
+    check(jump <= 12, `empalme de tramos en x=${q.x0} con salto de ${jump} px ${tag}`)
+  }
+  let worst = 0
+  let worstX = -1
+  for (let x = 0; x + 1 < W; x++) {
+    if (pitNear(x, 18)) continue // las paredes del abismo serpentean hasta 16 px del fondo
+    const a = top(x)
+    const b = top(x + 1)
+    if (a.m !== DIRT || b.m !== DIRT) continue
+    const j = Math.abs(a.y - b.y)
+    if (j > worst) {
+      worst = j
+      worstX = x
+    }
+  }
+  check(worst <= 12, `escalón de ${worst} px en x=${worstX} ${tag}`)
+  // abismos: pits coherente con la grilla (sin roca madre, aire hasta abajo), uno por tramo de abismo
+  const runs: [number, number][] = []
+  for (let x = 0; x < W; x++) {
+    if (!t.pits?.[x]) continue
+    if (runs.length > 0 && runs[runs.length - 1][1] === x - 1) runs[runs.length - 1][1] = x
+    else runs.push([x, x])
+  }
+  const abysses = segs.filter((q) => q.kind === 'abyss')
+  abyssCount += runs.length
+  check(runs.length === abysses.length, `abismos: ${runs.length} tiras de pits para ${abysses.length} tramos ${tag}`)
+  for (const [a, b] of runs) {
+    check(b - a + 1 >= 44 && b - a + 1 <= 150, `abismo de ${b - a + 1} px ${tag}`)
+    check(abysses.some((q) => a >= q.x0 && b < q.x1), `abismo fuera de su tramo ${tag}`)
+    check(a > 40 && b < W - 40, `abismo contra el borde ${tag}`)
+  }
+  let bad = 0
+  for (let x = 0; x < W; x++) {
+    const open = t.front[(H - 1) * W + x] === AIR
+    if (!!t.pits?.[x] !== open) bad++
+    if (t.pits?.[x]) {
+      for (let y = 0; y < H; y++) if (t.front[y * W + x] === BEDROCK) bad++
+      for (let y = H - 12; y < H; y++) if (t.front[y * W + x] !== AIR) bad++
+      if (columnGround(t, x, H - 12) !== H || materialAt(t, x, H + 5) !== AIR || isSolid(t, x, H + 5)) bad++
+    } else if (!isSolid(t, x, H + 5) || materialAt(t, x, H + 5) !== BEDROCK) bad++
+  }
+  check(bad === 0, `abismo: pits incoherente con la grilla o con isSolid/materialAt (${bad}) ${tag}`)
+  // la pared de fondo se ve en el abismo: back de tierra en la parte honda
+  for (const [a, b] of runs) check(t.back[(H - 30) * W + ((a + b) >> 1)] !== AIR, `abismo sin pared de fondo ${tag}`)
+  // cuencas: una por tramo de lago o pozo de lava, secas y con el nivel a la altura del borde más bajo
+  const holes = segs.filter((q) => q.kind === 'lake' || q.kind === 'lavapit')
+  const basins = g.basins ?? []
+  basinCount += basins.length
+  check(basins.length === holes.length, `cuencas: ${basins.length} registradas para ${holes.length} tramos ${tag}`)
+  for (const q of basins) {
+    const seg = holes.find((h) => q.x0 >= h.x0 && q.x1 <= h.x1)
+    check(!!seg && (seg.kind === 'lake') === (q.kind === 'water'), `cuenca ${q.kind} fuera de su tramo ${tag}`)
+    check(q.x1 - q.x0 >= 60 && q.x1 - q.x0 <= 210, `cuenca de ${q.x1 - q.x0} px ${tag}`)
+    let deepest = 0
+    let dry = true
+    for (let x = q.x0; x < q.x1; x++) {
+      const y = columnGround(t, x)
+      deepest = Math.max(deepest, y - q.level)
+      if (y <= q.level) dry = false
+    }
+    check(dry && deepest >= 20 && deepest <= 70, `cuenca ${q.kind}: hondo ${deepest} px ${tag}`)
+    check(columnGround(t, q.x0 - 1) <= q.level && columnGround(t, q.x1) <= q.level, `cuenca ${q.kind}: el nivel pasa los bordes ${tag}`)
+  }
+  for (const x of g.spawns) check(spawnProblem(g, x) === null, `spawn en x=${x}: ${spawnProblem(g, x)} ${tag}`)
+  // la utilería que se apoya (barriles y cajas) no queda flotando sobre un abismo
+  for (const p of g.props) if (p.kind === 'barrel' || p.kind === 'crate') check(!pitNear(p.x + (p.w >> 1), p.w >> 1) || p.y + p.h < H - 12, `utilería sobre un abismo ${tag}`)
+}
+
+// ---------- 2c. v4: cuencas llenas (Mediano y Grande) ----------
+let liquidMaps = 0
+const liquidCells = { water: 0, lava: 0 }
+function liquidChecks(g: Generated, tag: string): void {
+  const t = g.terrain
+  const W = t.w
+  liquidMaps++
+  const vol = liquidVolume(t)
+  liquidCells.water += vol.water
+  liquidCells.lava += vol.lava
+  // cada cuenca llena con su líquido hasta level (y nada por encima); ningún líquido fuera de las cuencas
+  let inBasins = 0
+  for (const q of g.basins ?? []) {
+    const m = q.kind === 'lava' ? LAVA : WATER
+    const other = q.kind === 'lava' ? WATER : LAVA
+    let n = 0
+    let wrong = 0
+    let above = 0
+    let holes = 0
+    for (let x = q.x0; x < q.x1; x++) {
+      for (let y = 0; y < t.h; y++) {
+        const v = t.front[y * W + x]
+        if (v === m) {
+          n++
+          if (y < q.level) above++
+        } else if (v === other) wrong++
+      }
+      // la columna está llena desde level hasta el lecho (sin aire en el medio)
+      const bed = columnGround(t, x, q.level)
+      for (let y = q.level; y < bed; y++) if (t.front[y * W + x] === AIR) holes++
+    }
+    inBasins += n
+    check(n > 0 && wrong === 0 && above === 0, `cuenca ${q.kind} mal llena (${n} celdas, ${wrong} del otro, ${above} sobre el nivel) ${tag}`)
+    check(holes === 0, `cuenca ${q.kind} con ${holes} huecos de aire ${tag}`)
+  }
+  check(inBasins === vol.water + vol.lava, `líquido fuera de las cuencas (${vol.water + vol.lava - inBasins}) ${tag}`)
+  // asentado: el flujo no mueve nada (nada flotando ni con un costado abierto)
+  const c = cloneTerrain(t)
+  const r = flowLiquids(c, { seed: null, record: false })
+  check(!r.changed, `líquido sin asentar en el mapa generado (${r.moves} movimientos) ${tag}`)
+  // utilería fuera de los líquidos
+  for (const p of g.props) {
+    const w = p.kind === 'flag' || p.kind === 'windsock' ? 2 : p.w
+    check(!hasLiquid(t, WATER, p.x, p.y, p.x + w, p.y + p.h) && !hasLiquid(t, LAVA, p.x, p.y, p.x + w, p.y + p.h), `utilería ${p.kind} dentro de un líquido ${tag}`)
+  }
+}
+
 // ---------- 2. generación válida ----------
 const STRUCTURE = new Set([BRICK, WOOD, SLAT, BEAM, POST, METAL])
 const signature: Record<Biome, number[]> = { forest: [STONE, BRICK, SLAT], jungle: [STONE, SLAT], industrial: [BRICK, METAL] }
-for (const biome of BIOMES) {
+// Chico con 20 seeds (los mapas de v1); Mediano y Grande con 10.
+const GEN_SEEDS: Record<MapSize, number> = { small: 20, medium: 10, large: 10 }
+for (const size of MAP_SIZE_ORDER) for (const biome of BIOMES) {
   let mirrored = 0
-  for (let seed = 1; seed <= 20; seed++) {
+  const seeds = GEN_SEEDS[size]
+  for (let seed = 1; seed <= seeds; seed++) {
     for (const bots of [1, 2, 3]) {
-      const s = createMatch(mk(bots, 'normal', biome, seed))
-      const tag = `${biome}/seed ${seed}/bots ${bots}`
+      const s = createMatch(mk(bots, 'normal', biome, seed, 1, 0, size))
+      const tag = `${size}/${biome}/seed ${seed}/bots ${bots}`
       const t = s.terrain
-      check(t.w === WORLD_W && t.h === WORLD_H && t.front.length === WORLD_W * WORLD_H, `grilla mal dimensionada ${tag}`)
+      const W = s.width
+      const H = s.height
+      check(W === MAP_SIZES[size].w && H === MAP_SIZES[size].h && s.size === size, `tamaño del estado ${tag}`)
+      check(t.w === W && t.h === H && t.front.length === W * H && t.back.length === W * H, `grilla mal dimensionada ${tag}`)
       check(s.players.length === bots + 1, `cantidad de jugadores ${tag}`)
+      // v3: roca madre abajo salvo en las columnas de abismo
       let bed = true
-      for (let x = 0; x < WORLD_W; x++) if (t.front[(WORLD_H - 1) * WORLD_W + x] !== BEDROCK) bed = false
+      for (let x = 0; x < W; x++) if (!t.pits?.[x] && t.front[(H - 1) * W + x] !== BEDROCK) bed = false
       check(bed, `falta BEDROCK abajo ${tag}`)
+      check(size === 'small' ? t.pits === undefined : t.pits?.length === W, `Terrain.pits ${size === 'small' ? 'en Chico' : 'falta'} ${tag}`)
       for (const m of signature[biome]) check(count(s, m) > 200, `bioma sin material ${m} ${tag}`)
-      if (bots === 3 && s.players[0].x > WORLD_W / 2) mirrored++
+      if (bots === 3 && s.players[0].x > W / 2) mirrored++
+      // v3: los tramos (empalmes, abismos, cuencas y spawns: ver tramoChecks)
+      if (size !== 'small' && bots === 3) {
+        const g = generate(biome, new Rng(roundSeed(seed, 1)), s.players.length, W, H)
+        check(g.terrain.front.every((m, i) => m === t.front[i]) && g.spawns.every((x, i) => x === s.players[i].x), `generate no coincide con createMatch ${tag}`)
+        tramoChecks(g, biome, size, seed)
+        liquidChecks(g, `${size}/${biome}/seed ${seed}`)
+      }
+      // v4: Chico sin líquidos; ningún tanque nace con líquido en la caja
+      if (size === 'small') check(count(s, WATER) + count(s, LAVA) === 0, `líquido en Chico ${tag}`)
+      for (const p of s.players) check(!hasLiquid(t, WATER, p.x - TANK_HALF_W, p.y - TANK_H, p.x + TANK_HALF_W, p.y + 1) && !hasLiquid(t, LAVA, p.x - TANK_HALF_W, p.y - TANK_H, p.x + TANK_HALF_W, p.y + 1), `tanque nace en un líquido ${tag} p${p.id}`)
+      // spawns repartidos: ninguno a menos de un sexto del espacio parejo de otro
+      if (size !== 'small') {
+        const xs = s.players.map((p) => p.x).sort((a, b) => a - b)
+        const span = W / xs.length
+        check(xs[0] < span && xs[xs.length - 1] > W - span, `spawns sin cubrir el ancho (${xs.join(',')}) ${tag}`)
+        for (let i = 1; i < xs.length; i++) check(xs[i] - xs[i - 1] >= span * 0.3, `spawns amontonados (${xs.join(',')}) ${tag}`)
+      }
       for (const p of s.players) {
-        check(p.x >= 20 && p.x <= WORLD_W - 20, `tanque fuera del mapa ${tag} p${p.id}`)
+        check(p.x >= 20 && p.x <= W - 20, `tanque fuera del mapa ${tag} p${p.id}`)
         let support = 0
         for (let x = p.x - TANK_HALF_W; x < p.x + TANK_HALF_W; x++) if (isSolid(t, x, p.y)) support++
         check(support >= 24, `tanque ${p.id} mal apoyado (${support}/28) ${tag}`)
@@ -173,7 +385,7 @@ for (const biome of BIOMES) {
         let inside = 0
         for (let y = p.y - TANK_H - 4; y < p.y; y++) {
           for (let x = p.x - TANK_HALF_W - 4; x < p.x + TANK_HALF_W + 4; x++) {
-            const i = y * WORLD_W + x
+            const i = y * W + x
             const body = y >= p.y - TANK_H && x >= p.x - TANK_HALF_W && x < p.x + TANK_HALF_W
             if (body ? t.front[i] !== AIR || t.back[i] !== AIR : STRUCTURE.has(t.front[i]) || STRUCTURE.has(t.back[i])) inside++
           }
@@ -185,9 +397,9 @@ for (const biome of BIOMES) {
         const from = p.y - TANK_H - 4
         const soil = (x: number) => {
           const g = columnGround(t, x, from)
-          return STRUCTURE.has(t.front[g * WORLD_W + x]) ? -1 : g
+          return STRUCTURE.has(t.front[g * W + x]) ? -1 : g
         }
-        for (let x = Math.max(0, px0 - 8); x < Math.min(WORLD_W - 1, px1 + 8); x++) {
+        for (let x = Math.max(0, px0 - 8); x < Math.min(W - 1, px1 + 8); x++) {
           const a = soil(x)
           const b = soil(x + 1)
           if (a >= 0 && b >= 0) worst = Math.max(worst, Math.abs(a - b))
@@ -200,7 +412,7 @@ for (const biome of BIOMES) {
       for (const k of ['barrel', 'ladder', 'flag', 'windsock'] as const) check(kinds.has(k), `falta utilería ${k} ${tag}`)
       if (biome !== 'industrial') check(kinds.has('lamp') && kinds.has('crate'), `falta foco o caja ${tag}`)
       for (const p of s.props) {
-        check(p.x >= 0 && p.x + p.w <= WORLD_W && p.y >= 0 && p.y + p.h <= WORLD_H, `prop ${p.id} fuera del mapa ${tag}`)
+        check(p.x >= 0 && p.x + p.w <= W && p.y >= 0 && p.y + p.h <= H, `prop ${p.id} fuera del mapa ${tag}`)
         check(propSupported(s, p), `prop ${p.id} (${p.kind}) sin apoyo ${tag}`)
         if (p.kind === 'barrel' || p.kind === 'crate') {
           let solid = 0
@@ -210,26 +422,75 @@ for (const biome of BIOMES) {
       }
     }
   }
-  check(mirrored > 2 && mirrored < 18, `el espejado no varía (${mirrored}/20) ${biome}`)
+  check(mirrored > seeds * 0.1 && mirrored < seeds * 0.9, `el espejado no varía (${mirrored}/${seeds}) ${size}/${biome}`)
+}
+// con 8 jugadores (V5) el generador no se rompe: spawns distintos, separados y apoyados
+for (const size of MAP_SIZE_ORDER) {
+  if (size === 'small') continue
+  for (const biome of BIOMES) {
+    for (const seed of [1, 2, 3]) {
+      const g = generate(biome, new Rng(seed * 7919), 8, MAP_SIZES[size].w, MAP_SIZES[size].h)
+      const xs = g.spawns.slice().sort((a, b) => a - b)
+      check(xs.length === 8 && xs.every((x) => x >= 20 && x <= g.terrain.w - 20), `8 spawns dentro del mapa ${size}/${biome}/${seed}`)
+      for (let i = 1; i < xs.length; i++) check(xs[i] - xs[i - 1] >= 60, `8 spawns: muy cerca (${xs.join(',')}) ${size}/${biome}/${seed}`)
+      for (const x of xs) check(spawnProblem(g, x) === null, `8 spawns: ${spawnProblem(g, x)} en x=${x} ${size}/${biome}/${seed}`)
+    }
+  }
 }
 
 // ---------- 3. IA ----------
 // El tiempo depende de la máquina y de la carga: en CI (runners lentos) solo se controla que no se cuelgue.
 const AI_BUDGET_MS = process.env.CI ? 2000 : 250
 let worstMs = 0
-for (const biome of BIOMES) {
-  for (const seed of [2, 5, 9, 14]) {
-    let s = createMatch(mk(3, 'hard', biome, seed))
-    for (let turn = 0; turn < 4 && s.phase === 'aiming'; turn++) {
-      const r = aiTurn(s, 'hard')
-      worstMs = Math.max(worstMs, r.ms)
-      check(r.ms < AI_BUDGET_MS, `la IA tardó ${r.ms.toFixed(0)} ms ${biome}/${seed}`)
-      check(!!r.flights && r.flights.length >= 1 && r.flights[0].path.length > 2, `tiro sin trayectoria ${biome}/${seed}`)
-      const impacts = r.events.filter((e) => e.type === 'impact')
-      check(impacts.length >= 1, `el tiro de la IA (${r.plan.weapon}) no explotó ${biome}/${seed} turno ${turn}`)
-      s = r.state
+const worstBySize: Record<string, number> = {}
+for (const size of MAP_SIZE_ORDER) {
+  for (const biome of BIOMES) {
+    for (const seed of [2, 5, 9, 14]) {
+      let s = createMatch(mk(3, 'hard', biome, seed, 1, 0, size))
+      for (let turn = 0; turn < 4 && s.phase === 'aiming'; turn++) {
+        const r = aiTurn(s, 'hard')
+        const tag = `${size}/${biome}/${seed}`
+        worstMs = Math.max(worstMs, r.ms)
+        worstBySize[size] = Math.max(worstBySize[size] ?? 0, r.ms)
+        check(r.ms < AI_BUDGET_MS, `la IA tardó ${r.ms.toFixed(0)} ms ${tag}`)
+        check(!!r.flights && r.flights.length >= 1 && r.flights[0].path.length > 2, `tiro sin trayectoria ${tag}`)
+        const impacts = r.events.filter((e) => e.type === 'impact')
+        check(impacts.length >= 1, `el tiro de la IA (${r.plan.weapon}) no explotó ${tag} turno ${turn}`)
+        s = r.state
+      }
     }
   }
+}
+console.log(`IA peor caso por tamaño: ${MAP_SIZE_ORDER.map((z) => `${z} ${(worstBySize[z] ?? 0).toFixed(0)} ms`).join(', ')}`)
+
+// Alcance (v2): en un llano de cada tamaño, potencia 100 a 45° sin viento llega a la otra punta.
+for (const size of MAP_SIZE_ORDER) {
+  const s = cloneState(createMatch(mk(1, 'normal', 'forest', 4, 1, 0, size)))
+  const W = s.width
+  s.terrain.front.fill(AIR)
+  s.terrain.back.fill(AIR)
+  fillRect(s.terrain, 0, 400, W - 1, s.height - 1, DIRT, 'both')
+  s.props = []
+  const p = s.players[0]
+  p.x = 30
+  p.y = 400
+  s.players[1].x = W - 30
+  s.players[1].y = 400
+  const f = fly({ terrain: s.terrain, players: s.players, props: [], ownerId: p.id, angle: 45, power: 100, wind: 0, ignoreTanks: true })
+  const reach = f.impact.x - f.path[0].x
+  console.log(`alcance ${size}: potencia 100 a 45° recorre ${reach.toFixed(0)} px de ${W} en ${f.time.toFixed(2)} s`)
+  check(f.impact.kind !== 'out' || f.impact.x > W - 60, `alcance ${size}: el tiro no volvió a caer`)
+  check(reach > W * 0.88 && reach < W * 1.12, `alcance ${size}: ${reach.toFixed(0)} px (esperaba ~${W})`)
+  // la skyline de la IA no cambia el resultado del vuelo
+  const sky = skylineOf(s.terrain, s.players, s.props)
+  for (const angle of [30, 45, 60, 80, 120]) {
+    for (const power of [35, 70, 100]) {
+      const a = fly({ terrain: s.terrain, players: s.players, props: [], ownerId: p.id, angle, power, wind: 4 })
+      const b = fly({ terrain: s.terrain, players: s.players, props: [], ownerId: p.id, angle, power, wind: 4, skyline: sky })
+      check(JSON.stringify(a) === JSON.stringify(b), `skyline cambia el vuelo ${size} ${angle}/${power}`)
+    }
+  }
+  check(physicsFor(W).gravity > 0, 'physicsFor')
 }
 
 // El proyectil sale de la boca del cañón y puede pasar por arriba del mapa.
@@ -307,12 +568,14 @@ for (const biome of BIOMES) {
 }
 
 // ---------- 8. partidas completas ----------
-for (const biome of BIOMES) {
-  let s = createMatch(mk(3, 'easy', biome, 99))
-  const r = playTurns(s, 80)
-  s = r.state
-  check(s.players.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y) && p.hp >= 0), `estado inválido tras partida ${biome}`)
-  console.log(`${biome}: ${s.phase} en turno ${s.turn}, hp ${s.players.map((p) => p.hp).join('/')}`)
+for (const size of MAP_SIZE_ORDER) {
+  for (const biome of BIOMES) {
+    let s = createMatch(mk(3, 'easy', biome, 99, 1, 0, size))
+    const r = playTurns(s, 80)
+    s = r.state
+    check(s.players.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y) && p.hp >= 0 && p.x >= 0 && p.x <= s.width), `estado inválido tras partida ${size}/${biome}`)
+    console.log(`${size}/${biome}: ${s.phase} en turno ${s.turn}, hp ${s.players.map((p) => p.hp).join('/')}`)
+  }
 }
 
 // mover no rompe
@@ -429,37 +692,92 @@ check(WEAPON_ORDER.length === 8, 'WEAPON_ORDER tiene las 8 armas')
 }
 
 // ---------- 10. balance (F9): IA contra IA ----------
-function match(bots: number, seed: number): { shots: number; turns: number; winner: number | null; weapons: Record<string, number> } {
+interface MatchStats {
+  shots: number
+  turns: number
+  winner: number | null
+  weapons: Record<string, number>
+  sudden: boolean // v2: arrancó la muerte súbita
+  byLava: boolean // v2: la ronda terminó con una muerte por lava
+  lavaMs: number // v2: peor tiempo de la IA con la lava activa
+  abyss: number // v3: muertes por abismo
+  walked: number // v3: muertes por abismo de una IA que caminó hasta ahí (tiene que ser 0)
+}
+// v4: eventos de líquidos en las partidas del balance (quemaduras de lava sin muerte súbita = pileta)
+const liquidEvents = { splash: 0, water: 0, lava: 0, steam: 0 }
+function match(bots: number, seed: number, size: MapSize = 'small'): MatchStats {
   const biome = BIOMES[seed % BIOMES.length]
-  let s = createMatch(mk(bots, 'normal', biome, seed))
+  let s = createMatch(mk(bots, 'normal', biome, seed, 1, 0, size))
   let shots = 0
+  let byLava = false
+  let lavaMs = 0
+  let abyss = 0
+  let walked = 0
   const weapons: Record<string, number> = {}
   while (s.phase === 'aiming' && shots < 120) {
+    const lava = s.lava !== null
     const r = aiTurn(s, 'normal')
+    for (const e of r.events) {
+      if (e.type !== 'death' || e.cause !== 'abyss') continue
+      abyss++
+      if (!r.flights) walked++
+    }
+    if (lava) lavaMs = Math.max(lavaMs, r.ms)
+    for (const f of r.flights ?? []) liquidEvents.splash += f.splashes?.length ?? 0
+    for (const e of r.events) {
+      if (e.type === 'fall' && e.water) liquidEvents.water++
+      else if (e.type === 'damage' && e.cause === 'lava' && s.lava === null && !r.events.some((q) => q.type === 'lava')) liquidEvents.lava++
+      else if (e.type === 'steam') liquidEvents.steam++
+    }
     if (r.flights) {
       shots++
       weapons[r.plan.weapon] = (weapons[r.plan.weapon] ?? 0) + 1
     }
+    if (r.state.phase !== 'aiming') byLava = lavaKill(r.events)
     s = r.state
   }
-  return { shots, turns: s.turn, winner: s.roundWinnerId, weapons }
+  return { shots, turns: s.turn, winner: s.roundWinnerId, weapons, sudden: s.lava !== null, byLava, lavaMs, abyss, walked }
 }
+// Chico con 20 partidas (el balance de v1); Mediano y Grande con 10 (con --balance, 20).
 {
-  const t0 = performance.now()
-  for (const bots of [1, 3]) {
-    const res = []
-    for (let seed = 1; seed <= 20; seed++) res.push(match(bots, 100 + seed))
-    const shots = res.map((r) => r.shots)
-    const avg = shots.reduce((a, b) => a + b, 0) / shots.length
-    const used: Record<string, number> = {}
-    for (const r of res) for (const k in r.weapons) used[k] = (used[k] ?? 0) + r.weapons[k]
+  const full = process.argv.includes('--balance')
+  for (const size of MAP_SIZE_ORDER) {
+    const t0 = performance.now()
+    const games = size === 'small' || full ? 20 : 10
+    // v4: costo del flujo en estas partidas (cada fire corre el flujo sobre todo el mapa)
+    flowStats.fires = flowStats.flows = flowStats.ms = flowStats.worst = 0
+    liquidEvents.splash = liquidEvents.water = liquidEvents.lava = liquidEvents.steam = 0
+    for (const bots of [1, 3]) {
+      const res = []
+      for (let seed = 1; seed <= games; seed++) res.push(match(bots, 100 + seed, size))
+      const shots = res.map((r) => r.shots)
+      const avg = shots.reduce((a, b) => a + b, 0) / shots.length
+      const used: Record<string, number> = {}
+      for (const r of res) for (const k in r.weapons) used[k] = (used[k] ?? 0) + r.weapons[k]
+      const sudden = res.filter((r) => r.sudden).length
+      const byLava = res.filter((r) => r.byLava).length
+      const lavaMs = Math.max(...res.map((r) => r.lavaMs))
+      console.log(
+        `balance ${size} ${bots + 1} tanques: ${avg.toFixed(1)} tiros/partida (min ${Math.min(...shots)}, max ${Math.max(...shots)}, ${games} partidas), empates ${res.filter((r) => r.winner === null).length}, armas ${JSON.stringify(used)}`,
+      )
+      console.log(`  muerte súbita en ${sudden}/${games} rondas, terminan por la lava ${byLava}/${games}, IA con lava peor caso ${lavaMs.toFixed(0)} ms`)
+      const abyss = res.reduce((a, r) => a + r.abyss, 0)
+      const walked = res.reduce((a, r) => a + r.walked, 0)
+      console.log(`  muertes por abismo: ${abyss} (${walked} de una IA caminando)`)
+      check(walked === 0, `la IA caminó al abismo ${walked} veces (${size})`)
+      check(shots.every((n) => n < 120), `partida de ${bots + 1} sin terminar (${size})`)
+      check(lavaMs < AI_BUDGET_MS, `la IA con lava tardó ${lavaMs.toFixed(0)} ms (${size})`)
+      // v2: con la muerte súbita ningún tamaño se estira (objetivo ~15 con 2 tanques y ~25 con 4)
+      if (bots === 1) check(avg >= 8 && avg <= (size === 'small' ? 15 : 16), `balance ${size} 2 tanques fuera de rango (${avg.toFixed(1)})`)
+      else check(avg <= 27, `balance ${size} 4 tanques: ${avg.toFixed(1)} tiros/partida (tope 27)`)
+    }
+    const flowAvg = flowStats.ms / Math.max(1, flowStats.fires)
     console.log(
-      `balance ${bots + 1} tanques: ${avg.toFixed(1)} tiros/partida (min ${Math.min(...shots)}, max ${Math.max(...shots)}), empates ${res.filter((r) => r.winner === null).length}, armas ${JSON.stringify(used)}`,
+      `  flujo ${size}: ${flowStats.fires} fires, ${flowStats.flows} movieron líquido, ${flowAvg.toFixed(2)} ms medio, peor ${flowStats.worst.toFixed(1)} ms; salpicaduras ${liquidEvents.splash}, caídas al agua ${liquidEvents.water}, quemaduras de lava ${liquidEvents.lava}, vapores ${liquidEvents.steam}`,
     )
-    check(shots.every((n) => n < 120), `partida de ${bots + 1} sin terminar`)
-    if (bots === 1) check(avg >= 8 && avg <= 15, `balance 2 tanques fuera de 8-15 tiros (${avg.toFixed(1)})`)
+    check(flowAvg < 20, `flujo ${size}: ${flowAvg.toFixed(2)} ms medio por fire (objetivo < 20)`)
+    console.log(`balance ${size}: ${((performance.now() - t0) / 1000).toFixed(1)} s`)
   }
-  console.log(`balance: ${((performance.now() - t0) / 1000).toFixed(1)} s`)
 }
 
 // ---------- 11. rondas, tienda e ítems (F10) ----------
@@ -854,6 +1172,897 @@ function toRoundover(): GameState {
   check(per < 5, `hashState rápido (${per.toFixed(2)} ms)`)
 }
 
+// ---------- 13. muerte súbita (v2): calma, lava que sube, daño, proyectiles derretidos ----------
+type DamageEv = Extract<GameEvent, { type: 'damage' }>
+const lavaEvents = (r: StepResult) => r.events.filter((e): e is Extract<GameEvent, { type: 'lava' }> => e.type === 'lava')
+const calmEvents = (r: StepResult) => r.events.filter((e): e is Extract<GameEvent, { type: 'calm' }> => e.type === 'calm')
+// Tiro que se va del mapa por la izquierda: no daña a nadie ni toca el terreno.
+const miss = (s: GameState) => shoot(s, 'normal', s.players[s.current].x < s.width / 2 ? 178 : 2, 100)
+// Murió alguien quemado por la lava en estos eventos.
+function lavaKill(events: GameEvent[]): boolean {
+  return events.some((d) => d.type === 'death' && events.some((e) => e.type === 'damage' && e.cause === 'lava' && e.playerId === d.playerId))
+}
+{
+  // la calma sube con cada tiro sin daño y se resetea con daño
+  let s = flat()
+  check(s.calm === 0 && s.lava === null, 'muerte súbita: estado inicial calm 0, lava null')
+  let r = miss(s)
+  check(r.state.calm === 1 && calmEvents(r).length === 1 && calmEvents(r)[0].left === SUDDEN_DEATH_CALM - 1, `calma: un tiro sin daño suma 1 (calm ${r.state.calm})`)
+  check(r.flights![0].impact.kind === 'out' && r.state.players.every((p) => p.hp === 100), 'calma: el tiro de prueba sale del mapa sin daño')
+  s = miss(r.state).state
+  check(s.calm === 2, 'calma: dos tiros sin daño')
+  r = shoot(s, 'normal', 90, 1) // cae encima del que tira: autodaño
+  check(r.events.some((e) => e.type === 'damage'), 'calma: el tiro vertical hace daño')
+  check(r.state.calm === 0 && calmEvents(r).some((e) => e.left === SUDDEN_DEATH_CALM), `calma: el daño la vuelve a 0 (calm ${r.state.calm})`)
+  // el escudo cuenta como daño
+  const sh = cloneState(s)
+  sh.players[0].shield = 100
+  const rs = shoot(sh, 'normal', 90, 1)
+  check(rs.events.some((e) => e.type === 'shield') && !rs.events.some((e) => e.type === 'damage') && rs.state.calm === 0, 'calma: lo que absorbe el escudo cuenta como daño')
+  // un tiro sin cambio en la cuenta no emite 'calm'
+  const z = cloneState(flat())
+  const rz = shoot(z, 'normal', 90, 1)
+  check(rz.state.calm === 0 && calmEvents(rz).length === 0, 'calma: si no cambia lo que falta, no hay evento calm')
+
+  // SUDDEN_DEATH_CALM tiros sin daño: aparece la lava en el fondo y sube LAVA_RISE por turno
+  s = flat()
+  for (let i = 0; i < SUDDEN_DEATH_CALM - 1; i++) {
+    r = miss(s)
+    check(lavaEvents(r).length === 0 && r.state.lava === null, `muerte súbita: no empieza antes de tiempo (tiro ${i + 1})`)
+    s = r.state
+  }
+  r = miss(s)
+  const first = lavaEvents(r)
+  check(r.state.calm === SUDDEN_DEATH_CALM && calmEvents(r).some((e) => e.left === 0), 'muerte súbita: calm llega al tope y avisa left 0')
+  check(first.length === 1 && first[0].from === null && first[0].to === s.height - LAVA_RISE && first[0].warn === 0, `muerte súbita: la lava aparece en el fondo (${JSON.stringify(first[0])})`)
+  check(r.state.lava === s.height - LAVA_RISE, 'muerte súbita: state.lava = superficie')
+  const turnAt = r.events.findIndex((e) => e.type === 'turn')
+  const lavaAt = r.events.findIndex((e) => e.type === 'lava')
+  check(lavaAt >= 0 && turnAt > lavaAt, 'muerte súbita: la lava va antes del cambio de turno')
+  s = r.state
+  // ya empezada: el daño no la frena y sube en todos los turnos
+  r = shoot(s, 'normal', 90, 1)
+  check(r.events.some((e) => e.type === 'damage') && r.state.calm === SUDDEN_DEATH_CALM, 'muerte súbita: el daño ya no resetea la calma')
+  check(lavaEvents(r).length === 1 && r.state.lava === s.lava! - LAVA_RISE && lavaEvents(r)[0].from === s.lava, 'muerte súbita: sube LAVA_RISE en cada turno')
+  check(calmEvents(r).length === 0, 'muerte súbita: sin eventos calm después de empezar')
+  s = r.state
+  r = miss(s)
+  check(r.state.lava === s.lava! - LAVA_RISE, 'muerte súbita: sube también con tiros sin daño')
+}
+{
+  // daño de lava al empezar el turno: con t posterior al último impacto y cause 'lava'
+  const s = flat()
+  s.calm = SUDDEN_DEATH_CALM
+  s.lava = 440
+  s.players[1].y = 440 // por debajo de la superficie después de subir
+  s.players[1].shield = 0
+  const r = shoot(s, 'normal', 60, 30) // cae lejos de los dos
+  const imp = impactsOf(r)
+  check(imp.length >= 1 && r.state.players[0].hp === 100, 'lava: el tiro de prueba explota sin dañar')
+  const burn = r.events.filter((e): e is DamageEv => e.type === 'damage' && e.cause === 'lava')
+  check(burn.length === 1 && burn[0].playerId === 1 && burn[0].amount === LAVA_DAMAGE && r.state.players[1].hp === 100 - LAVA_DAMAGE, `lava: quema LAVA_DAMAGE al que está adentro (${JSON.stringify(burn)})`)
+  const lastImpact = Math.max(...imp.map((e) => e.t))
+  check(!!burn[0] && burn[0].t! >= lastImpact + LAVA_DELAY - 1e-9, `lava: el daño va después del último impacto (${burn[0]?.t} vs ${lastImpact})`)
+  const iLava = r.events.findIndex((e) => e.type === 'lava')
+  const iBurn = r.events.findIndex((e) => e.type === 'damage' && e.cause === 'lava')
+  const iImpact = r.events.findIndex((e) => e.type === 'impact')
+  check(iImpact < iLava && iLava < iBurn, 'lava: orden impacto → lava → daño')
+  check(r.state.earnings[0] === 0 && r.state.earnings[1] === 0, 'lava: el daño de lava no da ni quita plata')
+  // escudo: la lava pasa por el escudo como cualquier daño
+  const s2 = cloneState(s)
+  s2.players[1].shield = SHIELD_HP
+  const r2 = miss(s2)
+  const shield = r2.events.find((e): e is Extract<GameEvent, { type: 'shield' }> => e.type === 'shield' && e.playerId === 1)
+  check(!!shield && shield.absorbed === LAVA_DAMAGE && typeof shield.t === 'number' && r2.state.players[1].hp === 100, 'lava: el escudo absorbe la quemadura')
+  // mata, termina la ronda y no cuenta como kill; todos quemados = empate
+  const s3 = cloneState(s)
+  s3.players[1].hp = 10
+  const r3 = miss(s3)
+  check(r3.state.phase === 'roundover' && r3.state.roundWinnerId === 0 && lavaKill(r3.events), 'lava: mata y termina la ronda')
+  check(r3.state.players[0].kills === 0, 'lava: la muerte por lava no es kill de nadie')
+  const s4 = cloneState(s)
+  s4.lava = 305 // los dos en el suelo (300) quedan abajo al subir
+  for (const p of s4.players) {
+    p.y = 300
+    p.hp = 15
+  }
+  const r4 = miss(s4)
+  check(r4.state.phase === 'roundover' && r4.state.roundWinnerId === null && r4.state.players.every((p) => !p.alive), 'lava: todos quemados → empate')
+  // el tanque que está arriba de la superficie no se quema
+  const s5 = cloneState(s)
+  s5.players[1].y = 300
+  check(!miss(s5).events.some((e) => e.type === 'damage'), 'lava: arriba de la superficie no quema')
+}
+{
+  // proyectil derretido: lava por encima del suelo (300); los tanques asoman (boca a ~270)
+  const melt = (weapon: WeaponId, angle: number, power: number) => {
+    const s = flat()
+    s.calm = SUDDEN_DEATH_CALM
+    s.lava = 292
+    for (const p of s.players) p.hp = 100
+    const front = s.terrain.front.slice()
+    const back = s.terrain.back.slice()
+    const r = shoot(s, weapon, angle, power)
+    const last = r.flights![r.flights!.length - 1]
+    check(r.flights!.some((f) => f.impact.kind === 'lava'), `derretido ${weapon}: impacto 'lava'`)
+    check(impactsOf(r).length === 0 && !r.events.some((e) => e.type === 'burn'), `derretido ${weapon}: no explota`)
+    const t = r.state.terrain
+    check(t.front.every((m, i) => m === front[i]) && t.back.every((m, i) => m === back[i]), `derretido ${weapon}: no deforma`)
+    check(!r.events.some((e) => e.type === 'damage' && e.cause !== 'lava'), `derretido ${weapon}: no daña`)
+    check(last.impact.y >= s.lava - 1, `derretido ${weapon}: termina en la superficie (${last.impact.y.toFixed(1)})`)
+  }
+  melt('normal', 135, 30)
+  melt('heavy', 120, 40)
+  melt('napalm', 135, 30)
+  melt('digger', 135, 30)
+  melt('nuke', 135, 30)
+  melt('cluster', 135, 45)
+  melt('roller', 135, 30)
+  // rodadora que cae rodando a un pozo con lava
+  let rolled = false
+  for (let power = 20; power <= 60 && !rolled; power += 2) {
+    const s = flat()
+    fillRect(s.terrain, 330, 300, 380, 420, AIR, 'both')
+    s.calm = SUDDEN_DEATH_CALM
+    s.lava = 360
+    const r = shoot(s, 'roller', 45, power)
+    if (r.flights!.length === 2 && r.flights![0].impact.kind === 'terrain' && r.flights![1].impact.kind === 'lava') {
+      rolled = true
+      check(impactsOf(r).length === 0, 'rodadora: la que rueda a la lava no explota')
+    }
+  }
+  check(rolled, 'rodadora: hay un tiro que rueda hasta el pozo de lava')
+  // vuelo con y sin skyline: misma respuesta también con lava
+  const s = createMatch(mk(1, 'normal', 'forest', 3, 1, 0, 'medium'))
+  const sky = skylineOf(s.terrain, s.players, s.props)
+  const p = s.players[0]
+  let same = 0
+  let melted = 0
+  for (let angle = 20; angle <= 160; angle += 20) {
+    for (let power = 30; power <= 100; power += 10) {
+      const base = { terrain: s.terrain, players: s.players, props: s.props, ownerId: p.id, angle, power, wind: s.wind, lava: 340 }
+      const a = fly(base)
+      const b = fly({ ...base, skyline: sky })
+      if (JSON.stringify(a) === JSON.stringify(b)) same++
+      if (a.impact.kind === 'lava') melted++
+    }
+  }
+  check(same === 64 && melted > 0, `lava + skyline: vuelos iguales (${same}/64, ${melted} derretidos)`)
+}
+{
+  // mover hacia la lava: se puede entrar y quema al empezar el turno siguiente
+  const s = flat()
+  fillRect(s.terrain, 230, 300, 300, 330, AIR, 'both') // pozo pegado al tanque 0 (x 200)
+  s.calm = SUDDEN_DEATH_CALM
+  s.lava = 340
+  let m = s
+  for (let i = 0; i < 60; i++) m = applyCommand(m, { type: 'move', playerId: 0, dir: 1 }).state
+  check(m.players[0].y > s.players[0].y, `move: el tanque cae al pozo (y ${m.players[0].y})`)
+  const r = miss(m)
+  check(m.players[0].y > r.state.lava! && r.events.some((e) => e.type === 'damage' && e.cause === 'lava' && e.playerId === 0), 'move: el que se metió en la lava se quema')
+}
+{
+  // IA: sale de la lava hacia arriba (rampa a la izquierda), no se mete y no tira a la lava
+  const s = flat()
+  s.terrain.front.fill(AIR)
+  s.terrain.back.fill(AIR)
+  for (let x = 0; x < WORLD_W; x++) {
+    const top = x < 400 ? 300 - Math.floor((400 - x) / 5) : 300
+    fillRect(s.terrain, x, top, x, WORLD_H - 1, DIRT, 'both')
+  }
+  s.players[0].x = 420
+  s.players[0].y = 300
+  s.players[1].x = 720
+  s.players[1].y = 300
+  s.calm = SUDDEN_DEATH_CALM
+  s.lava = 310 // todavía no lo toca, pero al subir sí
+  check(lavaRisk(s, 300) > lavaRisk(s, 288) && lavaRisk(s, 200) === 0, 'IA: lavaRisk pesa solo lo que la lava alcanza')
+  const plan = chooseShot(s, 'normal')
+  check((plan.move ?? 0) < 0, `IA: se aleja de la lava subiendo la rampa (move ${plan.move})`)
+  // sin lava, el mismo lugar no la hace moverse por la lava
+  const calm = cloneState(s)
+  calm.lava = null
+  calm.calm = 0
+  check(lavaRisk(calm, 300) === 0, 'IA: sin muerte súbita no hay riesgo de lava')
+  // con la lava alta casi todo se derrite: la IA (difícil) igual busca los tiros que pegan en lo que asoma
+  const t = flat()
+  t.calm = SUDDEN_DEATH_CALM
+  t.lava = 295
+  let lavaShots = 0
+  for (let i = 0; i < 4; i++) {
+    const r = aiTurn(t, 'hard')
+    if (r.flights?.every((f) => f.impact.kind === 'lava')) lavaShots++
+    t.wind = (t.wind + 3) % 10
+  }
+  check(lavaShots <= 1, `IA: no elige tiros que se derriten (${lavaShots}/4 derretidos)`)
+}
+{
+  // toda ronda termina: nadie se daña (sin munición, pasan) y la lava los quema a todos en un tope de turnos
+  for (const size of MAP_SIZE_ORDER) {
+    for (const bots of [1, 3]) {
+      const run = () => {
+        let s = cloneState(createMatch(mk(bots, 'normal', 'forest', 21, 1, 0, size)))
+        for (const p of s.players) for (const id of WEAPON_ORDER) p.ammo[id] = 0
+        const events: GameEvent[] = []
+        let turns = 0
+        while (s.phase === 'aiming' && turns < 200) {
+          const r = applyCommand(s, { type: 'fire', playerId: s.players[s.current].id })
+          events.push(...r.events)
+          s = r.state
+          turns++
+        }
+        return { s, events, turns }
+      }
+      const a = run()
+      const highest = Math.min(...createMatch(mk(bots, 'normal', 'forest', 21, 1, 0, size)).players.map((p) => p.y))
+      // turnos hasta que la lava pase al tanque más alto, más los que tarda en quemarlo entero (+1 de margen)
+      const bound = SUDDEN_DEATH_CALM + Math.ceil((a.s.height - highest) / LAVA_RISE) + Math.ceil(100 / LAVA_DAMAGE) + 1
+      check(a.s.phase === 'roundover' && a.turns <= bound, `ronda pacífica ${size} ${bots + 1}: termina por la lava en ${a.turns} turnos (tope ${bound})`)
+      check(lavaKill(a.events), `ronda pacífica ${size} ${bots + 1}: muertes por lava`)
+      const b = run()
+      check(hashState(a.s) === hashState(b.s) && JSON.stringify(a.events) === JSON.stringify(b.events), `ronda pacífica ${size} ${bots + 1}: determinista`)
+      const back = decodeState(encodeState(a.s))
+      check(back.lava === a.s.lava && back.calm === a.s.calm && netHash(back) === netHash(a.s), `ronda pacífica ${size}: snapshot conserva lava y calma`)
+      if (bots === 3) console.log(`ronda pacífica ${size} ${bots + 1}: ${a.turns} turnos, lava en y ${a.s.lava}`)
+    }
+  }
+}
+
+// ---------- 14. v3: reglas del abismo, red y determinismo con pits ----------
+{
+  console.log(`tramos: ${tramoMaps} mapas, ${tramoSeqs.size} secuencias distintas, ${abyssCount} abismos, ${basinCount} cuencas`)
+  console.log(`tramos por bioma: ${JSON.stringify(tramoKinds)}`)
+  check(tramoSeqs.size >= tramoMaps * 0.8, `tramos: mapas repetidos (${tramoSeqs.size}/${tramoMaps} secuencias distintas)`)
+  for (const biome of BIOMES) {
+    const k = (kind: string) => tramoKinds[`${biome}:${kind}`] ?? 0
+    // sabor: bosque con montañas y lagos, jungla con abismos y ruinas, industrial con lava y pozos de mina
+    if (biome === 'forest') check(k('mountain') > 0 && k('lake') > 0 && k('lavapit') === 0, `sabor del bosque ${JSON.stringify(tramoKinds)}`)
+    if (biome === 'jungle') check(k('abyss') > 0 && k('hills') > 0 && k('lake') > 0 && k('lavapit') === 0, `sabor de la jungla`)
+    if (biome === 'industrial') check(k('lavapit') > 0 && k('abyss') > 0, `sabor industrial`)
+  }
+}
+// Mapa de prueba con un abismo: llano de tierra en y 300 (Mediano, 1600 px), abismo en [700, 779]
+// con un puente de tierra de 8 px en y 300..307; jugador 0 en x 400, jugador 1 sobre el puente.
+const PIT0 = 700
+const PIT1 = 779
+function pitMap(): GameState {
+  const s = cloneState(createMatch(mk(1, 'normal', 'forest', 4, 1, 0, 'medium')))
+  const t = s.terrain
+  t.front.fill(AIR)
+  t.back.fill(AIR)
+  fillRect(t, 0, 300, t.w - 1, t.h - 1, DIRT, 'both')
+  fillRect(t, 0, t.h - 3, t.w - 1, t.h - 1, BEDROCK, 'both')
+  t.pits = new Uint8Array(t.w)
+  fillRect(t, PIT0, 308, PIT1, t.h - 1, AIR)
+  for (let x = PIT0; x <= PIT1; x++) t.pits[x] = 1
+  s.props = []
+  s.players[0].x = 400
+  s.players[1].x = 740
+  for (const p of s.players) p.y = 300
+  for (const p of s.players) for (const id of WEAPON_ORDER) p.ammo[id] = WEAPONS[id].ammo
+  s.current = 0
+  return s
+}
+type FallEv = Extract<GameEvent, { type: 'fall' }>
+type DeathEv = Extract<GameEvent, { type: 'death' }>
+{
+  // terreno: debajo del mapa en un abismo no hay nada; en el resto, roca madre
+  const s = pitMap()
+  const t = s.terrain
+  check(!isSolid(t, 740, t.h + 2) && materialAt(t, 740, t.h + 2) === AIR && isSolid(t, 400, t.h + 2) && materialAt(t, 400, t.h + 2) === BEDROCK, 'abismo: isSolid/materialAt debajo del mapa')
+  check(columnGround(t, 740, 320) === t.h && groundAt(t, 740, TANK_HALF_W, 320) === t.h, 'abismo: columnGround/groundAt sin piso = h')
+  const c = cloneTerrain(t)
+  check(!!c.pits && c.pits !== t.pits && c.pits.every((v, i) => v === t.pits![i]), 'cloneTerrain copia pits')
+  const before = t.pits!.slice()
+  deform(t, 740, 300, 40, 'destroy')
+  deform(t, 740, 300, 40, 'build')
+  check(t.pits!.every((v, i) => v === before[i]), 'deform no toca pits')
+  // red: pits viaja en el snapshot y entra en el hash
+  const s2 = pitMap()
+  const back = decodeState(encodeState(s2))
+  check(!!back.terrain.pits && back.terrain.pits.length === s2.width && back.terrain.pits.every((v, i) => v === s2.terrain.pits![i]), 'snapshot: pits viaja')
+  check(netHash(back) === netHash(s2), 'snapshot con pits: mismo hash')
+  const s3 = cloneState(s2)
+  s3.terrain.pits![10] = 1
+  check(netHash(s3) !== netHash(s2), 'hashState: cambia si cambia pits')
+  const small = createMatch(mk(1, 'normal', 'forest', 4))
+  check(decodeState(encodeState(small)).terrain.pits === undefined && netHash(decodeState(encodeState(small))) === netHash(small), 'snapshot Chico sin pits')
+  const real = createMatch(mk(3, 'normal', 'jungle', 7, 1, 0, 'large'))
+  const rb = decodeState(encodeState(real))
+  check(netHash(rb) === netHash(real) && !!rb.terrain.pits, 'snapshot de un mapa Grande con pits')
+}
+{
+  // caída al abismo: se va el puente bajo el tanque → fall con to > h y death 'abyss', sin daño;
+  // el paracaídas no lo salva y no se gasta
+  const s = pitMap()
+  const p = s.players[1]
+  p.items.parachute = 1
+  fillRect(s.terrain, PIT0, 300, PIT1, 307, AIR)
+  const events = resolveBlast(s, blastFor('normal', 5, 5, 1))
+  const fall = events.find((e): e is FallEv => e.type === 'fall' && e.playerId === 1)
+  const death = events.find((e): e is DeathEv => e.type === 'death' && e.playerId === 1)
+  check(!!fall && fall.to === s.height + ABYSS_DROP && fall.to > s.height && !fall.parachute, `abismo: evento fall hasta abajo del mapa (${JSON.stringify(fall)})`)
+  check(!!death && death.cause === 'abyss', 'abismo: death con cause abyss')
+  check(!events.some((e) => e.type === 'damage' && e.playerId === 1) && !p.alive && p.hp === 0, 'abismo: sin daño de caída; muerto con vida 0')
+  check(p.items.parachute === 1, 'abismo: el paracaídas no se consume')
+  check(events.indexOf(fall!) < events.indexOf(death!), 'abismo: fall antes que death')
+  // un tanque muerto que ya cayó no vuelve a caer ni a morir
+  const again = resolveBlast(s, blastFor('normal', 5, 5, 1))
+  check(!again.some((e) => (e.type === 'fall' || e.type === 'death') && e.playerId === 1), 'abismo: el que cayó no genera más eventos')
+  // un tanque con la mayor parte afuera del borde se sostiene (3 columnas alcanzan) y no cae
+  const h = pitMap()
+  fillRect(h.terrain, PIT0, 300, PIT1, 307, AIR)
+  h.players[1].x = PIT0 - TANK_HALF_W + 4
+  const ev = resolveBlast(h, blastFor('normal', 5, 5, 1))
+  check(h.players[1].alive && !ev.some((e) => e.type === 'death'), 'abismo: colgando del borde con apoyo no cae')
+}
+{
+  // un tiro de otro que lo tira al abismo: cuenta como kill, sin plata por daño (solo por lo que pegó antes)
+  let found: StepResult | null = null
+  for (let power = 30; power <= 100 && !found; power += 0.5) {
+    const s = pitMap()
+    const r = shoot(s, 'nuke', 45, power)
+    if (r.events.some((e) => e.type === 'death' && e.playerId === 1 && e.cause === 'abyss')) found = r
+  }
+  check(!!found, 'abismo: hay un tiro que tira al rival al abismo')
+  if (found) {
+    const s = found.state
+    const hit = found.events.filter((e): e is DamageEv => e.type === 'damage' && e.playerId === 1).reduce((a, e) => a + e.amount, 0)
+    check(s.players[0].kills === 1, `abismo: el que lo tiró suma kill (${s.players[0].kills})`)
+    check(s.phase === 'roundover' && s.roundWinnerId === 0, 'abismo: la ronda termina con el ganador')
+    const expect = EARN.kill + hit * EARN.perDamage + EARN.survive + EARN.roundWin
+    check(s.earnings[0] === expect, `abismo: plata del que lo tiró ${s.earnings[0]} (esperaba ${expect})`)
+    check(s.earnings[1] === 0, `abismo: el que cayó no cobra (${s.earnings[1]})`)
+  }
+  // el que se tira solo (su tiro le saca el piso) no suma kill ni pierde plata por autodaño
+  let self: StepResult | null = null
+  for (let power = 1; power <= 40 && !self; power += 1) {
+    const s = pitMap()
+    s.current = 1
+    const r = shoot(s, 'nuke', 90, power)
+    if (r.events.some((e) => e.type === 'death' && e.playerId === 1 && e.cause === 'abyss')) self = r
+  }
+  check(!!self, 'abismo: hay un tiro que tira al propio tanque')
+  if (self) check(self.state.players[1].kills === 0 && self.state.players[0].kills === 0, 'abismo: tirarse solo no es kill')
+}
+{
+  // proyectil que cae por un abismo: 'out', sin explosión; la utilería que cae ahí se destruye
+  const s = pitMap()
+  fillRect(s.terrain, PIT0, 300, PIT1, 307, AIR)
+  s.players[1].x = 1200
+  const f = fly({ terrain: s.terrain, players: s.players, props: [], ownerId: 0, angle: 0, power: 0, wind: 0, origin: { x: 740, y: 200 }, velocity: { x: 0, y: 20 } })
+  check(f.impact.kind === 'out' && f.impact.y > s.height && f.time < 3, `abismo: el proyectil sale por abajo (${f.impact.kind} y ${f.impact.y.toFixed(0)} en ${f.time.toFixed(2)} s)`)
+  const sky = skylineOf(s.terrain, s.players, [])
+  const f2 = fly({ terrain: s.terrain, players: s.players, props: [], ownerId: 0, angle: 0, power: 0, wind: 0, origin: { x: 740, y: 200 }, velocity: { x: 0, y: 20 }, skyline: sky })
+  check(JSON.stringify(f) === JSON.stringify(f2), 'abismo: skyline no cambia el vuelo')
+  const r = shoot(s, 'normal', 90, 0)
+  check(!!r.flights && r.flights[0].impact.kind !== 'out', 'abismo: el resto del mapa sigue con fondo')
+  const p = pitMap()
+  p.props = [
+    { id: 0, kind: 'barrel', x: 735, y: 288, w: 10, h: 12, alive: true },
+    { id: 1, kind: 'crate', x: 750, y: 288, w: 12, h: 12, alive: true },
+  ]
+  p.players[1].x = 1200
+  fillRect(p.terrain, PIT0, 300, PIT1, 307, AIR)
+  const ev = resolveBlast(p, blastFor('normal', 5, 5, 1))
+  check(p.props.every((q) => !q.alive) && ev.filter((e) => e.type === 'prop' && e.destroyed).length === 2, 'abismo: la utilería que cae se destruye')
+  // rodadora que cae al abismo: 'out', sin explosión
+  let rolled = false
+  for (let power = 10; power <= 70 && !rolled; power += 1) {
+    const q = pitMap()
+    fillRect(q.terrain, PIT0, 300, PIT1, 307, AIR)
+    q.players[1].x = 1400
+    for (let x = 500; x < PIT0; x++) fillRect(q.terrain, x, 300 - Math.floor((PIT0 - x) / 4), x, 299, DIRT, 'both')
+    const rr = shoot(q, 'roller', 60, power)
+    if (rr.flights!.length === 2 && rr.flights![0].impact.kind === 'terrain' && rr.flights![1].impact.kind === 'out') {
+      rolled = true
+      check(impactsOf(rr).length === 0, 'abismo: la rodadora que cae no explota')
+    }
+  }
+  check(rolled, 'abismo: hay una rodadora que rueda al abismo')
+}
+{
+  // moverse: abyssAhead avisa antes del paso que cae; el que sigue a propósito cae y termina el turno
+  const s = pitMap()
+  fillRect(s.terrain, PIT0, 300, PIT1, 307, AIR)
+  s.players[1].x = 1200
+  s.players[0].x = PIT0 - 30
+  s.players[0].fuel = 200
+  let m = s
+  let warned = -1
+  const ev: GameEvent[] = []
+  for (let i = 0; i < 80 && m.current === 0; i++) {
+    if (warned < 0 && abyssAhead(m, 1)) warned = m.players[0].x
+    const r = applyCommand(m, { type: 'move', playerId: 0, dir: 1 })
+    ev.push(...r.events)
+    m = r.state
+  }
+  const death = ev.find((e): e is DeathEv => e.type === 'death' && e.playerId === 0)
+  check(warned > 0 && !!death && death.cause === 'abyss', `move: abyssAhead avisa (x ${warned}) y el que sigue cae al abismo`)
+  check(ev.some((e) => e.type === 'fall' && e.playerId === 0 && e.to > s.height) && !ev.some((e) => e.type === 'damage'), 'move: caída al abismo sin daño')
+  check(m.phase === 'roundover' && m.roundWinnerId === 1 && m.players[1].kills === 0, 'move: el que se tiró pierde la ronda sin kill de nadie')
+  check(!abyssAhead(pitMap(), 1) && abyssAhead(s, 1, 50), 'abyssAhead: lejos no avisa, con margen sí')
+  // la IA nunca camina hacia un abismo: con el rival del otro lado y tiros bloqueados, igual no se mete
+  const a = pitMap()
+  fillRect(a.terrain, PIT0, 300, PIT1, 307, AIR)
+  a.players[0].x = PIT0 - 40
+  a.players[1].x = PIT1 + 60
+  fillRect(a.terrain, PIT0 - 90, 230, PIT0 - 70, 299, STONE) // pared detrás: que quiera ir para adelante
+  let falls = 0
+  for (let i = 0; i < 6; i++) {
+    a.wind = (i * 7) % 21 - 10
+    const plan = chooseShot(a, 'easy')
+    let q = a
+    for (let k = 0; k < Math.abs(plan.move ?? 0); k++) q = applyCommand(q, { type: 'move', playerId: 0, dir: (plan.move ?? 0) > 0 ? 1 : -1 }).state
+    if (!q.players[0].alive) falls++
+  }
+  check(falls === 0, `IA: no camina al abismo (${falls}/6)`)
+  // la IA considera tirar al rival al abismo: parado en un puente de 4 px, con 100 de vida y solo
+  // normal y pesada (no lo mata a balazos), el tiro que sirve es el que rompe el puente
+  let pushed = 0
+  for (let i = 0; i < 6; i++) {
+    const q = pitMap()
+    fillRect(q.terrain, PIT0, 304, PIT1, 307, AIR)
+    q.wind = (i * 5) % 13 - 6
+    for (const id of WEAPON_ORDER) q.players[0].ammo[id] = id === 'normal' ? 99 : id === 'heavy' ? 2 : 0
+    q.players[1].hp = 100
+    // sin el error de puntería (random fijo en 0,5): lo que se mide es si elige ese tiro
+    const plan = chooseShot(q, 'hard', () => 0.5)
+    const r = shoot(q, plan.weapon, plan.angle, plan.power)
+    if (r.events.some((e) => e.type === 'death' && e.playerId === 1 && e.cause === 'abyss')) pushed++
+  }
+  console.log(`IA: elige tirar al rival al abismo ${pushed}/6`)
+  check(pushed >= 3, `IA: no aprovecha el abismo (${pushed}/6)`)
+}
+{
+  // la IA apunta por encima de una montaña alta (cima en y 115) con el rival del otro lado
+  let hits = 0
+  for (let i = 0; i < 6; i++) {
+    const s = cloneState(createMatch(mk(1, 'normal', 'forest', 4, 1, 0, 'medium')))
+    const t = s.terrain
+    t.front.fill(AIR)
+    t.back.fill(AIR)
+    t.pits = new Uint8Array(t.w)
+    for (let x = 0; x < t.w; x++) fillRect(t, x, Math.round(360 - 245 * Math.exp(-(((x - 800) / 110) ** 2))), x, t.h - 1, DIRT, 'both')
+    fillRect(t, 0, t.h - 3, t.w - 1, t.h - 1, BEDROCK, 'both')
+    s.props = []
+    s.players[0].x = 520
+    s.players[1].x = 1080
+    for (const p of s.players) p.y = columnGround(t, p.x)
+    s.current = 0
+    s.wind = (i * 7) % 21 - 10
+    const r = aiTurn(s, 'hard')
+    if (r.events.some((e) => e.type === 'damage' && e.playerId === 1)) hits++
+  }
+  console.log(`IA: por encima de la montaña pega ${hits}/6`)
+  check(hits >= 4, `IA: no pasa la montaña alta (${hits}/6)`)
+}
+{
+  // determinismo y réplicas en mapas con abismos: el log de una partida Grande aplicado en otra réplica
+  for (const size of ['medium', 'large'] as MapSize[]) {
+    const config: MatchConfig = { slots: [{ kind: 'human' }, { kind: 'ai' }, { kind: 'ai' }], rounds: 1, difficulty: 'normal', biome: 'jungle', seed: 17, size }
+    let a = createMatch(config)
+    let b = decodeState(encodeState(a))
+    let steps = 0
+    let diverged = 0
+    let guard = 0
+    while (a.phase === 'aiming' && guard++ < 60) {
+      const p = a.players[a.current]
+      const plan = chooseShot(a, 'normal')
+      const cmds: Command[] = []
+      for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item })
+      for (let i = 0; i < Math.abs(plan.move ?? 0); i++) cmds.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
+      cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+      for (const cmd of cmds) {
+        a = applyCommand(a, cmd).state
+        b = applyCommand(b, cmd).state
+        steps++
+        if (netHash(a) !== netHash(b)) diverged++
+      }
+      if (steps > 40 && steps < 60) b = decodeState(encodeState(b)) // snapshot a mitad de partida
+    }
+    check(diverged === 0 && netHash(a) === netHash(b), `réplicas ${size} con pits: ${diverged} pasos distintos`)
+    const x = createMatch(config)
+    check(netHash(x) === netHash(createMatch(config)), `createMatch ${size} determinista con pits`)
+  }
+}
+
+// ---------- 15. v4: agua y lava ----------
+{
+  console.log(`líquidos: ${liquidMaps} mapas con tramos, ${liquidCells.water} celdas de agua y ${liquidCells.lava} de lava en total`)
+  check(liquidCells.water > 0 && liquidCells.lava > 0, 'líquidos: los mapas generados no traen agua y lava')
+}
+type FlowEv = Extract<GameEvent, { type: 'flow' }>
+type SteamEv = Extract<GameEvent, { type: 'steam' }>
+type BurnEv = Extract<GameEvent, { type: 'burn' }>
+const countT = (t: { front: Uint8Array }, m: number) => {
+  let n = 0
+  for (const b of t.front) if (b === m) n++
+  return n
+}
+const sameGrid = (a: { front: Uint8Array; back: Uint8Array }, b: { front: Uint8Array; back: Uint8Array }) =>
+  a.front.length === b.front.length && a.front.every((v, i) => v === b.front[i]) && a.back.every((v, i) => v === b.back[i])
+// Mapa de prueba v4 (Mediano, 1600×450): llano de tierra en y 300 hasta x 724 y otro más bajo en y 380
+// desde x 725. Pileta [600, 700) de `depth` px de hondo desde y 300 con el líquido m (back de tierra) y
+// pared de tierra [700, 724]. Jugador 0 en x 300 (arriba), jugador 1 en x 1200 (abajo).
+function poolMap(m: number, depth = 40): GameState {
+  const s = cloneState(createMatch(mk(1, 'normal', 'forest', 4, 1, 0, 'medium')))
+  const t = s.terrain
+  t.front.fill(AIR)
+  t.back.fill(AIR)
+  t.pits = new Uint8Array(t.w)
+  fillRect(t, 0, 300, 724, t.h - 1, DIRT, 'both')
+  fillRect(t, 725, 380, t.w - 1, t.h - 1, DIRT, 'both')
+  fillRect(t, 0, t.h - 3, t.w - 1, t.h - 1, BEDROCK, 'both')
+  fillRect(t, 600, 300, 699, 300 + depth - 1, m)
+  s.props = []
+  s.players[0].x = 300
+  s.players[0].y = 300
+  s.players[1].x = 1200
+  s.players[1].y = 380
+  for (const p of s.players) for (const id of WEAPON_ORDER) p.ammo[id] = WEAPONS[id].ammo
+  s.current = 0
+  s.wind = 0
+  return s
+}
+{
+  // la grilla: los líquidos no son sólidos; el piso es el lecho; materialAt los ve
+  const s = poolMap(WATER)
+  const t = s.terrain
+  check(!isSolid(t, 650, 320) && materialAt(t, 650, 320) === WATER && columnGround(t, 650) === 340 && groundAt(t, 650, TANK_HALF_W) === 340, 'agua: no sólida, piso en el lecho')
+  const l = poolMap(LAVA)
+  check(!isSolid(l.terrain, 650, 320) && materialAt(l.terrain, 650, 320) === LAVA && columnGround(l.terrain, 650) === 340, 'lava: no sólida, piso en el lecho')
+  // un tanque en la pileta se apoya en el fondo (no flota)
+  check(tankFloor(t, 650, 0) === 340, 'agua: el tanque se apoya en el lecho')
+  // las explosiones y la excavadora no rompen líquidos
+  const w0 = countT(t, WATER)
+  deform(t, 650, 320, 30, 'destroy')
+  deform(t, 650, 330, 20, 'dig')
+  check(countT(t, WATER) === w0, 'deform: destroy y dig no rompen agua')
+  const l0 = countT(l.terrain, LAVA)
+  deform(l.terrain, 650, 320, 30, 'destroy')
+  check(countT(l.terrain, LAVA) === l0, 'deform: no rompe lava')
+  // Tierra sobre lava: piedra (la lava baja, no aparece tierra donde había lava)
+  const lb = poolMap(LAVA)
+  const st0 = countT(lb.terrain, STONE)
+  deform(lb.terrain, 650, 310, 12, 'build')
+  check(countT(lb.terrain, LAVA) < l0 && countT(lb.terrain, STONE) > st0, 'Tierra sobre lava: piedra')
+  // Tierra sobre agua: el agua desplazada sube y el flujo la reparte (el volumen se conserva)
+  const wb = poolMap(WATER)
+  deform(wb.terrain, 650, 320, 12, 'build')
+  check(countT(wb.terrain, WATER) === w0, `Tierra sobre agua: el agua se desplaza (${countT(wb.terrain, WATER)}/${w0})`)
+  flowLiquids(wb.terrain, { seed: null, record: false })
+  check(countT(wb.terrain, WATER) === w0, 'Tierra sobre agua: el flujo conserva el agua desplazada')
+}
+// rompe la pared de la pileta: el jugador 0 parado arriba de la pared se tira una pesada encima
+function breakWall(m: number): { before: GameState; r: StepResult } {
+  const s = poolMap(m)
+  s.players[0].x = 712
+  s.players[0].hp = 100
+  return { before: s, r: shoot(s, 'heavy', 90, 8) }
+}
+{
+  const { before, r } = breakWall(WATER)
+  const flows = r.events.filter((e): e is FlowEv => e.type === 'flow')
+  check(flows.length === 1, `flujo: un solo evento flow (${flows.length})`)
+  const f = flows[0]
+  if (f) {
+    const impactT = Math.max(...r.events.filter((e) => e.type === 'impact').map((e) => (e as { t: number }).t))
+    check(Number.isFinite(f.t) && Number.isFinite(f.dt) && f.dt > 0 && f.t > impactT, `flujo: t ${f.t} después de los impactos (${impactT}), dt ${f.dt}`)
+    check(f.patches.length >= 3, `flujo: ${f.patches.length} parches`)
+    const t = r.state.terrain
+    check(
+      f.patches.every((p) => p.x >= 0 && p.y >= 0 && p.w > 0 && p.h > 0 && p.x + p.w <= t.w && p.y + p.h <= t.h && p.front.length === p.w * p.h && p.back.length === p.w * p.h),
+      'flujo: parches dentro de la grilla',
+    )
+    // parche 0 = antes del flujo; aplicar los demás sobre eso deja exactamente la grilla final
+    const g0 = cloneTerrain(t)
+    applyPatch(g0, f.patches[0])
+    check(!sameGrid(g0, t), 'flujo: el parche 0 es el estado previo al flujo')
+    for (const p of f.patches.slice(1)) applyPatch(g0, p)
+    check(sameGrid(g0, t), 'flujo: los parches reproducen la grilla final')
+    // el back no cambia con el flujo
+    check(f.patches.every((p) => p.back.every((v, i) => v === t.back[(p.y + Math.floor(i / p.w)) * t.w + p.x + (i % p.w)])), 'flujo: back igual en los parches')
+  }
+  // conservación (sin abismo), corrió hacia el llano de abajo y quedó asentado
+  check(countT(r.state.terrain, WATER) === countT(before.terrain, WATER), `flujo: el agua se conserva (${countT(before.terrain, WATER)} → ${countT(r.state.terrain, WATER)})`)
+  let below = 0
+  for (let x = 726; x < 1000; x++) for (let y = 300; y < 380; y++) if (r.state.terrain.front[y * r.state.terrain.w + x] === WATER) below++
+  check(below > 0, 'flujo: el agua corre por la pared rota')
+  const again = flowLiquids(cloneTerrain(r.state.terrain), { seed: null, record: false })
+  check(!again.changed, `flujo: se asienta (${again.moves} movimientos más)`)
+  // determinista: el mismo tiro da la misma grilla y los mismos parches
+  const r2 = breakWall(WATER).r
+  const f2 = r2.events.find((e): e is FlowEv => e.type === 'flow')
+  check(netHash(r2.state) === netHash(r.state) && !!f && !!f2 && f2.patches.length === f.patches.length && f2.patches.every((p, i) => p.x === f.patches[i].x && p.w === f.patches[i].w && p.front.every((v, k) => v === f.patches[i].front[k])), 'flujo determinista')
+  // los eventos se pueden clonar (los Uint8Array viajan en structuredClone; la red manda comandos y
+  // cada réplica recalcula, ver réplicas)
+  const cl = structuredClone(r.events)
+  const fc = cl.find((e): e is FlowEv => e.type === 'flow')
+  check(!!fc && fc.patches[0].front instanceof Uint8Array && fc.patches[0].front.length === f!.patches[0].front.length, 'flujo: structuredClone de los eventos')
+  // réplica desde un snapshot con líquidos: mismo resultado
+  const b = decodeState(encodeState(before))
+  check(netHash(b) === netHash(before), 'snapshot con líquidos: mismo hash')
+  check(netHash(shoot(b, 'heavy', 90, 8).state) === netHash(r.state), 'réplica con líquidos: mismo hash después del flujo')
+  // un tiro que no toca líquidos no emite flow
+  const dry = shoot(poolMap(WATER), 'normal', 150, 100)
+  check(!dry.events.some((e) => e.type === 'flow'), 'flujo: sin cambios no hay evento')
+  // el turno siguiente arranca después del flujo: la lava de muerte súbita (si hubiera) va después
+}
+{
+  // abismo: lo que cae por un abismo se pierde y el volumen baja (nunca sube)
+  const s = poolMap(WATER)
+  const t = s.terrain
+  fillRect(t, 725, 300, 820, t.h - 1, AIR)
+  for (let x = 725; x <= 820; x++) t.pits![x] = 1
+  const w0 = countT(t, WATER)
+  deform(t, 715, 310, 20, 'destroy')
+  const rep = flowLiquids(t, { seed: null, record: true })
+  check(rep.lost.water > 0 && countT(t, WATER) === w0 - rep.lost.water && countT(t, WATER) < w0, `abismo: el agua que cae se pierde (${w0} → ${countT(t, WATER)}, perdida ${rep.lost.water})`)
+}
+{
+  // agua + lava → piedra y vapor; el volumen de los dos baja
+  const s = poolMap(LAVA)
+  const t = s.terrain
+  fillRect(t, 725, 300, 790, 379, DIRT, 'both')
+  fillRect(t, 704, 300, 780, 339, WATER) // pileta de agua pegada, pared de 4 px [700, 703]
+  const w0 = countT(t, WATER)
+  const l0 = countT(t, LAVA)
+  const st0 = countT(t, STONE)
+  const tr = cloneTerrain(t)
+  deform(tr, 702, 312, 8, 'destroy')
+  const rep = flowLiquids(tr, { seed: null, record: true })
+  const n = rep.steam.reduce((a, q) => a + q.n, 0)
+  check(rep.steam.length > 0 && n > 0 && countT(tr, STONE) - st0 >= n, `agua + lava: piedra (${n} celdas, ${rep.steam.length} vapores)`)
+  check(countT(tr, WATER) < w0 && countT(tr, LAVA) < l0 && countT(tr, WATER) <= w0 && countT(tr, LAVA) <= l0, 'agua + lava: los dos volúmenes bajan')
+  // por fire: evento steam con t dentro del flujo
+  const f = poolMap(LAVA)
+  fillRect(f.terrain, 725, 300, 790, 379, DIRT, 'both')
+  fillRect(f.terrain, 704, 300, 780, 339, WATER)
+  f.players[0].x = 702
+  const r = shoot(f, 'heavy', 90, 8)
+  const flow = r.events.find((e): e is FlowEv => e.type === 'flow')
+  const steams = r.events.filter((e): e is SteamEv => e.type === 'steam')
+  check(!!flow && steams.length > 0 && steams.every((e) => e.n > 0 && e.t !== undefined && e.t >= flow.t && e.t <= flow.t + (flow.patches.length - 1) * flow.dt + 1e-9), `vapor por fire dentro del flujo (${steams.length})`)
+}
+{
+  // la lava quema lo inflamable que toca (madera pegada a la pileta) y corre por donde se quemó
+  const s = poolMap(LAVA)
+  const t = s.terrain
+  fillRect(t, 700, 300, 709, 339, WOOD, 'front')
+  const wood0 = countT(t, WOOD)
+  const tr = cloneTerrain(t)
+  const rep = flowLiquids(tr, { seed: null, record: true })
+  check(rep.burns.length > 0 && countT(tr, WOOD) < wood0, `lava: quema la madera (${wood0} → ${countT(tr, WOOD)})`)
+  // por fire: burn con t dentro del flujo
+  const r = shoot(s, 'normal', 150, 100)
+  const flow = r.events.find((e): e is FlowEv => e.type === 'flow')
+  const burns = r.events.filter((e): e is BurnEv => e.type === 'burn')
+  check(!!flow && burns.length > 0 && burns.every((e) => e.t !== undefined && e.t >= flow.t && e.t <= flow.t + (flow.patches.length - 1) * flow.dt + 1e-9), 'lava: burn por fire dentro del flujo')
+}
+{
+  // tanques: caer al agua no hace daño (fall.water) ni gasta el paracaídas; en seco sí hace daño
+  const s = poolMap(WATER)
+  const p = s.players[1]
+  p.x = 650
+  p.y = 240
+  p.items.parachute = 1
+  const ev = resolveBlast(s, blastFor('normal', 5, 5, 1))
+  const fall = ev.find((e): e is FallEv => e.type === 'fall' && e.playerId === 1)
+  check(!!fall && fall.water === true && fall.to === 340 && !ev.some((e) => e.type === 'damage' && e.playerId === 1) && p.items.parachute === 1, `agua: caída sin daño (${JSON.stringify(fall)})`)
+  check(inWater(s.terrain, p.x, p.y), 'agua: el tanque quedó en el agua')
+  const d = poolMap(WATER)
+  d.players[1].x = 400
+  d.players[1].y = 200
+  const ev2 = resolveBlast(d, blastFor('normal', 5, 5, 1))
+  check(ev2.some((e) => e.type === 'damage' && e.playerId === 1) && !ev2.some((e) => e.type === 'fall' && e.water), 'seco: la misma caída hace daño')
+  // caminando: se tira de la pared a la pileta, sin daño
+  let m = poolMap(WATER)
+  m.players[0].x = 712
+  const hp0 = m.players[0].hp
+  let fellWater = false
+  for (let i = 0; i < 40 && m.players[0].y === 300; i++) {
+    const r = applyCommand(m, { type: 'move', playerId: 0, dir: -1 })
+    if (r.events.some((e) => e.type === 'fall' && e.water)) fellWater = true
+    m = r.state
+  }
+  check(fellWater && m.players[0].hp === hp0 && m.players[0].y > 300, `agua: se tira caminando sin daño (y ${m.players[0].y}, hp ${m.players[0].hp})`)
+  // lava: tanque con lava en la caja recibe LAVA_DAMAGE al empezar cada turno (cause lava), una vez
+  const l = poolMap(LAVA)
+  l.players[1].x = 650
+  l.players[1].y = 340
+  check(inLava(l.terrain, l.players[1]), 'lava: inLava con el tanque en la pileta')
+  const r = shoot(l, 'normal', 150, 100)
+  const dmg = r.events.filter((e) => e.type === 'damage' && e.playerId === 1)
+  check(dmg.length === 1 && (dmg[0] as { cause?: string }).cause === 'lava' && (dmg[0] as { amount: number }).amount === LAVA_DAMAGE, `lava: daño por turno (${JSON.stringify(dmg)})`)
+  // con la muerte súbita también encima, una sola vez
+  const both = poolMap(LAVA)
+  both.players[1].x = 650
+  both.players[1].y = 340
+  both.calm = SUDDEN_DEATH_CALM
+  both.lava = 330
+  const rb = shoot(both, 'normal', 150, 100)
+  check(rb.events.filter((e) => e.type === 'damage' && e.playerId === 1).length === 1, 'lava: banda y pileta queman una sola vez')
+  // un tanque al lado (sin lava en la caja) no se quema
+  const dryT = poolMap(LAVA)
+  dryT.players[1].x = 560
+  dryT.players[1].y = 300
+  check(!shoot(dryT, 'normal', 150, 100).events.some((e) => e.type === 'damage' && e.playerId === 1), 'lava: al lado de la pileta no quema')
+}
+{
+  // proyectiles: el agua frena (WATER_DRAG por segundo) y registra la salpicadura; la lava derrite
+  const s = poolMap(WATER, 120)
+  const air = poolMap(AIR, 120)
+  const base = { players: s.players, ownerId: 99, angle: 0, power: 0, wind: 0, ignoreTanks: true, origin: { x: 650, y: 250 }, velocity: { x: 0, y: 200 } }
+  const fw = fly({ ...base, terrain: s.terrain })
+  const fa = fly({ ...base, terrain: air.terrain })
+  check(fw.impact.kind === 'terrain' && fa.impact.kind === 'terrain' && fw.time > fa.time * 1.15 && Math.abs(fw.vel.y) < Math.abs(fa.vel.y), `agua: frena el proyectil (${fw.time.toFixed(2)} s contra ${fa.time.toFixed(2)} s)`)
+  check(fw.splashes?.length === 1 && Math.abs(fw.splashes[0].y - 300) < 2 && fw.splashes[0].t > 0 && fw.splashes[0].t < fw.time && !fa.splashes, `agua: salpicadura al entrar (${JSON.stringify(fw.splashes)})`)
+  const l = poolMap(LAVA)
+  const fl = fly({ ...base, terrain: l.terrain })
+  check(fl.impact.kind === 'lava' && Math.abs(fl.impact.y - 300) < 2, `lava: derrite el proyectil (${fl.impact.kind} en y ${fl.impact.y.toFixed(1)})`)
+  // por fire: el tiro que cae en la lava no explota
+  const lf = poolMap(LAVA)
+  lf.players[0].x = 650
+  lf.players[0].y = 340
+  const rl = shoot(lf, 'heavy', 90, 30)
+  check(rl.flights![0].impact.kind === 'lava' && !rl.events.some((e) => e.type === 'impact'), 'lava: el proyectil se derrite sin explotar')
+  // explosión sumergida: radio × WATER_BLAST_SCALE para el terreno y el daño
+  const u = poolMap(WATER, 100)
+  u.players[1].x = 650
+  u.players[1].y = 400
+  const ev = resolveBlast(u, blastFor('heavy', 650, 360, 1))
+  const imp = ev.find((e) => e.type === 'impact') as { radius: number } | undefined
+  check(!!imp && Math.abs(imp.radius - WEAPONS.heavy.radius * WATER_BLAST_SCALE) < 1e-9, `explosión sumergida: radio ${imp?.radius}`)
+  check(!ev.some((e) => e.type === 'damage' && e.playerId === 1), 'explosión sumergida: el daño también llega a menos')
+  // napalm en el agua no quema; en seco sí
+  const n = poolMap(WATER, 100)
+  n.players[0].x = 650
+  n.players[0].y = 400
+  const rn = shoot(n, 'napalm', 90, 8)
+  check(rn.events.some((e) => e.type === 'impact') && !rn.events.some((e) => e.type === 'burn'), 'napalm sobre agua no quema')
+  const nd = poolMap(WATER)
+  nd.players[0].x = 400
+  check(shoot(nd, 'napalm', 90, 8).events.some((e) => e.type === 'burn'), 'napalm en seco quema')
+  // racimo: las bombitas también frenan y salpican
+  const c = poolMap(WATER, 100)
+  c.players[0].x = 560
+  const rc = shoot(c, 'cluster', 80, 30)
+  check(rc.flights!.length > 1, 'racimo con agua: se parte')
+  // rodadora: la que termina en la pileta de lava se derrite
+  let melted = 0
+  let wrong = 0
+  for (let pw = 6; pw <= 40; pw += 2) {
+    const q = poolMap(LAVA)
+    q.players[0].x = 520
+    const rr = shoot(q, 'roller', 40, pw)
+    const last = rr.flights![rr.flights!.length - 1]
+    if (last.impact.x >= 600 && last.impact.x < 700 && last.impact.y > 296) {
+      if (last.impact.kind === 'lava') melted++
+      else wrong++
+    }
+  }
+  check(melted > 0 && wrong === 0, `rodadora: se derrite en la lava (${melted}, mal ${wrong})`)
+  let splashed = 0
+  for (let pw = 6; pw <= 40; pw += 2) {
+    const q = poolMap(WATER)
+    q.players[0].x = 520
+    const rr = shoot(q, 'roller', 40, pw)
+    if (rr.flights!.some((f) => (f.splashes?.length ?? 0) > 0)) splashed++
+  }
+  check(splashed > 0, `rodadora: salpica al entrar al agua (${splashed})`)
+}
+{
+  // IA: no camina a la lava. El rival está del otro lado de la pileta (lejos) y la IA tiene combustible.
+  let into = 0
+  for (let i = 0; i < 6; i++) {
+    const s = poolMap(LAVA)
+    s.players[0].x = 580
+    s.players[1].x = 1300
+    s.wind = (i * 7) % 21 - 10
+    const r = aiTurn(s, 'easy')
+    if (inLava(r.state.terrain, r.state.players[0])) into++
+  }
+  check(into === 0, `IA: se mete en la lava (${into}/6)`)
+  // IA metida en la lava: sale (se mueve) si puede
+  let out = 0
+  for (let i = 0; i < 4; i++) {
+    // charco de lava de bordes suaves (10 px de hondo en el centro, 1 px cada 4 de pendiente)
+    const s = poolMap(AIR, 1)
+    fillRect(s.terrain, 600, 300, 699, 300, DIRT)
+    for (let x = 590; x <= 670; x++) {
+      const d = Math.round(10 * (1 - Math.abs(x - 630) / 40))
+      if (d > 0) fillRect(s.terrain, x, 300, x, 299 + d, LAVA)
+    }
+    s.players[0].x = 630
+    s.players[0].y = 310
+    s.wind = i * 3 - 5
+    const plan = chooseShot(s, 'normal')
+    let q = s
+    for (let k = 0; k < Math.abs(plan.move ?? 0); k++) q = applyCommand(q, { type: 'move', playerId: 0, dir: (plan.move ?? 0) > 0 ? 1 : -1 }).state
+    if (!inLava(q.terrain, q.players[0])) out++
+  }
+  console.log(`IA: sale de la lava ${out}/4`)
+  check(out >= 2, `IA: no sale de la lava (${out}/4)`)
+  // IA: rompe el borde de un pozo de lava para que corra hacia el rival (no obligatorio: se reporta).
+  // Pozo de lava en lo alto (pared derecha fina) y el rival abajo, al pie de la pared; solo normal y
+  // pesada y el rival con 100 de vida.
+  let flooded = 0
+  for (let i = 0; i < 6; i++) {
+    const s = poolMap(LAVA)
+    fillRect(s.terrain, 706, 300, 724, 339, AIR, 'front')
+    s.players[0].x = 300
+    s.players[1].x = 760
+    s.players[1].y = 380
+    s.players[1].hp = 100
+    s.wind = (i * 5) % 13 - 6
+    for (const id of WEAPON_ORDER) s.players[0].ammo[id] = id === 'normal' ? 99 : id === 'heavy' ? 2 : 0
+    const plan = chooseShot(s, 'hard', () => 0.5)
+    const r = shoot(s, plan.weapon, plan.angle, plan.power)
+    if (inLava(r.state.terrain, r.state.players[1])) flooded++
+  }
+  console.log(`IA: rompe el pozo de lava hacia el rival ${flooded}/6`)
+}
+{
+  // rendimiento del flujo: romper la pared de cada cuenca de 10 mapas Grande (peor caso realista)
+  const times: number[] = []
+  for (let seed = 1; seed <= 10; seed++) {
+    const biome = BIOMES[seed % BIOMES.length]
+    const g = generate(biome, new Rng(roundSeed(seed, 1)), 4, MAP_SIZES.large.w, MAP_SIZES.large.h)
+    for (const q of g.basins ?? []) {
+      for (const side of [-1, 1]) {
+        const t = cloneTerrain(g.terrain)
+        const v0 = liquidVolume(t)
+        deform(t, side < 0 ? q.x0 - 2 : q.x1 + 1, q.level + 8, 26, 'destroy')
+        const t0 = performance.now()
+        const rep = flowLiquids(t, { seed: null, record: true })
+        times.push(performance.now() - t0)
+        const v1 = liquidVolume(t)
+        check(v1.water + rep.lost.water <= v0.water && v1.lava + rep.lost.lava <= v0.lava, `flujo: el volumen crece al romper una cuenca (seed ${seed})`)
+        const back = cloneTerrain(t)
+        applyPatch(back, rep.patches[0] ?? { x: 0, y: 0, w: 0, h: 0, front: new Uint8Array(0), back: new Uint8Array(0) })
+        for (const p of rep.patches.slice(1)) applyPatch(back, p)
+        check(sameGrid(back, t), `flujo: parches que no reproducen la grilla (seed ${seed})`)
+      }
+    }
+  }
+  const avg = times.reduce((a, b) => a + b, 0) / Math.max(1, times.length)
+  console.log(`flujo al romper cuencas en Grande: ${times.length} roturas, ${avg.toFixed(1)} ms medio, peor ${Math.max(...times).toFixed(1)} ms`)
+  check(avg < 40, `flujo: romper una cuenca tarda ${avg.toFixed(1)} ms de media`)
+}
+{
+  // réplicas en mapas con líquidos (bosque Mediano con lagos, industrial Grande con lava)
+  for (const [size, biome] of [['medium', 'forest'], ['large', 'industrial']] as [MapSize, Biome][]) {
+    // la primera seed cuyo mapa trae líquidos
+    let config: MatchConfig = { slots: [{ kind: 'human' }, { kind: 'ai' }, { kind: 'ai' }], rounds: 1, difficulty: 'normal', biome, seed: 23, size }
+    for (let seed = 23; seed < 60; seed++) {
+      config = { ...config, seed }
+      const probe = createMatch(config)
+      if (countT(probe.terrain, WATER) + countT(probe.terrain, LAVA) > 0) break
+    }
+    let a = createMatch(config)
+    let b = decodeState(encodeState(a))
+    check(countT(a.terrain, WATER) + countT(a.terrain, LAVA) > 0, `réplicas ${size}/${biome}: el mapa trae líquidos`)
+    let diverged = 0
+    let guard = 0
+    let steps = 0
+    while (a.phase === 'aiming' && guard++ < 40) {
+      const p = a.players[a.current]
+      const plan = chooseShot(a, 'normal')
+      const cmds: Command[] = []
+      for (let i = 0; i < Math.abs(plan.move ?? 0); i++) cmds.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
+      cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+      for (const cmd of cmds) {
+        a = applyCommand(a, cmd).state
+        b = applyCommand(b, cmd).state
+        steps++
+        if (netHash(a) !== netHash(b)) diverged++
+      }
+      if (guard === 6) b = decodeState(encodeState(b))
+    }
+    check(diverged === 0 && netHash(a) === netHash(b), `réplicas ${size}/${biome} con líquidos: ${diverged} pasos distintos`)
+  }
+}
 console.log(`IA peor caso: ${worstMs.toFixed(0)} ms`)
 console.log(`${checks - failures}/${checks} chequeos OK`)
 if (failures > 0) {

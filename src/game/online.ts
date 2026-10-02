@@ -152,7 +152,7 @@ export class Online {
     this.host?.setSlot(slot, kind)
   }
 
-  setOption(key: 'rounds' | 'difficulty' | 'biome' | 'turnSeconds', value: number | string): void {
+  setOption(key: 'rounds' | 'difficulty' | 'biome' | 'turnSeconds' | 'size', value: number | string): void {
     this.host?.setOption(key, value)
   }
 

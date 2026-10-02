@@ -53,13 +53,19 @@ export class Rng {
   }
 }
 
-// Buffer RGBA con alfa directo, del tamaño del mundo. Se sube a un canvas y de ahí a una textura.
+// Buffer RGBA con alfa directo. Se sube a un canvas y de ahí a una textura.
+// v2: el buffer es una ventana sobre el mundo (setView): los métodos de dibujo reciben coordenadas de mundo
+// y las pasan a pixels del buffer con X = (x - ox) · z. Con z = 1 y ox, oy múltiplos de 4 el resultado es el
+// mismo pixel a pixel que dibujar en un buffer del tamaño del mundo (incluida la trama de Bayer).
 export class Raster {
   readonly data: Uint8ClampedArray
   readonly image: ImageData
   readonly canvas: HTMLCanvasElement
   private ctx: CanvasRenderingContext2D
   dirty = false
+  ox = 0 // punto del mundo en el pixel (0, 0) del buffer
+  oy = 0
+  z = 1 // pixels de buffer por pixel de mundo
 
   constructor(
     readonly w: number,
@@ -80,13 +86,38 @@ export class Raster {
     this.dirty = false
   }
 
+  setView(ox: number, oy: number, z: number): void {
+    this.ox = ox
+    this.oy = oy
+    this.z = z
+  }
+
+  // Rectángulo del mundo que cubre el buffer.
+  get left(): number {
+    return this.ox
+  }
+  get top(): number {
+    return this.oy
+  }
+  get right(): number {
+    return this.ox + this.w / this.z
+  }
+  get bottom(): number {
+    return this.oy + this.h / this.z
+  }
+
   flush(x = 0, y = 0, w = this.w, h = this.h): void {
     this.ctx.putImageData(this.image, 0, 0, x, y, w, h)
   }
 
   put(x: number, y: number, c: number, a = 1): void {
-    x = Math.round(x)
-    y = Math.round(y)
+    x = Math.round((x - this.ox) * this.z)
+    y = Math.round((y - this.oy) * this.z)
+    this.putB(x, y, c, a)
+  }
+
+  // put() en pixels del buffer.
+  private putB(x: number, y: number, c: number, a: number): void {
     if (x < 0 || y < 0 || x >= this.w || y >= this.h || a <= 0) return
     this.dirty = true
     const d = this.data
@@ -110,9 +141,14 @@ export class Raster {
     d[i + 3] = oa * 255
   }
 
-  // Disco en pixels enteros: el mismo criterio que disc() del look-test.
-  disc(cx: number, cy: number, r: number, colorAt: (d: number, x: number, y: number) => number, a = 1, dither = 1): void {
+  // Disco en pixels enteros: el mismo criterio que disc() del look-test. colorAt recibe la distancia en pixels de mundo.
+  disc(cx: number, cy: number, r: number, colorAt: (d: number) => number, a = 1, dither = 1): void {
     if (r <= 0) return
+    const z = this.z
+    cx = (cx - this.ox) * z
+    cy = (cy - this.oy) * z
+    r *= z
+    const iz = 1 / z
     const y0 = Math.max(0, Math.floor(cy - r - 1))
     const y1 = Math.min(this.h - 1, Math.ceil(cy + r + 1))
     const x0 = Math.max(0, Math.floor(cx - r - 1))
@@ -125,7 +161,7 @@ export class Raster {
         const d2 = dx * dx + dy * dy
         if (d2 > r2) continue
         if (dither < 1 && bayer(x, y) > dither) continue
-        this.put(x, y, colorAt(Math.sqrt(d2), x, y), a)
+        this.putB(x, y, colorAt(Math.sqrt(d2) * iz), a)
       }
     }
   }
@@ -134,6 +170,9 @@ export class Raster {
   // tintK > 0 mezcla cada pixel hacia tint (humo que se disuelve en la niebla).
   rampDisc(cx: number, cy: number, r: number, ramp: number[] | null, color: number, heat = 0, dither = 1, tint = 0, tintK = 0): void {
     if (r <= 0) return
+    cx = (cx - this.ox) * this.z
+    cy = (cy - this.oy) * this.z
+    r *= this.z
     const W = this.w
     const y0 = Math.max(0, Math.floor(cy - r - 1))
     const y1 = Math.min(this.h - 1, Math.ceil(cy + r + 1))
@@ -195,9 +234,9 @@ export class Raster {
   // a su cuerda del círculo: era lo más caro del frame con varias luces grandes (explosiones, fuego).
   light(cx: number, cy: number, R: number, tint: number, k: number): void {
     if (k <= 0 || R <= 0) return
-    cx = Math.round(cx)
-    cy = Math.round(cy)
-    R = Math.round(R)
+    cx = Math.round((cx - this.ox) * this.z)
+    cy = Math.round((cy - this.oy) * this.z)
+    R = Math.round(R * this.z)
     if (R <= 0) return
     const fall = falloff(R)
     const tr = ((tint >> 16) & 255) * k

@@ -84,7 +84,7 @@ export class HostRoom {
       owner: i === 0 ? 'host' : null,
       connected: i === 0,
     }))
-    this.state = { code: '', slots, rounds: 3, difficulty: 'normal', biome: 'random', turnSeconds: 30 }
+    this.state = { code: '', slots, rounds: 3, difficulty: 'normal', biome: 'random', turnSeconds: 30, size: 'medium' }
     transport.onPeer((id, s) => (s === 'join' ? undefined : this.peerLeft(id)))
     transport.onMessage((from, msg) => this.message(from, msg))
   }
@@ -130,7 +130,7 @@ export class HostRoom {
     this.lobbyChanged()
   }
 
-  setOption(key: 'rounds' | 'difficulty' | 'biome' | 'turnSeconds', value: number | string): void {
+  setOption(key: 'rounds' | 'difficulty' | 'biome' | 'turnSeconds' | 'size', value: number | string): void {
     if (this.started) return
     const st = this.state
     if (key === 'rounds' && ROUNDS.includes(Number(value))) st.rounds = Number(value)
@@ -138,6 +138,7 @@ export class HostRoom {
     else if (key === 'biome' && ['forest', 'jungle', 'industrial', 'random', 'rotate'].includes(String(value)))
       st.biome = value as LobbyState['biome']
     else if (key === 'turnSeconds' && Number(value) >= 0) st.turnSeconds = Math.round(Number(value))
+    else if (key === 'size' && (value === 'small' || value === 'medium' || value === 'large')) st.size = value
     else return
     this.lobbyChanged()
   }
@@ -174,6 +175,7 @@ export class HostRoom {
       rounds: st.rounds,
       difficulty: st.difficulty,
       biome: st.biome,
+      size: st.size,
       seed: seed ?? crypto.getRandomValues(new Uint32Array(1))[0],
     }
     this.started = true
