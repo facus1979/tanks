@@ -1,9 +1,13 @@
 // Controles táctiles (tablet y celular). Solo aparecen en pantallas táctiles (pointer: coarse) o con ?touch=1.
-// Botones en pantalla que se mantienen apretados (mover, ángulo, potencia) o se tocan (fuego, arma, ítem, pausa),
+// Botones en pantalla que se mantienen apretados (ángulo, potencia) o se tocan (fuego, ítem, pausa),
 // y apuntado arrastrando sobre el campo de batalla: la dirección del arrastre es el ángulo y el largo la potencia.
 // v2: con dos dedos se arrastra el mundo (paneo de la cámara) y el botón ◎ recentra en tu tanque.
 // v2 ajuste fino: en los botones de ángulo y potencia, un toque corto mueve un paso fino (FINE_STEP) y
 // mantener mueve continuo: arranca a 1/5 de velocidad y a los RAMP segundos pasa a velocidad plena.
+// HUD C (pulido v2): mover (◀ ▶) y elegir arma ya se tocan en el tablero de abajo del HUD, así que esos
+// botones no se crean; quedan potencia, ángulo, ítem, fuego, pausa, recentrar y pantalla completa,
+// ubicados por place() arriba del tablero y a la izquierda de los rivales (arriba a la derecha).
+import { VIEW_H, VIEW_W, type Viewport } from '../render/types'
 import type { Vec2 } from '../sim/types'
 import type { PadAction, PadState } from './gamepad'
 
@@ -14,13 +18,17 @@ const TAP_TIME = 0.25
 const FINE_STEP = 0.2 // grados o puntos de potencia por toque corto
 const RAMP = 0.6 // segundos de continuo lento antes de ir a velocidad plena
 const SLOW = 0.2
+// Separación entre los botones y el tablero, y ancho reservado arriba a la derecha para los rivales del
+// HUD (px lógicos de la pantalla de 800×450).
+const BAR_GAP = 6
+const RIVALS_W = 80
 
 export interface TouchAim {
   angle: number
   power: number
 }
 
-type Hold = 'left' | 'right' | 'angUp' | 'angDown' | 'powUp' | 'powDown'
+type Hold = 'angUp' | 'angDown' | 'powUp' | 'powDown'
 
 export function isTouchDevice(): boolean {
   if (new URLSearchParams(location.search).has('touch')) return true
@@ -43,6 +51,8 @@ export class TouchControls {
   private twoFinger = false
   private panDx = 0
   private recenterBtn: HTMLButtonElement | null = null
+  private cols: HTMLDivElement[] = []
+  private topBar: HTMLDivElement | null = null
   // Punto de la ventana → mundo (renderer.screenToWorld). Sin él, mundo = pantalla lógica de 800 px.
   toWorld: ((clientX: number, clientY: number) => Vec2) | null = null
   // true: ese toque es de otro control (el minimapa) y no apunta.
@@ -54,17 +64,16 @@ export class TouchControls {
     this.root.id = 'touch'
     this.root.hidden = true
     const left = div('touch-col left')
-    left.append(
-      row(this.hold('powUp', 'POT +'), this.hold('powDown', 'POT −')),
-      row(this.hold('left', '◀'), this.hold('right', '▶')),
-    )
+    left.append(row(this.hold('powUp', 'POT +'), this.hold('powDown', 'POT −')))
     const right = div('touch-col right')
     right.append(
       row(this.hold('angUp', 'ÁNG ↺'), this.hold('angDown', 'ÁNG ↻')),
-      row(this.tap('item', 'ÍTEM'), this.tap('nextWeapon', 'ARMA ▶')),
+      row(this.tap('item', 'ÍTEM')),
       row(this.tap('fire', 'FUEGO', 'fire')),
     )
+    this.cols = [left, right]
     const top = div('touch-top')
+    this.topBar = top
     this.recenterBtn = this.tap('recenter', '◎')
     this.recenterBtn.style.display = 'none'
     top.append(this.tap('pause', 'II'), this.recenterBtn, fullscreenButton())
@@ -99,6 +108,30 @@ export class TouchControls {
     if (this.recenterBtn) this.recenterBtn.style.display = visible ? '' : 'none'
   }
 
+  // HUD C: ubica los botones según dónde quedó la pantalla del juego (vp, en pixels de la ventana): las
+  // columnas apoyadas justo arriba del tablero (bar = filas lógicas que tapa; 0 = sin tablero, centradas
+  // como antes) y los botones de arriba a la izquierda del cuadro de rivales.
+  place(vp: Viewport, bar: number): void {
+    if (!this.enabled || vp.w <= 0) return
+    const k = vp.scale || vp.w / VIEW_W
+    for (const col of this.cols) {
+      if (bar > 0) {
+        const barTop = vp.y + (VIEW_H - bar) * k
+        col.style.top = 'auto'
+        col.style.bottom = `${Math.max(8, Math.round(window.innerHeight - barTop + BAR_GAP * k))}px`
+        col.style.transform = 'none'
+      } else {
+        col.style.top = col.style.bottom = col.style.transform = ''
+      }
+    }
+    const top = this.topBar
+    if (top) {
+      const gameRight = window.innerWidth - (vp.x + vp.w)
+      top.style.right = `max(10px, ${Math.round(gameRight + RIVALS_W * k)}px, env(safe-area-inset-right))`
+      top.style.top = `max(8px, ${Math.round(vp.y + 3 * k)}px, env(safe-area-inset-top))`
+    }
+  }
+
   // Paneo con dos dedos desde la última llamada, en pixels de la ventana (positivo: los dedos fueron a la derecha).
   pollPan(): number {
     const dx = this.panDx
@@ -122,9 +155,7 @@ export class TouchControls {
     this.steps = { angle: 0, power: 0 }
     state.angle += this.speed('angUp') - this.speed('angDown')
     state.power += this.speed('powUp') - this.speed('powDown')
-    const l = this.held.has('left')
-    const r = this.held.has('right')
-    if (l !== r) state.move = l ? -1 : 1
+    // mover lo hacen ◀ ▶ del tablero del HUD (main.ts), no un botón táctil propio
     return state
   }
 

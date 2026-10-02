@@ -1,6 +1,6 @@
 // Paneo de la cámara con el mouse (v2): puntero contra el borde izquierdo / derecho de la pantalla
 // (solo con puntero fino) y arrastre del mundo con el botón del medio, o con el izquierdo fuera del
-// tanque y de la barra de armas (lo decide `blocked`, que arma main.ts con el HUD y el renderer).
+// tanque y del HUD que se toca (lo decide `blocked`, que arma main.ts con el HUD y el renderer).
 
 // Margen del borde que panea, en pixels de la ventana (o el 1,5% del ancho del juego, el mayor).
 const EDGE_PX = 10
@@ -11,6 +11,8 @@ export class MousePan {
   active = false
   // true: un click izquierdo en ese punto es de otra cosa (tanque, barra de armas, minimapa).
   blocked: (e: PointerEvent) => boolean = () => false
+  // true: con el puntero en ese punto (clientX/Y) no se panea contra el borde (HUD C: el tablero y los ítems).
+  noEdge: (clientX: number, clientY: number) => boolean = () => false
   private fine = typeof matchMedia === 'function' && matchMedia('(pointer: fine)').matches
   private x = 0
   private y = 0
@@ -69,7 +71,7 @@ export class MousePan {
     if (!this.active || !this.fine || !this.inside || this.drag) return 0
     const canvas = this.stage.querySelector('canvas')
     const r = (canvas ?? this.stage).getBoundingClientRect()
-    if (r.width <= 0 || this.y < r.top || this.y > r.bottom) return 0
+    if (r.width <= 0 || this.y < r.top || this.y > r.bottom || this.noEdge(this.x, this.y)) return 0
     const m = Math.max(EDGE_PX, r.width * 0.015)
     if (this.x <= r.left + m) return -1
     if (this.x >= r.right - m) return 1
