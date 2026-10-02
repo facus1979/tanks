@@ -1,15 +1,19 @@
 import { fly, muzzle, skylineOf } from './ballistics'
 import { abyssAhead, applyCommand } from './game'
-import { blastDamage } from './physics'
+import { flowLiquids } from './flow'
+import { blastDamage, inLava, submerged } from './physics'
+import { columnTop, hasLiquid, takeDirty } from './terrain'
 import { Rng, hashSeed } from './rng'
 import { NAPALM_DPS, NAPALM_SPREAD, resolveShot } from './weapons'
 import {
+  LAVA,
   LAVA_DAMAGE,
   LAVA_RISE,
   PLAYER_HP,
   REPAIR_HP,
   TANK_H,
   TANK_HALF_W,
+  WATER_BLAST_SCALE,
   WEAPONS,
   WEAPON_ORDER,
   WORLD_W,
@@ -69,6 +73,12 @@ export function lavaRisk(state: GameState, y: number): number {
   return n * LAVA_DAMAGE * SELF_WEIGHT
 }
 
+// v4: quedarse con lava de la grilla en la caja quema LAVA_DAMAGE por turno hasta salir: se pesa
+// como dos turnos.
+export function poolRisk(state: GameState, p: { x: number; y: number }): number {
+  return inLava(state.terrain, p) ? 2 * LAVA_DAMAGE * SELF_WEIGHT : 0
+}
+
 // move: pixels a mover antes de apuntar (signo = dirección). Angle y power ya son para la
 // posición nueva. La sesión manda |move| comandos 'move' y después apunta.
 // items: ítems a usar antes de todo (un 'useItem' por cada uno, en orden).
@@ -121,6 +131,7 @@ interface Search {
 export function chooseShot(state: GameState, difficulty: Difficulty, random?: () => number): ShotPlan {
   const actor = state.players[state.current]
   const rand = random ?? rngFor(state)
+  flowBudget = AI_FLOW_BUDGET
   const weapons = WEAPON_ORDER.filter((id) => actor.ammo[id] > 0 && WEAPONS[id].terrain !== 'build')
   const fallback = weapons[0] ?? WEAPON_ORDER.find((id) => actor.ammo[id] > 0) ?? 'normal'
   const targets = state.players.filter((p) => p.alive && p.id !== actor.id)
@@ -138,7 +149,7 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
   // Con la lava cerca (muerte súbita) también, y cada posición se paga con la lava que la alcanzaría:
   // así sale de la lava o se aleja de ella (hacia arriba) si puede, y no se mete caminando.
   const wander = rand() < 0.15
-  const risk = lavaRisk(state, actor.y)
+  const risk = lavaRisk(state, actor.y) + poolRisk(state, actor)
   let total = best.score - risk
   if (actor.fuel > 0 && (best.score < 1000 || wander || risk > 0)) {
     const steps = risk > 0 ? [-60, -40, -20, 20, 40, 60] : best.score < 1000 ? [-40, -20, 20, 40] : [-20, 20]
@@ -147,7 +158,7 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
       if (!moved) continue
       const c = search(moved.state, weapons, false).best
       const mp = moved.state.players[moved.state.current]
-      const score = c.score - lavaRisk(state, mp.y)
+      const score = c.score - lavaRisk(state, mp.y) - poolRisk(moved.state, mp)
       if (score > total + 60) {
         best = c
         total = score
@@ -192,6 +203,8 @@ function walk(state: GameState, dx: number): { state: GameState; dx: number } | 
     if (abyssAhead(s, dir, AI_ABYSS_MARGIN)) break
     const r = applyCommand(s, { type: 'move', playerId: id, dir })
     if (r.state === s || r.state.current !== s.current) break
+    // v4: no se mete caminando en la lava (si ya estaba adentro, puede seguir para salir)
+    if (inLava(r.state.terrain, r.state.players[r.state.current]) && !inLava(s.terrain, s.players[s.current])) break
     s = r.state
   }
   if (n < 4) return null
@@ -219,6 +232,10 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
     pushes.sort((a, b) => b.score - a.score)
     if (pushes.length > PUSH_POOL) pushes.pop()
   }
+  // v4: bordes de pozos de lava con un rival más abajo de ese lado: el tiro que cae más cerca de cada
+  // uno se verifica con la simulación completa (que deja correr la lava)
+  const lips = lavaLipsOf(state.terrain, targets)
+  const lipAim = lips.map(() => ({ angle: 0, power: 0, d: Infinity }))
   const consider = (angle: number, power: number) => {
     const r = estimate(state, actor, targets, weapons, angle, power, sky, ledges)
     total++
@@ -226,6 +243,10 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
       for (const l of ledges) {
         const d = Math.abs(r.at.x - l.p.x) + Math.max(0, r.at.y - l.p.y)
         if (d < aim.d) aim = { angle, power, d }
+      }
+      for (let i = 0; i < lips.length; i++) {
+        const d = Math.abs(r.at.x - lips[i].x) + Math.abs(r.at.y - lips[i].y)
+        if (d < lipAim[i].d) lipAim[i] = { angle, power, d }
       }
     }
     if (r.blocked) blocked++
@@ -258,8 +279,15 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
     const p1 = best.power
     for (let a = -1; a <= 1; a += 0.5) for (let p = -1; p <= 1; p += 0.25) if (a !== 0 || p !== 0) consider(clamp(a1 + a, 0, 180), clamp(p1 + p, 10, 100))
   }
+  for (let i = 0; i < lips.length; i++) {
+    const la = lipAim[i]
+    if (la.d >= 40) continue
+    for (let a = -2; a <= 2; a += 1) for (let p = -1.5; p <= 1.5; p += 0.5) consider(clamp(la.angle + a, 0, 180), clamp(la.power + p, 10, 100))
+  }
   // verificación con la simulación completa (racimo, rodadora y napalm no se estiman bien)
   const pool = [...perWeapon.values(), best, ...pushes]
+  const lipWeapon: WeaponId = weapons.includes('heavy') ? 'heavy' : weapons[0]
+  for (const la of lipAim) if (la.d < 16) pool.push({ angle: la.angle, power: la.power, weapon: lipWeapon, score: 0 })
   let verified: Candidate = { ...best, score: -Infinity }
   for (const c of pool) {
     const score = simulate(state, c)
@@ -297,10 +325,12 @@ function estimate(
   let near = Infinity
   for (const t of targets) near = Math.min(near, Math.hypot(t.x - x, t.y - TANK_H / 2 - y))
   const list: Candidate[] = []
+  // v4: explosión sumergida, radio a la mitad
+  const wet = submerged(state.terrain, x, y) ? WATER_BLAST_SCALE : 1
   for (const id of weapons) {
     const w = WEAPONS[id]
     const spread = w.split ? 2.4 : w.rolls ? 2 : 1
-    const blast = { x, y, radius: w.radius * spread, damage: w.damage, terrain: w.terrain }
+    const blast = { x, y, radius: w.radius * spread * wet, damage: w.damage, terrain: w.terrain }
     let dmg = 0
     for (const t of targets) {
       let d = t.id === flight.impact.tankId ? w.damage : blastDamage(t, blast)
@@ -405,6 +435,14 @@ function simulate(state: GameState, c: Candidate): number {
   actor.power = c.power
   const before = s.players.map((p) => ({ hp: p.hp, alive: p.alive }))
   const { events } = resolveShot(s, actor, c.weapon)
+  // v4: si el tiro tocó cerca de lava, la deja correr (como fire) y el rival que quede en ella cuenta
+  // como golpeado por lo que la lava le va a quemar. El agua no daña: no hace falta simularla.
+  // Tope de flujos por turno (flowBudget): pasado ese, la estimación sigue sin flujo.
+  const dirty = takeDirty(s.terrain)
+  if (flowBudget > 0 && dirty && hasLiquid(s.terrain, LAVA, dirty.x0 - 2, dirty.y0 - 2, dirty.x1 + 3, dirty.y1 + 3)) {
+    flowBudget--
+    flowLiquids(s.terrain, { seed: dirty, record: false, maxIters: AI_FLOW_ITERS, extraIters: 0 })
+  }
   let dmg = 0
   let kills = 0
   let near = Infinity
@@ -413,13 +451,78 @@ function simulate(state: GameState, c: Candidate): number {
     if (p.id === actor.id || !b.alive) continue
     dmg += b.hp - p.hp
     if (!p.alive) kills++
+    else if (newlyInLava(state, s, p.id)) dmg += Math.min(p.hp + p.shield, AI_LAVA_HIT)
     for (const e of events) if (e.type === 'impact') near = Math.min(near, Math.hypot(p.x - e.x, p.y - TANK_H / 2 - e.y))
   }
-  const self = before[actor.id].hp - actor.hp
+  let self = before[actor.id].hp - actor.hp
+  if (actor.alive && newlyInLava(state, s, actor.id)) self += AI_LAVA_HIT
   if (!actor.alive) return -1e5
   if (!Number.isFinite(near)) return -1e6
   const cost = costOf(state, c.weapon)
   return dmg > 0 ? 1000 + dmg * 10 + kills * 250 - self * SELF_WEIGHT - cost : -near - self * SELF_WEIGHT - cost * 0.01
+}
+
+// v4: bordes de los pozos de lava de la grilla. Por cada tramo de columnas cuya primera celda no
+// vacía es lava, el borde de cada lado (la pared) con la y de la superficie. Se calcula una vez por
+// grilla (mover no cambia la grilla: los estados de la búsqueda la comparten).
+interface PoolEdge {
+  x: number // columna de la pared
+  y: number // superficie de la lava junto a esa pared
+  side: -1 | 1 // -1: pared izquierda (la lava correría hacia la izquierda)
+}
+const edgeCache = new WeakMap<Terrain, PoolEdge[]>()
+
+function poolEdges(t: Terrain): PoolEdge[] {
+  const cached = edgeCache.get(t)
+  if (cached) return cached
+  const out: PoolEdge[] = []
+  let start = -1
+  let startY = 0
+  let lastY = 0
+  for (let x = 0; x <= t.w; x++) {
+    const top = x < t.w ? columnTop(t, x) : t.h
+    const lava = top < t.h && t.front[top * t.w + x] === LAVA
+    if (lava) {
+      if (start < 0) {
+        start = x
+        startY = top
+      }
+      lastY = top
+    } else if (start >= 0) {
+      if (start > 0) out.push({ x: start - 1, y: startY, side: -1 })
+      if (x < t.w) out.push({ x, y: lastY, side: 1 })
+      start = -1
+    }
+  }
+  edgeCache.set(t, out)
+  return out
+}
+
+// Puntos a romper: la pared de un pozo de lava, un poco por debajo de la superficie, con un rival
+// del lado de afuera a menos de LIP_RANGE px y más abajo que la lava (hacia donde correría).
+const LIP_RANGE = 320
+function lavaLipsOf(t: Terrain, targets: Player[]): { x: number; y: number }[] {
+  const out: { x: number; y: number }[] = []
+  for (const e of poolEdges(t)) {
+    const toward = targets.some((p) => (p.x - e.x) * e.side > 0 && Math.abs(p.x - e.x) < LIP_RANGE && p.y > e.y + 6)
+    if (toward) out.push({ x: e.x + e.side * 2, y: e.y + 4 })
+  }
+  return out
+}
+
+// v4: lo que la IA le cuenta a un tanque que el tiro deja en la lava (dos turnos de quemadura) y el
+// tope de iteraciones del flujo que simula (sin animar).
+const AI_LAVA_HIT = 2 * LAVA_DAMAGE
+const AI_FLOW_ITERS = 200
+// flujos simulados por turno de la IA (se recarga en chooseShot): acota el peor caso con lava cerca
+const AI_FLOW_BUDGET = 8
+let flowBudget = AI_FLOW_BUDGET
+
+// v4: el tanque id no tenía lava en la caja antes del tiro y después sí.
+function newlyInLava(before: GameState, after: GameState, id: number): boolean {
+  const a = after.players[id]
+  if (!inLava(after.terrain, a)) return false
+  return !inLava(before.terrain, before.players[id])
 }
 
 function nearest(actor: Player, targets: Player[]): Player {
