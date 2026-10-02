@@ -19,8 +19,8 @@ import type {
   Vec2,
   WeaponId,
 } from '../sim/types'
-import { FUEL_PER_TURN, ITEM_ORDER, LAVA, SHOP, SUDDEN_DEATH_CALM, TANK_H, TANK_W, WATER, WEAPONS } from '../sim/types'
-import { VIEW_H, VIEW_W, type Camera, type RenderFrame } from '../render/types'
+import { ITEM_ORDER, LAVA, SHOP, SUDDEN_DEATH_CALM, TANK_H, TANK_W, WATER, WEAPONS, fuelFor } from '../sim/types'
+import { AIM_PREVIEW_T, VIEW_H, VIEW_W, type Camera, type RenderFrame } from '../render/types'
 import type { HudModel, HudSide } from '../ui/hud'
 import type { BannerModel, HudExtras, HudNet, MinimapModel, ScoreModel, ShopModel } from '../ui/types'
 import { AiClient } from './ai-client'
@@ -88,6 +88,23 @@ interface Playback {
   flows: FlowPlay[]
   // v4: próxima salpicadura por reproducir de cada vuelo (índice en Flight.splashes)
   splashNext: number[]
+  // pulido v2: deslizamientos (empuje o pendiente) con la caída que los sigue
+  slides: SlidePlay[]
+}
+
+// Pulido v2: un tanque que se corre por el piso (evento slide). Recorre path desde t0 (un punto cada
+// PATH_DT) hasta t1; si después cae (fall que no es al abismo ni con paracaídas), la caída se anima con
+// gravedad y el fall se entrega al aterrizar (golpe, polvo, chapuzón). Lo que le pasa a ese tanque después
+// en la lista (daño, muerte, escudo, otro deslizamiento) espera a que termine.
+interface SlidePlay {
+  event: Extract<GameEvent, { type: 'slide' }>
+  playerId: number
+  t0: number
+  t1: number // fin del recorrido
+  end: number // fin del deslizamiento con su caída (si la hay)
+  done: boolean // ya llegó al último punto del recorrido
+  fall: { from: number; to: number; t0: number; dur: number } | null
+  follow: boolean | null // la cámara lo mira (se decide al empezar)
 }
 
 // v4 líquidos: un evento flow en reproducción. Cada parche se copia a la grilla que se ve en
@@ -171,6 +188,20 @@ const FLOW_NEAR = 260
 const FLOW_HOLD = 0.35
 // Después del flujo: consecuencias del cambio de turno que no pueden adelantarse a la animación.
 const AFTER_FLOW = new Set<GameEvent['type']>(['damage', 'shield', 'death'])
+// Pulido v2, deslizamiento. Gravedad y topes de la caída que sigue a un deslizamiento (la del abismo usa
+// abyssDrop), cuánto se queda la cámara después de que el tanque se asentó y cuánto espera el turno.
+const SLIDE_FALL_G = 700
+const SLIDE_FALL_MIN = 0.12
+const SLIDE_FALL_MAX = 0.9
+const SLIDE_HOLD = 0.35
+const SLIDE_TAIL = 0.4
+// Lo de un tanque que espera a que termine su deslizamiento.
+const AFTER_SLIDE = new Set<GameEvent['type']>(['damage', 'shield', 'death'])
+
+// Duración de la caída (no al abismo) de from a to después de un deslizamiento.
+export function slideFallDur(from: number, to: number): number {
+  return clamp(Math.sqrt((2 * Math.max(0, to - from)) / SLIDE_FALL_G), SLIDE_FALL_MIN, SLIDE_FALL_MAX)
+}
 
 // Caída al abismo desde y (piso del tanque) en un mapa de alto h: hasta dónde baja y cuánto tarda.
 // También la usa main.ts para que el silbido dure lo mismo que la caída.
@@ -213,7 +244,8 @@ export class Session {
   private slow = 0
   private scale = 1
   private lastHumanId: number | null = null // último humano que tuvo el turno (hot-seat)
-  private tracerCache: { key: string; path: Vec2[] } | null = null
+  // guía de apuntado: se recalcula solo si cambia la clave (ángulo, potencia, arma, posición, viento...)
+  private tracerCache: { key: string; path: Vec2[]; short: boolean } | null = null
   // v2: cámara y minimapa
   private cam = new CameraController()
   private camKey = '' // turno que sigue la cámara; si cambia, vuelve al tanque
@@ -822,6 +854,7 @@ export class Session {
         lava: this.lavaView(),
       }
     }
+    const aim = this.aimGuide(s)
     return {
       biome,
       terrain: s.terrain,
@@ -835,7 +868,8 @@ export class Session {
       shooterId: null,
       weapon: null,
       freeze: this.frozen,
-      aimPreview: this.tracerPath(s),
+      aimPreview: aim ? aim.path : null,
+      aimPreviewShort: aim ? aim.short : undefined,
       camera: this.cam.camera,
       lava: this.lavaView(),
     }
@@ -935,6 +969,7 @@ export class Session {
     if (pb) {
       const now = this.projectiles(pb)
       const fall = this.fallFocus(pb)
+      const slide = now.length ? null : this.slideFocus(pb)
       if (fall) {
         // v3: un tanque cae al abismo: la cámara lo acompaña hasta el borde de abajo del mundo
         this.cam.followFall(fall.x, fall.y)
@@ -952,6 +987,9 @@ export class Session {
           y1 = Math.max(y1, p.y)
         }
         this.cam.followShot((x0 + x1) / 2, (y0 + y1) / 2, pb.zoom)
+      } else if (slide) {
+        // pulido v2: un tanque se desliza (el del turno o uno que estaba en pantalla): la cámara lo acompaña
+        this.cam.followSlide(slide.x, slide.y)
       } else if (pb.t < pb.flightsEnd) {
         this.cam.holdShot(pb.zoom)
       } else {
@@ -1068,7 +1106,8 @@ export class Session {
       status: this.status(s, current),
       showAim: !!current && !pb,
       ammoAll,
-      fuel: current ? Math.max(0, current.fuel ?? 0) / FUEL_PER_TURN : 0,
+      // pulido v2: el tanque lleno es el combustible de un turno en este mapa (fuelFor del ancho)
+      fuel: current ? Math.max(0, current.fuel ?? 0) / fuelFor(s.width ?? s.terrain.w) : 0,
       showBar: !!current && this.controlledHere(current) && s.phase === 'aiming',
       // el demo congelado se compara contra capturas previas: sin extras
       extras: this.demo?.freeze ? undefined : {
@@ -1149,23 +1188,30 @@ export class Session {
     if (any) this.act({ type: 'ready', playerId: any.id })
   }
 
-  private tracerPath(s: GameState): Vec2[] | null {
+  // Guía de apuntado del humano que juega en este dispositivo (en hot-seat el del turno, online solo el
+  // local en su turno; nunca la IA). Con trazador, la trayectoria completa; sin trazador (pulido v2),
+  // solo los puntos de los primeros AIM_PREVIEW_T segundos (short). Se calcula con fly y las mismas
+  // opciones que el trazador (viento, lava, tanques, utilería) y se cachea: solo se recalcula cuando
+  // cambian ángulo, potencia, arma, posición, viento, lava o la grilla, no en cada frame.
+  private aimGuide(s: GameState): { path: Vec2[]; short: boolean } | null {
     if (s.phase !== 'aiming') return null
     const p = s.players[s.current]
-    if (!p || !p.tracer || !this.controlledHere(p) || this.bannerFor()) return null
+    if (!p || !p.alive || !this.controlledHere(p) || this.bannerFor()) return null
     const aim = this.aim && this.aim.playerId === p.id ? this.aim : p
     const angle = quantize(aim.angle)
     const power = quantize(aim.power)
-    const key = `${this.matchId}:${s.turn}:${p.x}:${p.y}:${angle}:${power}:${s.wind}:${this.terrainVersion}`
-    if (this.tracerCache?.key === key) return this.tracerCache.path
+    const short = !p.tracer
+    const key = `${this.matchId}:${s.turn}:${p.id}:${p.x}:${p.y}:${angle}:${power}:${p.weapon}:${s.wind}:${s.lava}:${short}:${this.terrainVersion}`
+    if (this.tracerCache?.key === key) return this.tracerCache
     let path: Vec2[] = []
     try {
       path = fly({ terrain: s.terrain, players: s.players, props: s.props, ownerId: p.id, angle, power, wind: s.wind, lava: s.lava ?? undefined }).path
     } catch (err) {
       console.error(err)
     }
-    this.tracerCache = { key, path }
-    return path
+    if (short) path = headOfPath(path, AIM_PREVIEW_T)
+    this.tracerCache = { key, path, short }
+    return this.tracerCache
   }
 
   private currentAim(): { playerId: number; angle: number; power: number } | null {
@@ -1249,7 +1295,8 @@ export class Session {
     }
     // v3: un paso que cae al abismo se reproduce como un tiro sin vuelos, para animar la caída antes
     // de la muerte y del cambio de turno (si no, el tanque desaparecería de golpe)
-    if (command.type === 'move' && hasAbyss(result.events, s.terrain.h)) {
+    // pulido v2: lo mismo si el paso termina en un deslizamiento por la pendiente (y quizás una caída)
+    if (command.type === 'move' && (hasAbyss(result.events, s.terrain.h) || result.events.some((e) => e.type === 'slide'))) {
       this.aim = null
       this.ai = null
       this.moveAcc = 0
@@ -1333,6 +1380,9 @@ export class Session {
     })
     // v4: flujos de líquido; corre después del flujo lo que no puede adelantarse a la animación
     const flows = planFlows(timeline)
+    // pulido v2: deslizamientos; lo que le pasa a ese tanque después espera a que termine (y su caída)
+    const slides: SlidePlay[] = []
+    planSlides(timeline, before.terrain.h, slides)
     // v3: caídas al abismo con su momento ya conocido (la muerte se corre al final de la caída)
     const drops: Drop[] = []
     this.planDrops(before, timeline, drops)
@@ -1340,6 +1390,7 @@ export class Session {
     let base = flightsEnd
     for (const e of timeline) if (Number.isFinite(e.t)) base = Math.max(base, e.t)
     for (const f of flows) base = Math.max(base, f.end + FLOW_GAP)
+    for (const sl of slides) base = Math.max(base, sl.end)
     const lavaEvent = events.find((e) => e.type === 'lava')
     const hasLava = !!lavaEvent || deferred.some((d) => d.event.type === 'damage')
     const lavaT = (lavaEvent && ownT(lavaEvent)) ?? base + LAVA_GAP
@@ -1349,6 +1400,7 @@ export class Session {
       else d.t = lavaT + LAVA_HIT
     }
     // las que caen por un evento diferido (después de la lava) se ubican ahora
+    planSlides(timeline, before.terrain.h, slides)
     this.planDrops(before, timeline, drops)
     timeline.sort((a, b) => a.t - b.t)
     if (!Number.isFinite(firstImpact)) firstImpact = flightsEnd
@@ -1361,6 +1413,8 @@ export class Session {
     const lavaEnd = hasLava ? lavaT + LAVA_ANIM + LAVA_TAIL : 0
     // con flujo, el turno siguiente espera a que el líquido termine de correr
     const flowsEnd = flows.reduce((m, f) => Math.max(m, f.end + FLOW_TAIL), 0)
+    // con deslizamientos, el turno siguiente espera a que el tanque se asiente
+    const slidesEnd = slides.reduce((m, sl) => Math.max(m, sl.end + SLIDE_TAIL), 0)
     const weapon = before.players.find((p) => p.id === shooterId)?.weapon ?? 'normal'
     const { terrain, target, reveal, pending } = splitTerrain(before.terrain, after.terrain, timeline, flows)
     // la ronda termina con este tiro: la última muerte va en cámara lenta
@@ -1370,7 +1424,7 @@ export class Session {
     }
     this.playback = {
       t: 0,
-      end: Math.max(Math.max(flightsEnd, eventsEnd) + settle, lavaEnd, dropsEnd, flowsEnd),
+      end: Math.max(Math.max(flightsEnd, eventsEnd) + settle, lavaEnd, dropsEnd, flowsEnd, slidesEnd),
       before,
       after,
       flights: timed,
@@ -1397,6 +1451,7 @@ export class Session {
       drops,
       flows,
       splashNext: flights.map(() => 0),
+      slides,
     }
     if (hasShot) {
       this.shots.push({ playerId: shooterId, weapon })
@@ -1410,6 +1465,8 @@ export class Session {
     if (!pb) return
     pb.t += dt
     this.landFlights(pb)
+    // antes de entregar: el fall que llega al terminar un deslizamiento apoya al tanque en su piso nuevo
+    this.stepSlides(pb)
     while (pb.next < pb.timeline.length && pb.timeline[pb.next].t <= pb.t) {
       this.deliver(pb, pb.timeline[pb.next].event)
       pb.next++
@@ -1507,7 +1564,8 @@ export class Session {
         if (p) {
           // al abismo: la y la anima stepDrops; si no, el tanque se apoya en su piso nuevo
           if (!pb.drops.some((d) => d.playerId === event.playerId)) p.y = event.to
-          if (final) p.x = final.x
+          // la x de un tanque que se desliza la lleva su recorrido (el fall es vertical)
+          if (final && !pb.slides.some((sl) => sl.playerId === event.playerId)) p.x = final.x
         }
         break
       }
@@ -1640,6 +1698,48 @@ export class Session {
         d.follow = d.playerId === currentId || seen
       }
       if (d.follow) return { x: p.x, y: Math.min(p.y, h) }
+    }
+    return null
+  }
+
+  // ---------- deslizamiento (pulido v2) ----------
+
+  // Tanques que se deslizan: siguen su recorrido (un punto cada PATH_DT) y, si después caen, bajan con
+  // gravedad hasta el piso del fall (que se entrega al aterrizar).
+  private stepSlides(pb: Playback): void {
+    for (const sl of pb.slides) {
+      if (pb.t < sl.t0) continue
+      const p = pb.players.find((q) => q.id === sl.playerId)
+      if (!p || !p.alive || this.lost.has(p.id)) continue
+      const path = sl.event.path
+      if (!sl.done && path.length) {
+        const at = pb.t < sl.t1 ? samplePath(path, pb.t - sl.t0) : path[path.length - 1]
+        p.x = at.x
+        p.y = at.y
+        if (pb.t >= sl.t1) sl.done = true
+      }
+      const f = sl.fall
+      if (f && sl.done && pb.t >= f.t0 && pb.t <= f.t0 + f.dur) {
+        const k = clamp((pb.t - f.t0) / f.dur, 0, 1)
+        p.y = f.from + (f.to - f.from) * k * k
+      }
+    }
+  }
+
+  // Deslizamiento que la cámara acompaña ahora: el del tanque del turno o el de uno que estaba en pantalla
+  // cuando empezó. Sigue un momento (SLIDE_HOLD) después de que el tanque se asentó.
+  private slideFocus(pb: Playback): Vec2 | null {
+    const currentId = pb.before.players[pb.before.current]?.id
+    for (const sl of pb.slides) {
+      if (pb.t < sl.t0 || pb.t > sl.end + SLIDE_HOLD) continue
+      const p = pb.players.find((q) => q.id === sl.playerId)
+      if (!p || this.lost.has(p.id)) continue
+      if (sl.follow === null) {
+        const v = this.cam.view()
+        const seen = p.x >= v.x && p.x <= v.x + v.w && p.y >= v.y && p.y - TANK_H <= v.y + v.h
+        sl.follow = sl.playerId === currentId || seen
+      }
+      if (sl.follow) return { x: p.x, y: p.y - TANK_H / 2 }
     }
     return null
   }
@@ -1816,6 +1916,50 @@ function fallbackPlan(actor: Player): ShotPlan {
 }
 
 const BURN_REACH = 8
+
+// Pulido v2: arma los deslizamientos de un tiro (o de un paso) sobre la línea de tiempo, en el orden de
+// los eventos (antes de ordenarla). Cada slide arranca en su t, pero no antes de que termine el anterior
+// del mismo tanque, y dura (puntos − 1) · PATH_DT. Lo que le pasa a ese tanque después en la lista espera:
+// el primer fall va al final del recorrido (si es una caída común, más lo que tarda en caer: se entrega al
+// aterrizar); daño, escudo y muerte, al final del deslizamiento con su caída. Al abismo, el fall arranca
+// al final del recorrido y planDrops hace el resto. Se llama dos veces (como planDrops): los slides con t
+// todavía sin decidir (NaN, diferidos de la lava) se toman en la segunda pasada.
+function planSlides(timeline: TimedEvent[], h: number, slides: SlidePlay[]): void {
+  for (let i = 0; i < timeline.length; i++) {
+    const item = timeline[i]
+    const ev = item.event
+    if (ev.type !== 'slide' || !Number.isFinite(item.t) || slides.some((sl) => sl.event === ev)) continue
+    const id = ev.playerId
+    const prev = slides.reduce((m, sl) => (sl.playerId === id ? Math.max(m, sl.end) : m), -Infinity)
+    const t0 = Math.max(item.t, prev)
+    item.t = t0
+    const t1 = t0 + Math.max(0, ev.path.length - 1) * PATH_DT
+    const sl: SlidePlay = { event: ev, playerId: id, t0, t1, end: t1, done: false, fall: null, follow: null }
+    let fell = false
+    for (let j = i + 1; j < timeline.length; j++) {
+      const e = timeline[j]
+      const next = e.event
+      if (!('playerId' in next) || next.playerId !== id || !Number.isFinite(e.t)) continue
+      if (next.type === 'slide') break // el siguiente deslizamiento se encadena solo
+      if (next.type === 'fall' && !fell) {
+        fell = true
+        if (next.to > h || next.parachute || next.to <= next.from) {
+          // abismo (lo anima planDrops) o paracaídas (lo anima el renderer): arranca al final del recorrido
+          e.t = Math.max(e.t, t1)
+          sl.end = Math.max(sl.end, e.t)
+        } else {
+          const dur = slideFallDur(next.from, next.to)
+          e.t = Math.max(e.t, t1 + dur)
+          sl.fall = { from: next.from, to: next.to, t0: e.t - dur, dur }
+          sl.end = Math.max(sl.end, e.t)
+        }
+      } else if (AFTER_SLIDE.has(next.type)) {
+        e.t = Math.max(e.t, sl.end)
+      }
+    }
+    slides.push(sl)
+  }
+}
 
 // v4: arma los flujos de un tiro sobre la línea de tiempo (antes de ordenarla). Cada flow arranca en su
 // t, pero nunca antes del último impacto o quema que lo precede en la lista (el líquido corre por el
@@ -2016,6 +2160,16 @@ function splitTerrain(
   }
   sources.forEach((e, k) => reveal.set(e, Int32Array.from(buckets[k])))
   return { terrain, target, reveal, pending: changed.length }
+}
+
+// Comienzo de un recorrido (un punto cada PATH_DT): los puntos de los primeros dur segundos, con el
+// último interpolado justo en dur si el vuelo sigue más allá.
+function headOfPath(path: Vec2[], dur: number): Vec2[] {
+  const n = Math.floor(dur / PATH_DT + 1e-9)
+  if (path.length <= n + 1) return path
+  const head = path.slice(0, n + 1)
+  if (dur - n * PATH_DT > 1e-6) head.push(samplePath(path, dur))
+  return head
 }
 
 function samplePath(path: Vec2[], t: number): Vec2 {

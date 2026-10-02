@@ -263,6 +263,40 @@ export class Sfx {
     this.tone({ freq: 210, to: 190, dur: 0.12, type: 'square', gain: 0.04 * k, delay: 0.02 })
   }
 
+  // Pulido v2: tanque que se desliza dur segundos recorriendo dist px. Raspado de orugas contra la tierra
+  // (ruido de banda que sube y baja con traqueteo de eslabones) y piedritas que ruedan. Empujado por una
+  // explosión ('blast'), arranca con un golpe seco de chapa; por la pendiente ('slope'), con un crujido
+  // de tierra que cede y el raspado entra más suave.
+  slide(dur: number, dist: number, cause: 'blast' | 'slope'): void {
+    if (!this.ready) return
+    const r = Math.random
+    const d = Math.max(0.15, Math.min(3, dur))
+    const k = Math.max(0.4, Math.min(1, dist / 30))
+    if (cause === 'blast') {
+      this.tone({ freq: 140, to: 55, dur: 0.14, type: 'sine', gain: 0.55 * k })
+      this.noise({ dur: 0.07, type: 'bandpass', freq: 1200, to: 600, q: 1.1, gain: 0.32 * k })
+      this.tone({ freq: 320, to: 280, dur: 0.09, type: 'square', gain: 0.035 * k })
+    } else {
+      this.noise({ dur: 0.25, type: 'lowpass', freq: 500, to: 160, gain: 0.22 * k, attack: 0.03 })
+      for (let i = 0; i < 4; i++) this.noise({ dur: 0.02, type: 'bandpass', freq: 700 + r() * 600, q: 2, gain: 0.08 * k, delay: r() * 0.15 })
+    }
+    const start = cause === 'blast' ? 0.03 : 0.08
+    // raspado: tramos solapados de ruido de banda media, con rampa de entrada y de salida
+    const step = 0.12
+    for (let t = 0; t < d; t += step) {
+      const fade = Math.min(1, (d - t) / 0.2, (t + step) / 0.15)
+      this.noise({ dur: 0.2, type: 'bandpass', freq: 380 + r() * 260, q: 1.4, gain: 0.2 * k * fade, attack: 0.05, delay: start + t })
+      this.noise({ dur: 0.18, type: 'highpass', freq: 2200 + r() * 1200, gain: 0.035 * k * fade, attack: 0.05, delay: start + t })
+    }
+    // traqueteo de eslabones arrastrados y piedritas
+    const n = Math.round(d * 14)
+    for (let i = 0; i < n; i++) {
+      const at = start + (i / Math.max(1, n)) * d + r() * 0.03
+      this.tone({ freq: 150 + r() * 70, dur: 0.025, type: 'square', gain: 0.03 * k, delay: at })
+      if (r() < 0.35) this.noise({ dur: 0.015, type: 'highpass', freq: 3000 + r() * 2000, gain: 0.06 * k, delay: at + 0.01 })
+    }
+  }
+
   death(): void {
     if (!this.ready) return
     this.boom('bigfire', 26)
