@@ -3,7 +3,7 @@
 // Uso: node scripts/lookdev/v2-bigmap.mjs  → preview/v2-*.png
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   Canvas, rgb, c8, mix, mul, rnd, makeRand, bayer, noise1, OUT, FOG, FONT, gradient, pine, waterTower,
   stoneColor, brickColor, dirtColor, plankColor, slatColor, beamColor, postColor,
@@ -397,7 +397,8 @@ buildTerrain()
 paintTerrain()
 for (const p of players) p.ground = groundUnder(p.x)
 
-// utilería
+// Utilería fija de la escena (también la usa hud-proposals.mjs, que pone sus propios tanques).
+export function paintProps() {
 ladder(fg, 1261, PY - 2, PY + 55)
 crate(fg, 1338, PY + 45); crate(fg, 1350, PY + 45); crate(fg, 1344, PY + 33)
 fg.sprite(BARREL, 1364, PY + 45, BARREL_PAL)
@@ -407,7 +408,17 @@ crate(fg, 1440, PY - 12)
 flag(fg, 20, 330)
 windsock(fg, 300, surf[300], 4)
 fg.sprite(BARREL, 2208, surf[2208] - 12, BARREL_PAL)
+}
 
+// Exportado para otras pruebas de look (hud-proposals.mjs). Al importarse este módulo arma el
+// terreno y los fondos, pero lo de abajo (tanques, tiro, pantalla y PNG) corre solo si se lo
+// ejecuta directo.
+export { W, H, VW, bg, fg, F, solid, surf, light, tag, drawTank, groundUnder, paintLiquids, STRIPES8, ROOKIE_PAL, DESERT_PAL, AIR, WATER, LAVA, DIRT, STONE, BRICK, BEDROCK, LIQUID, craters }
+const isMain = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+if (isMain) main()
+
+function main() {
+paintProps()
 for (const p of players) drawTank(p)
 paintLiquids()
 
@@ -536,3 +547,4 @@ fs.writeFileSync(path.join(outDir, 'v2-world.png'), world.scaledPng(1))
 fs.writeFileSync(path.join(outDir, 'v2-screen-x2.png'), screen.scaledPng(2))
 fs.writeFileSync(path.join(outDir, 'v2-minimap-x5.png'), screen.scaledPng(5, MM.x - 34, 0, MM.w + 40, MM.h + 12))
 console.log('v2 bigmap ok')
+}
