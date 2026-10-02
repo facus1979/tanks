@@ -46,6 +46,10 @@ import {
   START_MONEY,
   biomeFor,
   owned,
+  roundSeed,
+  abyssAhead,
+  materialAt,
+  ABYSS_DROP,
   type Biome,
   type Command,
   type Difficulty,
@@ -64,9 +68,9 @@ import { propSupported, resolveBlast, blastFor } from '../src/sim/physics'
 import { lavaRisk } from '../src/sim/ai'
 import { LAVA_DELAY } from '../src/sim/game'
 import { skylineOf } from '../src/sim/ballistics'
-import { generate, padBounds } from '../src/sim/gen'
+import { generate, padBounds, SPAWN_PIT_GAP, type Generated } from '../src/sim/gen'
 import { Rng } from '../src/sim/rng'
-import { columnGround, createTerrain, deform, fillRect } from '../src/sim/terrain'
+import { cloneTerrain, columnGround, createTerrain, deform, fillRect } from '../src/sim/terrain'
 
 function mk(bots: number, difficulty: Difficulty, biome: MatchConfig['biome'], seed: number, rounds = 1, humans = 0, size?: MapSize): MatchConfig {
   const slots: SlotConfig[] = []
@@ -159,6 +163,122 @@ for (const biome of BIOMES) {
   check(hashState(a) !== hashState(b), 'seeds distintas dan el mismo mapa')
 }
 
+// ---------- 2b. v3: tramos, abismos y cuencas (Mediano y Grande) ----------
+let tramoMaps = 0
+const tramoKinds: Record<string, number> = {}
+const tramoSeqs = new Set<string>()
+let abyssCount = 0
+let basinCount = 0
+// Por qué un spawn en x no sirve (null si sirve): abismo a menos de SPAWN_PIT_GAP de la caja del
+// tanque o adentro de una cuenca (con 20 px de margen).
+function spawnProblem(g: Generated, x: number): string | null {
+  const t = g.terrain
+  for (let i = Math.max(0, x - TANK_HALF_W - SPAWN_PIT_GAP); i <= Math.min(t.w - 1, x + TANK_HALF_W + SPAWN_PIT_GAP); i++) if (t.pits?.[i]) return 'abismo cerca'
+  for (const q of g.basins ?? []) if (x + TANK_HALF_W + 20 > q.x0 && x - TANK_HALF_W - 20 < q.x1) return 'en una cuenca'
+  return null
+}
+function tramoChecks(g: Generated, biome: Biome, size: MapSize, seed: number): void {
+  const t = g.terrain
+  const W = t.w
+  const H = t.h
+  const tag = `${size}/${biome}/seed ${seed}`
+  const segs = g.segments ?? []
+  tramoMaps++
+  tramoSeqs.add(segs.map((q) => q.kind).join(','))
+  for (const q of segs) tramoKinds[`${biome}:${q.kind}`] = (tramoKinds[`${biome}:${q.kind}`] ?? 0) + 1
+  // los tramos cubren el mapa sin huecos ni solapes, con anchos variados
+  const sorted = segs.slice().sort((a, b) => a.x0 - b.x0)
+  check(sorted.length >= 4 && sorted[0].x0 === 0 && sorted[sorted.length - 1].x1 === W && sorted.every((q, i) => i === 0 || q.x0 === sorted[i - 1].x1), `tramos que no cubren el mapa ${tag}`)
+  check(new Set(segs.map((q) => q.x1 - q.x0)).size > 2, `tramos todos del mismo ancho ${tag}`)
+  // a lo sumo una meseta con búnker y torre cada 800 px, y al menos una
+  const full = segs.filter((q) => q.bunker && q.tower).map((q) => (q.x0 + q.x1) / 2)
+  check(full.length >= 1 && full.every((c, i) => full.every((d, j) => i === j || Math.abs(c - d) >= WORLD_W)), `mesetas con búnker y torre (${full.join(',')}) ${tag}`)
+  const top = (x: number) => {
+    const y = columnGround(t, x)
+    return { y, m: y < H ? t.front[y * W + x] : AIR }
+  }
+  const pitNear = (x: number, d: number) => {
+    for (let i = Math.max(0, x - d); i <= Math.min(W - 1, x + d); i++) if (t.pits?.[i]) return true
+    return false
+  }
+  // empalmes sin escalones: en la unión de dos tramos (x0 - 2 .. x0 + 1) la superficie no salta más
+  // de 12 px; y en todo el mapa tampoco, entre dos columnas vecinas con tierra arriba (fuera de
+  // estructuras, losas y ruinas, y de las paredes del abismo)
+  for (const q of sorted.slice(1)) {
+    let jump = 0
+    for (let x = q.x0 - 2; x < q.x0 + 1; x++) {
+      const a = top(x)
+      const b = top(x + 1)
+      if (a.m === DIRT && b.m === DIRT) jump = Math.max(jump, Math.abs(a.y - b.y))
+    }
+    check(jump <= 12, `empalme de tramos en x=${q.x0} con salto de ${jump} px ${tag}`)
+  }
+  let worst = 0
+  let worstX = -1
+  for (let x = 0; x + 1 < W; x++) {
+    if (pitNear(x, 18)) continue // las paredes del abismo serpentean hasta 16 px del fondo
+    const a = top(x)
+    const b = top(x + 1)
+    if (a.m !== DIRT || b.m !== DIRT) continue
+    const j = Math.abs(a.y - b.y)
+    if (j > worst) {
+      worst = j
+      worstX = x
+    }
+  }
+  check(worst <= 12, `escalón de ${worst} px en x=${worstX} ${tag}`)
+  // abismos: pits coherente con la grilla (sin roca madre, aire hasta abajo), uno por tramo de abismo
+  const runs: [number, number][] = []
+  for (let x = 0; x < W; x++) {
+    if (!t.pits?.[x]) continue
+    if (runs.length > 0 && runs[runs.length - 1][1] === x - 1) runs[runs.length - 1][1] = x
+    else runs.push([x, x])
+  }
+  const abysses = segs.filter((q) => q.kind === 'abyss')
+  abyssCount += runs.length
+  check(runs.length === abysses.length, `abismos: ${runs.length} tiras de pits para ${abysses.length} tramos ${tag}`)
+  for (const [a, b] of runs) {
+    check(b - a + 1 >= 44 && b - a + 1 <= 150, `abismo de ${b - a + 1} px ${tag}`)
+    check(abysses.some((q) => a >= q.x0 && b < q.x1), `abismo fuera de su tramo ${tag}`)
+    check(a > 40 && b < W - 40, `abismo contra el borde ${tag}`)
+  }
+  let bad = 0
+  for (let x = 0; x < W; x++) {
+    const open = t.front[(H - 1) * W + x] === AIR
+    if (!!t.pits?.[x] !== open) bad++
+    if (t.pits?.[x]) {
+      for (let y = 0; y < H; y++) if (t.front[y * W + x] === BEDROCK) bad++
+      for (let y = H - 12; y < H; y++) if (t.front[y * W + x] !== AIR) bad++
+      if (columnGround(t, x, H - 12) !== H || materialAt(t, x, H + 5) !== AIR || isSolid(t, x, H + 5)) bad++
+    } else if (!isSolid(t, x, H + 5) || materialAt(t, x, H + 5) !== BEDROCK) bad++
+  }
+  check(bad === 0, `abismo: pits incoherente con la grilla o con isSolid/materialAt (${bad}) ${tag}`)
+  // la pared de fondo se ve en el abismo: back de tierra en la parte honda
+  for (const [a, b] of runs) check(t.back[(H - 30) * W + ((a + b) >> 1)] !== AIR, `abismo sin pared de fondo ${tag}`)
+  // cuencas: una por tramo de lago o pozo de lava, secas y con el nivel a la altura del borde más bajo
+  const holes = segs.filter((q) => q.kind === 'lake' || q.kind === 'lavapit')
+  const basins = g.basins ?? []
+  basinCount += basins.length
+  check(basins.length === holes.length, `cuencas: ${basins.length} registradas para ${holes.length} tramos ${tag}`)
+  for (const q of basins) {
+    const seg = holes.find((h) => q.x0 >= h.x0 && q.x1 <= h.x1)
+    check(!!seg && (seg.kind === 'lake') === (q.kind === 'water'), `cuenca ${q.kind} fuera de su tramo ${tag}`)
+    check(q.x1 - q.x0 >= 60 && q.x1 - q.x0 <= 210, `cuenca de ${q.x1 - q.x0} px ${tag}`)
+    let deepest = 0
+    let dry = true
+    for (let x = q.x0; x < q.x1; x++) {
+      const y = columnGround(t, x)
+      deepest = Math.max(deepest, y - q.level)
+      if (y <= q.level) dry = false
+    }
+    check(dry && deepest >= 20 && deepest <= 70, `cuenca ${q.kind}: hondo ${deepest} px ${tag}`)
+    check(columnGround(t, q.x0 - 1) <= q.level && columnGround(t, q.x1) <= q.level, `cuenca ${q.kind}: el nivel pasa los bordes ${tag}`)
+  }
+  for (const x of g.spawns) check(spawnProblem(g, x) === null, `spawn en x=${x}: ${spawnProblem(g, x)} ${tag}`)
+  // la utilería que se apoya (barriles y cajas) no queda flotando sobre un abismo
+  for (const p of g.props) if (p.kind === 'barrel' || p.kind === 'crate') check(!pitNear(p.x + (p.w >> 1), p.w >> 1) || p.y + p.h < H - 12, `utilería sobre un abismo ${tag}`)
+}
+
 // ---------- 2. generación válida ----------
 const STRUCTURE = new Set([BRICK, WOOD, SLAT, BEAM, POST, METAL])
 const signature: Record<Biome, number[]> = { forest: [STONE, BRICK, SLAT], jungle: [STONE, SLAT], industrial: [BRICK, METAL] }
@@ -177,19 +297,18 @@ for (const size of MAP_SIZE_ORDER) for (const biome of BIOMES) {
       check(W === MAP_SIZES[size].w && H === MAP_SIZES[size].h && s.size === size, `tamaño del estado ${tag}`)
       check(t.w === W && t.h === H && t.front.length === W * H && t.back.length === W * H, `grilla mal dimensionada ${tag}`)
       check(s.players.length === bots + 1, `cantidad de jugadores ${tag}`)
+      // v3: roca madre abajo salvo en las columnas de abismo
       let bed = true
-      for (let x = 0; x < W; x++) if (t.front[(H - 1) * W + x] !== BEDROCK) bed = false
+      for (let x = 0; x < W; x++) if (!t.pits?.[x] && t.front[(H - 1) * W + x] !== BEDROCK) bed = false
       check(bed, `falta BEDROCK abajo ${tag}`)
+      check(size === 'small' ? t.pits === undefined : t.pits?.length === W, `Terrain.pits ${size === 'small' ? 'en Chico' : 'falta'} ${tag}`)
       for (const m of signature[biome]) check(count(s, m) > 200, `bioma sin material ${m} ${tag}`)
       if (bots === 3 && s.players[0].x > W / 2) mirrored++
-      // empalmes suaves: en la unión de dos tramos (x0 - 2 .. x0 + 1) la superficie no salta más de 12 px
-      // (el pilar y el dintel de las ruinas de la jungla, a 2 px de la unión o a 3 si está espejado, son a propósito)
-      if (size !== 'small') {
-        for (let x0 = WORLD_W; x0 < W; x0 += WORLD_W) {
-          let jump = 0
-          for (let x = x0 - 2; x < x0 + 1; x++) jump = Math.max(jump, Math.abs(columnGround(t, x) - columnGround(t, x + 1)))
-          check(jump <= 12, `empalme de tramos en x=${x0} con salto de ${jump} px ${tag}`)
-        }
+      // v3: los tramos (empalmes, abismos, cuencas y spawns: ver tramoChecks)
+      if (size !== 'small' && bots === 3) {
+        const g = generate(biome, new Rng(roundSeed(seed, 1)), s.players.length, W, H)
+        check(g.terrain.front.every((m, i) => m === t.front[i]) && g.spawns.every((x, i) => x === s.players[i].x), `generate no coincide con createMatch ${tag}`)
+        tramoChecks(g, biome, size, seed)
       }
       // spawns repartidos: ninguno a menos de un sexto del espacio parejo de otro
       if (size !== 'small') {
@@ -256,6 +375,7 @@ for (const size of MAP_SIZE_ORDER) {
       const xs = g.spawns.slice().sort((a, b) => a - b)
       check(xs.length === 8 && xs.every((x) => x >= 20 && x <= g.terrain.w - 20), `8 spawns dentro del mapa ${size}/${biome}/${seed}`)
       for (let i = 1; i < xs.length; i++) check(xs[i] - xs[i - 1] >= 60, `8 spawns: muy cerca (${xs.join(',')}) ${size}/${biome}/${seed}`)
+      for (const x of xs) check(spawnProblem(g, x) === null, `8 spawns: ${spawnProblem(g, x)} en x=${x} ${size}/${biome}/${seed}`)
     }
   }
 }
@@ -522,6 +642,8 @@ interface MatchStats {
   sudden: boolean // v2: arrancó la muerte súbita
   byLava: boolean // v2: la ronda terminó con una muerte por lava
   lavaMs: number // v2: peor tiempo de la IA con la lava activa
+  abyss: number // v3: muertes por abismo
+  walked: number // v3: muertes por abismo de una IA que caminó hasta ahí (tiene que ser 0)
 }
 function match(bots: number, seed: number, size: MapSize = 'small'): MatchStats {
   const biome = BIOMES[seed % BIOMES.length]
@@ -529,10 +651,17 @@ function match(bots: number, seed: number, size: MapSize = 'small'): MatchStats 
   let shots = 0
   let byLava = false
   let lavaMs = 0
+  let abyss = 0
+  let walked = 0
   const weapons: Record<string, number> = {}
   while (s.phase === 'aiming' && shots < 120) {
     const lava = s.lava !== null
     const r = aiTurn(s, 'normal')
+    for (const e of r.events) {
+      if (e.type !== 'death' || e.cause !== 'abyss') continue
+      abyss++
+      if (!r.flights) walked++
+    }
     if (lava) lavaMs = Math.max(lavaMs, r.ms)
     if (r.flights) {
       shots++
@@ -541,7 +670,7 @@ function match(bots: number, seed: number, size: MapSize = 'small'): MatchStats 
     if (r.state.phase !== 'aiming') byLava = lavaKill(r.events)
     s = r.state
   }
-  return { shots, turns: s.turn, winner: s.roundWinnerId, weapons, sudden: s.lava !== null, byLava, lavaMs }
+  return { shots, turns: s.turn, winner: s.roundWinnerId, weapons, sudden: s.lava !== null, byLava, lavaMs, abyss, walked }
 }
 // Chico con 20 partidas (el balance de v1); Mediano y Grande con 10 (con --balance, 20).
 {
@@ -563,6 +692,10 @@ function match(bots: number, seed: number, size: MapSize = 'small'): MatchStats 
         `balance ${size} ${bots + 1} tanques: ${avg.toFixed(1)} tiros/partida (min ${Math.min(...shots)}, max ${Math.max(...shots)}, ${games} partidas), empates ${res.filter((r) => r.winner === null).length}, armas ${JSON.stringify(used)}`,
       )
       console.log(`  muerte súbita en ${sudden}/${games} rondas, terminan por la lava ${byLava}/${games}, IA con lava peor caso ${lavaMs.toFixed(0)} ms`)
+      const abyss = res.reduce((a, r) => a + r.abyss, 0)
+      const walked = res.reduce((a, r) => a + r.walked, 0)
+      console.log(`  muertes por abismo: ${abyss} (${walked} de una IA caminando)`)
+      check(walked === 0, `la IA caminó al abismo ${walked} veces (${size})`)
       check(shots.every((n) => n < 120), `partida de ${bots + 1} sin terminar (${size})`)
       check(lavaMs < AI_BUDGET_MS, `la IA con lava tardó ${lavaMs.toFixed(0)} ms (${size})`)
       // v2: con la muerte súbita ningún tamaño se estira (objetivo ~15 con 2 tanques y ~25 con 4)
@@ -1198,6 +1331,265 @@ function lavaKill(events: GameEvent[]): boolean {
       check(back.lava === a.s.lava && back.calm === a.s.calm && netHash(back) === netHash(a.s), `ronda pacífica ${size}: snapshot conserva lava y calma`)
       if (bots === 3) console.log(`ronda pacífica ${size} ${bots + 1}: ${a.turns} turnos, lava en y ${a.s.lava}`)
     }
+  }
+}
+
+// ---------- 14. v3: reglas del abismo, red y determinismo con pits ----------
+{
+  console.log(`tramos: ${tramoMaps} mapas, ${tramoSeqs.size} secuencias distintas, ${abyssCount} abismos, ${basinCount} cuencas`)
+  console.log(`tramos por bioma: ${JSON.stringify(tramoKinds)}`)
+  check(tramoSeqs.size >= tramoMaps * 0.8, `tramos: mapas repetidos (${tramoSeqs.size}/${tramoMaps} secuencias distintas)`)
+  for (const biome of BIOMES) {
+    const k = (kind: string) => tramoKinds[`${biome}:${kind}`] ?? 0
+    // sabor: bosque con montañas y lagos, jungla con abismos y ruinas, industrial con lava y pozos de mina
+    if (biome === 'forest') check(k('mountain') > 0 && k('lake') > 0 && k('lavapit') === 0, `sabor del bosque ${JSON.stringify(tramoKinds)}`)
+    if (biome === 'jungle') check(k('abyss') > 0 && k('hills') > 0 && k('lake') > 0 && k('lavapit') === 0, `sabor de la jungla`)
+    if (biome === 'industrial') check(k('lavapit') > 0 && k('abyss') > 0, `sabor industrial`)
+  }
+}
+// Mapa de prueba con un abismo: llano de tierra en y 300 (Mediano, 1600 px), abismo en [700, 779]
+// con un puente de tierra de 8 px en y 300..307; jugador 0 en x 400, jugador 1 sobre el puente.
+const PIT0 = 700
+const PIT1 = 779
+function pitMap(): GameState {
+  const s = cloneState(createMatch(mk(1, 'normal', 'forest', 4, 1, 0, 'medium')))
+  const t = s.terrain
+  t.front.fill(AIR)
+  t.back.fill(AIR)
+  fillRect(t, 0, 300, t.w - 1, t.h - 1, DIRT, 'both')
+  fillRect(t, 0, t.h - 3, t.w - 1, t.h - 1, BEDROCK, 'both')
+  t.pits = new Uint8Array(t.w)
+  fillRect(t, PIT0, 308, PIT1, t.h - 1, AIR)
+  for (let x = PIT0; x <= PIT1; x++) t.pits[x] = 1
+  s.props = []
+  s.players[0].x = 400
+  s.players[1].x = 740
+  for (const p of s.players) p.y = 300
+  for (const p of s.players) for (const id of WEAPON_ORDER) p.ammo[id] = WEAPONS[id].ammo
+  s.current = 0
+  return s
+}
+type FallEv = Extract<GameEvent, { type: 'fall' }>
+type DeathEv = Extract<GameEvent, { type: 'death' }>
+{
+  // terreno: debajo del mapa en un abismo no hay nada; en el resto, roca madre
+  const s = pitMap()
+  const t = s.terrain
+  check(!isSolid(t, 740, t.h + 2) && materialAt(t, 740, t.h + 2) === AIR && isSolid(t, 400, t.h + 2) && materialAt(t, 400, t.h + 2) === BEDROCK, 'abismo: isSolid/materialAt debajo del mapa')
+  check(columnGround(t, 740, 320) === t.h && groundAt(t, 740, TANK_HALF_W, 320) === t.h, 'abismo: columnGround/groundAt sin piso = h')
+  const c = cloneTerrain(t)
+  check(!!c.pits && c.pits !== t.pits && c.pits.every((v, i) => v === t.pits![i]), 'cloneTerrain copia pits')
+  const before = t.pits!.slice()
+  deform(t, 740, 300, 40, 'destroy')
+  deform(t, 740, 300, 40, 'build')
+  check(t.pits!.every((v, i) => v === before[i]), 'deform no toca pits')
+  // red: pits viaja en el snapshot y entra en el hash
+  const s2 = pitMap()
+  const back = decodeState(encodeState(s2))
+  check(!!back.terrain.pits && back.terrain.pits.length === s2.width && back.terrain.pits.every((v, i) => v === s2.terrain.pits![i]), 'snapshot: pits viaja')
+  check(netHash(back) === netHash(s2), 'snapshot con pits: mismo hash')
+  const s3 = cloneState(s2)
+  s3.terrain.pits![10] = 1
+  check(netHash(s3) !== netHash(s2), 'hashState: cambia si cambia pits')
+  const small = createMatch(mk(1, 'normal', 'forest', 4))
+  check(decodeState(encodeState(small)).terrain.pits === undefined && netHash(decodeState(encodeState(small))) === netHash(small), 'snapshot Chico sin pits')
+  const real = createMatch(mk(3, 'normal', 'jungle', 7, 1, 0, 'large'))
+  const rb = decodeState(encodeState(real))
+  check(netHash(rb) === netHash(real) && !!rb.terrain.pits, 'snapshot de un mapa Grande con pits')
+}
+{
+  // caída al abismo: se va el puente bajo el tanque → fall con to > h y death 'abyss', sin daño;
+  // el paracaídas no lo salva y no se gasta
+  const s = pitMap()
+  const p = s.players[1]
+  p.items.parachute = 1
+  fillRect(s.terrain, PIT0, 300, PIT1, 307, AIR)
+  const events = resolveBlast(s, blastFor('normal', 5, 5, 1))
+  const fall = events.find((e): e is FallEv => e.type === 'fall' && e.playerId === 1)
+  const death = events.find((e): e is DeathEv => e.type === 'death' && e.playerId === 1)
+  check(!!fall && fall.to === s.height + ABYSS_DROP && fall.to > s.height && !fall.parachute, `abismo: evento fall hasta abajo del mapa (${JSON.stringify(fall)})`)
+  check(!!death && death.cause === 'abyss', 'abismo: death con cause abyss')
+  check(!events.some((e) => e.type === 'damage' && e.playerId === 1) && !p.alive && p.hp === 0, 'abismo: sin daño de caída; muerto con vida 0')
+  check(p.items.parachute === 1, 'abismo: el paracaídas no se consume')
+  check(events.indexOf(fall!) < events.indexOf(death!), 'abismo: fall antes que death')
+  // un tanque muerto que ya cayó no vuelve a caer ni a morir
+  const again = resolveBlast(s, blastFor('normal', 5, 5, 1))
+  check(!again.some((e) => (e.type === 'fall' || e.type === 'death') && e.playerId === 1), 'abismo: el que cayó no genera más eventos')
+  // un tanque con la mayor parte afuera del borde se sostiene (3 columnas alcanzan) y no cae
+  const h = pitMap()
+  fillRect(h.terrain, PIT0, 300, PIT1, 307, AIR)
+  h.players[1].x = PIT0 - TANK_HALF_W + 4
+  const ev = resolveBlast(h, blastFor('normal', 5, 5, 1))
+  check(h.players[1].alive && !ev.some((e) => e.type === 'death'), 'abismo: colgando del borde con apoyo no cae')
+}
+{
+  // un tiro de otro que lo tira al abismo: cuenta como kill, sin plata por daño (solo por lo que pegó antes)
+  let found: StepResult | null = null
+  for (let power = 30; power <= 100 && !found; power += 0.5) {
+    const s = pitMap()
+    const r = shoot(s, 'nuke', 45, power)
+    if (r.events.some((e) => e.type === 'death' && e.playerId === 1 && e.cause === 'abyss')) found = r
+  }
+  check(!!found, 'abismo: hay un tiro que tira al rival al abismo')
+  if (found) {
+    const s = found.state
+    const hit = found.events.filter((e): e is DamageEv => e.type === 'damage' && e.playerId === 1).reduce((a, e) => a + e.amount, 0)
+    check(s.players[0].kills === 1, `abismo: el que lo tiró suma kill (${s.players[0].kills})`)
+    check(s.phase === 'roundover' && s.roundWinnerId === 0, 'abismo: la ronda termina con el ganador')
+    const expect = EARN.kill + hit * EARN.perDamage + EARN.survive + EARN.roundWin
+    check(s.earnings[0] === expect, `abismo: plata del que lo tiró ${s.earnings[0]} (esperaba ${expect})`)
+    check(s.earnings[1] === 0, `abismo: el que cayó no cobra (${s.earnings[1]})`)
+  }
+  // el que se tira solo (su tiro le saca el piso) no suma kill ni pierde plata por autodaño
+  let self: StepResult | null = null
+  for (let power = 1; power <= 40 && !self; power += 1) {
+    const s = pitMap()
+    s.current = 1
+    const r = shoot(s, 'nuke', 90, power)
+    if (r.events.some((e) => e.type === 'death' && e.playerId === 1 && e.cause === 'abyss')) self = r
+  }
+  check(!!self, 'abismo: hay un tiro que tira al propio tanque')
+  if (self) check(self.state.players[1].kills === 0 && self.state.players[0].kills === 0, 'abismo: tirarse solo no es kill')
+}
+{
+  // proyectil que cae por un abismo: 'out', sin explosión; la utilería que cae ahí se destruye
+  const s = pitMap()
+  fillRect(s.terrain, PIT0, 300, PIT1, 307, AIR)
+  s.players[1].x = 1200
+  const f = fly({ terrain: s.terrain, players: s.players, props: [], ownerId: 0, angle: 0, power: 0, wind: 0, origin: { x: 740, y: 200 }, velocity: { x: 0, y: 20 } })
+  check(f.impact.kind === 'out' && f.impact.y > s.height && f.time < 3, `abismo: el proyectil sale por abajo (${f.impact.kind} y ${f.impact.y.toFixed(0)} en ${f.time.toFixed(2)} s)`)
+  const sky = skylineOf(s.terrain, s.players, [])
+  const f2 = fly({ terrain: s.terrain, players: s.players, props: [], ownerId: 0, angle: 0, power: 0, wind: 0, origin: { x: 740, y: 200 }, velocity: { x: 0, y: 20 }, skyline: sky })
+  check(JSON.stringify(f) === JSON.stringify(f2), 'abismo: skyline no cambia el vuelo')
+  const r = shoot(s, 'normal', 90, 0)
+  check(!!r.flights && r.flights[0].impact.kind !== 'out', 'abismo: el resto del mapa sigue con fondo')
+  const p = pitMap()
+  p.props = [
+    { id: 0, kind: 'barrel', x: 735, y: 288, w: 10, h: 12, alive: true },
+    { id: 1, kind: 'crate', x: 750, y: 288, w: 12, h: 12, alive: true },
+  ]
+  p.players[1].x = 1200
+  fillRect(p.terrain, PIT0, 300, PIT1, 307, AIR)
+  const ev = resolveBlast(p, blastFor('normal', 5, 5, 1))
+  check(p.props.every((q) => !q.alive) && ev.filter((e) => e.type === 'prop' && e.destroyed).length === 2, 'abismo: la utilería que cae se destruye')
+  // rodadora que cae al abismo: 'out', sin explosión
+  let rolled = false
+  for (let power = 10; power <= 70 && !rolled; power += 1) {
+    const q = pitMap()
+    fillRect(q.terrain, PIT0, 300, PIT1, 307, AIR)
+    q.players[1].x = 1400
+    for (let x = 500; x < PIT0; x++) fillRect(q.terrain, x, 300 - Math.floor((PIT0 - x) / 4), x, 299, DIRT, 'both')
+    const rr = shoot(q, 'roller', 60, power)
+    if (rr.flights!.length === 2 && rr.flights![0].impact.kind === 'terrain' && rr.flights![1].impact.kind === 'out') {
+      rolled = true
+      check(impactsOf(rr).length === 0, 'abismo: la rodadora que cae no explota')
+    }
+  }
+  check(rolled, 'abismo: hay una rodadora que rueda al abismo')
+}
+{
+  // moverse: abyssAhead avisa antes del paso que cae; el que sigue a propósito cae y termina el turno
+  const s = pitMap()
+  fillRect(s.terrain, PIT0, 300, PIT1, 307, AIR)
+  s.players[1].x = 1200
+  s.players[0].x = PIT0 - 30
+  s.players[0].fuel = 200
+  let m = s
+  let warned = -1
+  const ev: GameEvent[] = []
+  for (let i = 0; i < 80 && m.current === 0; i++) {
+    if (warned < 0 && abyssAhead(m, 1)) warned = m.players[0].x
+    const r = applyCommand(m, { type: 'move', playerId: 0, dir: 1 })
+    ev.push(...r.events)
+    m = r.state
+  }
+  const death = ev.find((e): e is DeathEv => e.type === 'death' && e.playerId === 0)
+  check(warned > 0 && !!death && death.cause === 'abyss', `move: abyssAhead avisa (x ${warned}) y el que sigue cae al abismo`)
+  check(ev.some((e) => e.type === 'fall' && e.playerId === 0 && e.to > s.height) && !ev.some((e) => e.type === 'damage'), 'move: caída al abismo sin daño')
+  check(m.phase === 'roundover' && m.roundWinnerId === 1 && m.players[1].kills === 0, 'move: el que se tiró pierde la ronda sin kill de nadie')
+  check(!abyssAhead(pitMap(), 1) && abyssAhead(s, 1, 50), 'abyssAhead: lejos no avisa, con margen sí')
+  // la IA nunca camina hacia un abismo: con el rival del otro lado y tiros bloqueados, igual no se mete
+  const a = pitMap()
+  fillRect(a.terrain, PIT0, 300, PIT1, 307, AIR)
+  a.players[0].x = PIT0 - 40
+  a.players[1].x = PIT1 + 60
+  fillRect(a.terrain, PIT0 - 90, 230, PIT0 - 70, 299, STONE) // pared detrás: que quiera ir para adelante
+  let falls = 0
+  for (let i = 0; i < 6; i++) {
+    a.wind = (i * 7) % 21 - 10
+    const plan = chooseShot(a, 'easy')
+    let q = a
+    for (let k = 0; k < Math.abs(plan.move ?? 0); k++) q = applyCommand(q, { type: 'move', playerId: 0, dir: (plan.move ?? 0) > 0 ? 1 : -1 }).state
+    if (!q.players[0].alive) falls++
+  }
+  check(falls === 0, `IA: no camina al abismo (${falls}/6)`)
+  // la IA considera tirar al rival al abismo: parado en un puente de 4 px, con 100 de vida y solo
+  // normal y pesada (no lo mata a balazos), el tiro que sirve es el que rompe el puente
+  let pushed = 0
+  for (let i = 0; i < 6; i++) {
+    const q = pitMap()
+    fillRect(q.terrain, PIT0, 304, PIT1, 307, AIR)
+    q.wind = (i * 5) % 13 - 6
+    for (const id of WEAPON_ORDER) q.players[0].ammo[id] = id === 'normal' ? 99 : id === 'heavy' ? 2 : 0
+    q.players[1].hp = 100
+    // sin el error de puntería (random fijo en 0,5): lo que se mide es si elige ese tiro
+    const plan = chooseShot(q, 'hard', () => 0.5)
+    const r = shoot(q, plan.weapon, plan.angle, plan.power)
+    if (r.events.some((e) => e.type === 'death' && e.playerId === 1 && e.cause === 'abyss')) pushed++
+  }
+  console.log(`IA: elige tirar al rival al abismo ${pushed}/6`)
+  check(pushed >= 3, `IA: no aprovecha el abismo (${pushed}/6)`)
+}
+{
+  // la IA apunta por encima de una montaña alta (cima en y 115) con el rival del otro lado
+  let hits = 0
+  for (let i = 0; i < 6; i++) {
+    const s = cloneState(createMatch(mk(1, 'normal', 'forest', 4, 1, 0, 'medium')))
+    const t = s.terrain
+    t.front.fill(AIR)
+    t.back.fill(AIR)
+    t.pits = new Uint8Array(t.w)
+    for (let x = 0; x < t.w; x++) fillRect(t, x, Math.round(360 - 245 * Math.exp(-(((x - 800) / 110) ** 2))), x, t.h - 1, DIRT, 'both')
+    fillRect(t, 0, t.h - 3, t.w - 1, t.h - 1, BEDROCK, 'both')
+    s.props = []
+    s.players[0].x = 520
+    s.players[1].x = 1080
+    for (const p of s.players) p.y = columnGround(t, p.x)
+    s.current = 0
+    s.wind = (i * 7) % 21 - 10
+    const r = aiTurn(s, 'hard')
+    if (r.events.some((e) => e.type === 'damage' && e.playerId === 1)) hits++
+  }
+  console.log(`IA: por encima de la montaña pega ${hits}/6`)
+  check(hits >= 4, `IA: no pasa la montaña alta (${hits}/6)`)
+}
+{
+  // determinismo y réplicas en mapas con abismos: el log de una partida Grande aplicado en otra réplica
+  for (const size of ['medium', 'large'] as MapSize[]) {
+    const config: MatchConfig = { slots: [{ kind: 'human' }, { kind: 'ai' }, { kind: 'ai' }], rounds: 1, difficulty: 'normal', biome: 'jungle', seed: 17, size }
+    let a = createMatch(config)
+    let b = decodeState(encodeState(a))
+    let steps = 0
+    let diverged = 0
+    let guard = 0
+    while (a.phase === 'aiming' && guard++ < 60) {
+      const p = a.players[a.current]
+      const plan = chooseShot(a, 'normal')
+      const cmds: Command[] = []
+      for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item })
+      for (let i = 0; i < Math.abs(plan.move ?? 0); i++) cmds.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
+      cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+      for (const cmd of cmds) {
+        a = applyCommand(a, cmd).state
+        b = applyCommand(b, cmd).state
+        steps++
+        if (netHash(a) !== netHash(b)) diverged++
+      }
+      if (steps > 40 && steps < 60) b = decodeState(encodeState(b)) // snapshot a mitad de partida
+    }
+    check(diverged === 0 && netHash(a) === netHash(b), `réplicas ${size} con pits: ${diverged} pasos distintos`)
+    const x = createMatch(config)
+    check(netHash(x) === netHash(createMatch(config)), `createMatch ${size} determinista con pits`)
   }
 }
 

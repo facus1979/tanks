@@ -1,6 +1,6 @@
 import { PATH_DT } from './ballistics'
 import { generate } from './gen'
-import { hurt, tankFloor } from './physics'
+import { dropIntoAbyss, hurt, overAbyss, tankFloor } from './physics'
 import { resolveShot } from './weapons'
 import { Rng, hashSeed, irange } from './rng'
 import { aiShop, buyEntry, sellEntry, shopEntry } from './shop'
@@ -275,6 +275,12 @@ function move(state: GameState, dir: -1 | 1): StepResult {
   const events: GameEvent[] = []
   p.x = nx
   p.fuel -= 1
+  if (overAbyss(t, nx, floor)) {
+    // v3: caminó hasta el abismo y se cayó (la sesión frena antes al que no lo hace a propósito,
+    // ver abyssAhead; la IA nunca camina hacia un abismo). Termina el turno como una muerte por caída.
+    dropIntoAbyss(t, p, events)
+    return endTurn(next, events, [], true)
+  }
   if (floor > p.y + MAX_CLIMB) {
     const drop = floor - p.y
     const amount = Math.min(p.hp, Math.round(Math.max(0, drop - 12) * FALL_DAMAGE))
@@ -308,13 +314,17 @@ function fire(state: GameState, actor: Player): StepResult {
   const weapon = shooter.weapon
   const before = next.players.map((p) => ({ hp: p.hp + p.shield, alive: p.alive }))
   const { flights, events } = resolveShot(next, shooter, weapon)
+  // v3: los que cayeron al abismo con este tiro. La vida que perdieron no es daño que se cobre;
+  // si los tiró otro, igual cuenta como kill (y como daño para la calma de la muerte súbita).
+  const abyss = new Set<number>()
+  for (const e of events) if (e.type === 'death' && e.cause === 'abyss') abyss.add(e.playerId)
   // plata de la ronda: daño a otros, kills y autodaño
   let earned = 0
-  let damaged = false
+  let damaged = abyss.size > 0
   for (const p of next.players) {
     const b = before[p.id]
     if (!b.alive) continue
-    const dmg = b.hp - (p.hp + p.shield)
+    const dmg = abyss.has(p.id) ? hitBeforeFall(events, p.id) : b.hp - (p.hp + p.shield)
     if (dmg > 0) damaged = true // el escudo cuenta: lo que absorbió también es daño
     if (p.id === shooter.id) earned += dmg * EARN.selfDamage
     else {
@@ -331,6 +341,32 @@ function fire(state: GameState, actor: Player): StepResult {
     if (fallback) shooter.weapon = fallback
   }
   return { ...endTurn(next, events, flights, damaged), flights }
+}
+
+// v3: daño (escudo incluido) que recibió un tanque en estos eventos antes de caer al abismo.
+function hitBeforeFall(events: GameEvent[], id: number): number {
+  let n = 0
+  for (const e of events) {
+    if (e.type === 'damage' && e.playerId === id) n += e.amount
+    else if (e.type === 'shield' && e.playerId === id) n += e.absorbed
+  }
+  return n
+}
+
+// v3: si el tanque del turno avanza `steps` pasos de 1 px hacia dir (sin mirar escalones ni
+// combustible), ¿alguno lo deja sin piso sobre un abismo? La sesión lo usa para frenar al que
+// camina hacia el borde manteniendo la tecla (tiene que soltar y volver a apretar para tirarse);
+// la IA, para no acercarse nunca.
+export function abyssAhead(state: GameState, dir: -1 | 1, steps = 1): boolean {
+  const p = state.players[state.current]
+  const t = state.terrain
+  if (!p || !t.pits) return false
+  for (let k = 1; k <= steps; k++) {
+    const nx = p.x + dir * k
+    if (nx < TANK_HALF_W || nx > state.width - TANK_HALF_W) return false
+    if (overAbyss(t, nx, tankFloor(t, nx, p.y - MAX_CLIMB))) return true
+  }
+  return false
 }
 
 // ---------- muerte súbita (v2) ----------
