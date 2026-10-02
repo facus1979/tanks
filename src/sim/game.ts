@@ -1,7 +1,7 @@
 import { PATH_DT } from './ballistics'
 import { generate } from './gen'
 import { flowLiquids } from './flow'
-import { hurt, inLava, settleAfterFlow, settleTank, tankFloor } from './physics'
+import { engulfedInLava, hurt, inLava, kill, settleAfterFlow, settleTank, tankFloor } from './physics'
 import { SLIDE_MAX, slopeAt, stepTank } from './slide'
 import { resolveShot } from './weapons'
 import { Rng, hashSeed, irange } from './rng'
@@ -22,6 +22,7 @@ import {
   START_MONEY,
   SUDDEN_DEATH_CALM,
   TANK_COLORS,
+  TANK_H,
   TANK_W,
   WEAPONS,
   WEAPON_ORDER,
@@ -440,13 +441,16 @@ function riseLava(state: GameState, events: GameEvent[]): void {
 
 // Al empezar el turno, LAVA_DAMAGE a cada tanque vivo con el piso por debajo de la banda de muerte
 // súbita (si empezó) o (v4) con lava de la grilla bajo o dentro de su caja. Si las dos aplican, una vez.
+// Si la lava lo cubre entero (la superficie de la banda queda por encima de la caja del tanque, o hay
+// lava de la grilla en su fila de arriba), muere en el acto, con escudo o sin él.
 function burnInLava(state: GameState, events: GameEvent[], t: number): void {
   const band = suddenDeath(state) ? state.lava : null
   for (const p of state.players) {
     if (!p.alive) continue
     if (!((band !== null && p.y > band) || inLava(state.terrain, p))) continue
     const mark = events.length
-    hurt(p, LAVA_DAMAGE, events)
+    if ((band !== null && band <= p.y - TANK_H) || engulfedInLava(state.terrain, p)) kill(p, events, 'lava')
+    else hurt(p, LAVA_DAMAGE, events)
     for (let i = mark; i < events.length; i++) {
       const e = events[i]
       if (e.type === 'damage') {

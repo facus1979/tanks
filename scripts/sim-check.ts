@@ -1278,6 +1278,15 @@ function lavaKill(events: GameEvent[]): boolean {
   const s5 = cloneState(s)
   s5.players[1].y = 300
   check(!miss(s5).events.some((e) => e.type === 'damage'), 'lava: arriba de la superficie no quema')
+  // cubierto entero (la superficie queda por encima de la caja): muere en el acto, aunque tenga vida y escudo
+  const s6 = cloneState(s)
+  s6.lava = 430 // sube a 412; la caja del tanque 1 va de 420 a 440
+  s6.players[1].hp = 100
+  s6.players[1].shield = SHIELD_HP
+  const r6 = miss(s6)
+  const death6 = r6.events.find((e): e is Extract<GameEvent, { type: 'death' }> => e.type === 'death' && e.playerId === 1)
+  check(!r6.state.players[1].alive && death6?.cause === 'lava' && !r6.events.some((e) => e.type === 'shield' && e.playerId === 1), 'lava: cubierto entero muere en el acto, sin escudo que lo salve')
+  check(r6.state.phase === 'roundover' && r6.state.roundWinnerId === 0 && r6.state.players[0].kills === 0, 'lava: la muerte por quedar cubierto termina la ronda y no es kill')
 }
 {
   // proyectil derretido: lava por encima del suelo (300); los tanques asoman (boca a ~270)
@@ -1886,8 +1895,17 @@ function breakWall(m: number): { before: GameState; r: StepResult } {
   l.players[1].x = 650
   l.players[1].y = 340
   check(inLava(l.terrain, l.players[1]), 'lava: inLava con el tanque en la pileta')
+  // en el fondo de la pileta la lava lo tapa entero: muere en el acto
   const r = shoot(l, 'normal', 150, 100)
-  const dmg = r.events.filter((e) => e.type === 'damage' && e.playerId === 1)
+  check(!r.state.players[1].alive && r.events.some((e) => e.type === 'death' && e.playerId === 1 && e.cause === 'lava'), 'lava: tapado entero en la pileta muere en el acto')
+  // hundido a medias (la superficie le llega a las orugas): LAVA_DAMAGE por turno
+  const half = poolMap(LAVA)
+  let top = half.terrain.h
+  for (let y = 0; y < half.terrain.h; y++) if (half.terrain.front[y * half.terrain.w + 650] === LAVA) { top = y; break }
+  half.players[1].x = 650
+  half.players[1].y = top + 6
+  const rh = shoot(half, 'normal', 150, 100)
+  const dmg = rh.events.filter((e) => e.type === 'damage' && e.playerId === 1)
   check(dmg.length === 1 && (dmg[0] as { cause?: string }).cause === 'lava' && (dmg[0] as { amount: number }).amount === LAVA_DAMAGE, `lava: daño por turno (${JSON.stringify(dmg)})`)
   // con la muerte súbita también encima, una sola vez
   const both = poolMap(LAVA)

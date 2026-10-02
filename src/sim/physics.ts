@@ -203,6 +203,22 @@ export function inLava(t: Terrain, p: { x: number; y: number }): boolean {
   return hasLiquid(t, LAVA, cx - TANK_HALF_W, p.y - TANK_H, cx + TANK_HALF_W, p.y + 1)
 }
 
+// La lava de la grilla tapa al tanque entero: hay lava en la fila de arriba de su caja, en el centro.
+export function engulfedInLava(t: Terrain, p: { x: number; y: number }): boolean {
+  return hasLiquid(t, LAVA, Math.round(p.x) - 2, p.y - TANK_H, Math.round(p.x) + 2, p.y - TANK_H + 1)
+}
+
+// Muerte en el acto (lava que lo cubre entero): el escudo no la para.
+export function kill(p: Player, events: GameEvent[], cause: 'lava' | 'abyss'): void {
+  if (!p.alive) return
+  const amount = p.hp
+  p.hp = 0
+  p.shield = 0
+  p.alive = false
+  if (amount > 0) events.push({ type: 'damage', playerId: p.id, amount, hp: 0, cause: cause === 'lava' ? 'lava' : undefined })
+  events.push({ type: 'death', playerId: p.id, cause })
+}
+
 function cover(t: Terrain, p: Player): number {
   return solidRunUp(t, p.x, p.y - TANK_H, 64)
 }
