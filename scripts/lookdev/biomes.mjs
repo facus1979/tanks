@@ -1,6 +1,15 @@
 // Fondos por bioma en capas 800×450 con alfa, y paleta de terreno por bioma.
 // forest reproduce la referencia aprobada; jungle e industrial siguen la misma receta (capas + niebla).
-import { Canvas, mix, mul, rnd, hash, bayer, noise1, gradient, makeRand, FOG, paintForestBackground, waterTower } from './pixel.mjs'
+//
+// Repetibles a lo ancho (v2): el renderer repite cada capa alternando copia y copia espejada, así que cada
+// borde se junta consigo mismo en espejo (x = 800 en la unión 800 y x = 0 en la unión 1600). Reglas:
+// - nada cortado por un borde: o entra entero, o queda centrado justo en el borde y el espejo lo completa
+//   (edgeSafe); lo que cruza el borde centrado tiene que ser simétrico (sin inclinación ni humo de costado);
+// - las cosas grandes y reconocibles van centradas en un borde (aparecen una vez cada 1600 px) o donde su
+//   reflejo no entra en cámara con zoom 1: rango visible de cada capa en Grande, sin zoom, x ∈ [0, 800 + 1600·f]
+//   (capa 1: 1260, 2: 1480, 3: 1700, 4: 1920); en Chico alejado se ven hasta ~150 px a la izquierda de 0;
+// - nada grande pegado a un borde (a menos de ~80 px) que forme un par simétrico en la unión.
+import { Canvas, mix, mul, rnd, hash, bayer, noise1, gradient, makeRand, FOG, paintForestBackground, waterTower, edgeSafe } from './pixel.mjs'
 
 export const BG_W = 800
 export const BG_H = 450
@@ -83,7 +92,7 @@ function cloud(cv, cx, cy, w, pal, s) {
 export function forest() {
   const T = layeredTarget(5)
   const R = makeRand(42)
-  paintForestBackground(T, R.next)
+  paintForestBackground(T, R.next, { tileable: true })
   return T.layers
 }
 
@@ -328,6 +337,19 @@ function kapok(cv, x, base, h, pal, s) {
   crown(cv, x, base - h - 8, 20, pal, s + 2)
 }
 
+// Palmera repetible: alcance de las hojas (frondas + hojuelas) para una palmera de alto h y escala `scale`.
+// Si la palmera asoma por un borde: cerca del borde la deja derecha y centrada en él (el espejo completa la
+// copa y el tronco queda de 4 px en la unión); si no, la corre hacia adentro sin cambiarle la inclinación.
+function palmFit(x, h, lean, scale, W = BG_W) {
+  const reach = (h * 0.2 + 14) * scale * 1.15 + 9 * scale + 3
+  const top = x + lean * h * 0.35
+  const left = Math.min(x, top) - reach
+  const right = Math.max(x, top) + reach
+  if (left < 0) return top < reach / 2 ? { x: 1, lean: 0 } : { x: Math.ceil(x - left), lean }
+  if (right > W) return W - top < reach / 2 ? { x: W - 1, lean: 0 } : { x: Math.floor(x - (right - W)), lean }
+  return { x, lean }
+}
+
 export function jungle() {
   const T = layeredTarget(5)
   const R = makeRand(77)
@@ -356,9 +378,17 @@ export function jungle() {
     const top = 236 - noise1(x, 150, 11) * 70 - noise1(x, 150 / 4, 12) * 70 * 0.25
     crown(L, x, top + 4, 6 + rand() * 6, { dark: farC }, 50 + i)
   }
-  for (let i = 0; i < 6; i++) palm(L, Math.round(60 + i * 140 + rand() * 60), 250, 50 + rand() * 30, (rand() - 0.5) * 0.6, { dark: farC }, 90 + i, 7, 0.6)
-  temple(L, 540, 258, 140, 6, 10, { dark: 0x6a96a4, shade: 0x5e8a98, light: 0x8cb8c0, door: 0x46707e, vine: 0x5a8a7e })
-  waterfall(L, 262, 176, 12, 92, { rock: 0x6e9aa8, rockShade: 0x608c9a, water: 0xcfeaf0, light: 0xb4dce6, foam: 0xf0fafa })
+  for (let i = 0; i < 6; i++) {
+    const x = Math.round(60 + i * 140 + rand() * 60)
+    const h = 50 + rand() * 30
+    const p = palmFit(x, h, (rand() - 0.5) * 0.6, 0.6)
+    palm(L, p.x, 250, h, p.lean, { dark: farC }, 90 + i, 7, 0.6)
+  }
+  // La pirámide va a x = 180: su reflejo (x = 1419 y x = -181) no entra en cámara con zoom 1 (la capa 1 llega a
+  // 1260 en Grande). La cascada queda centrada en el borde derecho: el espejo la completa (24 px de agua) y
+  // aparece una sola vez cada 1600 px.
+  temple(L, 180, 258, 140, 6, 10, { dark: 0x6a96a4, shade: 0x5e8a98, light: 0x8cb8c0, door: 0x46707e, vine: 0x5a8a7e })
+  waterfall(L, BG_W - 6, 176, 12, 92, { rock: 0x6e9aa8, rockShade: 0x608c9a, water: 0xcfeaf0, light: 0xb4dce6, foam: 0xf0fafa })
   T.fog(horizonFog(120, 330, 0.35), 0xcfe6e6)
 
   // capa 2: pared de selva media
@@ -366,7 +396,9 @@ export function jungle() {
   const midPal = { dark: 0x5a8e92, light: 0x70a4a4, shade: 0x4c7e84 }
   for (let i = 0; i < 9; i++) {
     const x = Math.round(20 + i * 95 + rand() * 50)
-    palm(L, x, 300, 110 + rand() * 60, (rand() - 0.5) * 0.9, midPal, 200 + i, 9, 0.8)
+    const h = 110 + rand() * 60
+    const p = palmFit(x, h, (rand() - 0.5) * 0.9, 0.8)
+    palm(L, p.x, 300, h, p.lean, midPal, 200 + i, 9, 0.8)
   }
   for (let i = 0; i < 36; i++) {
     const x = Math.round(i * 23 + rand() * 14)
@@ -379,11 +411,15 @@ export function jungle() {
   // capa 3: selva cercana, más oscura, con lianas entre copas
   L = T.layer(3)
   const nearPal = { dark: 0x30605c, light: 0x44786e, shade: 0x26504c }
-  kapok(L, 110, 372, 170, nearPal, 610)
-  kapok(L, 700, 372, 150, nearPal, 620)
+  // ceibas: una centrada en el borde derecho (el espejo la completa) y otra a x = 300, así en Grande caen en
+  // 300, 800, 1299 y 1900: sin pares enfrentados en las uniones.
+  kapok(L, 300, 372, 170, nearPal, 610)
+  kapok(L, BG_W, 372, 150, nearPal, 620)
   for (let i = 0; i < 6; i++) {
     const x = Math.round(60 + i * 140 + rand() * 60)
-    palm(L, x, 370, 140 + rand() * 70, (rand() - 0.5) * 1.1, nearPal, 400 + i, 10, 1)
+    const h = 140 + rand() * 70
+    const p = palmFit(x, h, (rand() - 0.5) * 1.1, 1)
+    palm(L, p.x, 370, h, p.lean, nearPal, 400 + i, 10, 1)
   }
   for (let i = 0; i < 24; i++) {
     const x = Math.round(i * 35 + rand() * 20)
@@ -392,7 +428,12 @@ export function jungle() {
   ridge(L, 360, 8, 30, nearPal.dark, 13)
   for (let i = 0; i < 5; i++) {
     const x = Math.round(i * 170 + rand() * 60)
-    vine(L, x, 318 + rand() * 20, x + 70 + rand() * 50, 320 + rand() * 20, 16 + rand() * 12, nearPal, i)
+    const y0 = 318 + rand() * 20
+    const x1 = x + 70 + rand() * 50
+    const y1 = 320 + rand() * 20
+    // que no se corte en el borde derecho (si no, el espejo arma una V de lianas)
+    const shift = Math.max(0, x1 + 6 - BG_W)
+    vine(L, x - shift, y0, x1 - shift, y1, 16 + rand() * 12, nearPal, i)
   }
   T.fog(horizonFog(200, 380, 0.14), 0xcfe6e6)
   T.fog(groundFog(340, 90, 0.4, 8), 0xd8ecea)
@@ -405,12 +446,17 @@ export function jungle() {
     const x = Math.round(30 + i * 72 + rand() * 30)
     liana(L, x, 20, Math.round(50 + rand() * 150), fg, 700 + i)
   }
-  vine(L, 40, 30, 300, 36, 46, fg, 1)
-  vine(L, 500, 26, 770, 34, 54, fg, 2)
-  palm(L, 14, 452, 280, 0.45, fg, 500, 10, 1.4)
-  palm(L, 790, 452, 300, -0.4, fg, 501, 10, 1.4)
-  bush(L, 60, 452, 60, fg, rand)
-  bush(L, 745, 452, 66, fg, rand)
+  // lianas colgadas del techo de hojas: nacen justo en los bordes (el espejo continúa la curva desde el
+  // mismo punto, escondido entre las copas)
+  vine(L, 0, 30, 300, 36, 46, fg, 1)
+  vine(L, 500, 26, BG_W, 30, 54, fg, 2)
+  // marco: palmera inclinada hacia adentro a la izquierda (entera y a 200 px del borde, para que con su
+  // reflejo no formen una V en la unión 1600) y una derecha centrada en el borde derecho, que el espejo
+  // completa; matas centradas en cada borde
+  palm(L, 200, 452, 280, 0.35, fg, 500, 10, 1.4)
+  palm(L, BG_W - 1, 452, 300, 0, fg, 501, 10, 1.4)
+  bush(L, 0, 452, 60, fg, rand)
+  bush(L, BG_W, 452, 66, fg, rand)
   T.fog(groundFog(380, 70, 0.28, 8), 0xd8ecea)
   return T.layers
 }
@@ -431,15 +477,17 @@ function chimney(cv, x, base, h, w, pal) {
   }
 }
 
-// columna de humo que sale de (x, y) y se va con el viento hacia la derecha
-function smoke(cv, x, y, n, pal, s) {
+// columna de humo que sale de (x, y) y se va con el viento hacia la derecha, `drift` veces lo de antes.
+// En la copia espejada el humo se inclina al revés, así que la deriva va suave (0,3) para que no delate el
+// espejo, y en 0 (sube derecho) para la chimenea centrada en el borde.
+function smoke(cv, x, y, n, pal, s, drift = 1) {
   const puffs = []
   let cx = x
   let cy = y
   for (let i = 0; i < n; i++) {
     const t = i / n
     puffs.push({ x: cx, y: cy, r: 3 + t * 13 + rnd(i, 1, s) * 3, t })
-    cx += 4 + t * 7 + (rnd(i, 2, s) - 0.3) * 4
+    cx += drift * (4 + t * 7) + (rnd(i, 2, s) - 0.5) * 4 * Math.min(1, drift + 0.5)
     cy -= 5 - t * 3.2 + (rnd(i, 3, s) - 0.5) * 3
   }
   for (const p of puffs.reverse()) {
@@ -642,12 +690,13 @@ export function industrial() {
   // nubes largas
   for (let i = 0; i < 10; i++) {
     const y = Math.round(50 + i * 24 + rand() * 12)
-    const x = Math.round(rand() * 800)
+    const x0 = Math.round(rand() * 800)
     const w = Math.round(80 + rand() * 200)
+    const x = Math.max(4, Math.min(BG_W - 4 - w, x0))
     const c = y < 150 ? 0x9a3038 : y < 220 ? 0xd05a34 : 0xf49a4a
     for (let k = 0; k < w; k++) {
       const hh = Math.round(Math.sin((k / w) * Math.PI) * 3)
-      for (let j = 0; j < hh; j++) sky.put((x + k) % 800, y + j, j === hh - 1 ? mul(c, 0.82) : j === 0 ? mix(c, 0xffe0a0, 0.3) : c)
+      for (let j = 0; j < hh; j++) sky.put(x + k, y + j, j === hh - 1 ? mul(c, 0.82) : j === 0 ? mix(c, 0xffe0a0, 0.3) : c)
     }
   }
 
@@ -658,10 +707,12 @@ export function industrial() {
     const x = Math.round(i * 48 + rand() * 20 - 20)
     factory(L, x, 356, 30 + Math.round(rand() * 40), 20 + Math.round(rand() * 44), { dark: far }, i, false)
   }
-  for (let i = 0; i < 9; i++) chimney(L, Math.round(20 + i * 95 + rand() * 40), 356, 70 + rand() * 70, 5, { dark: far })
-  coolingTower(L, 700, 360, 96, 46, far)
+  for (let i = 0; i < 9; i++) chimney(L, edgeSafe(Math.round(20 + i * 95 + rand() * 40), 6), 356, 70 + rand() * 70, 5, { dark: far })
+  // la torre de enfriamiento grande, centrada en el borde derecho (el espejo la completa: una cada 1600 px);
+  // la chica y el tanque de agua a la izquierda, donde su reflejo no entra en cámara con zoom 1
+  coolingTower(L, BG_W, 360, 96, 46, far)
   coolingTower(L, 150, 360, 74, 38, far)
-  waterTower(L, 372, 360, far, 118)
+  waterTower(L, 230, 360, far, 118)
   blimp(L, 250, 118, 0x6a2a34, 0xa84a42)
   for (const [bx, by] of [[430, 150], [442, 144], [452, 152], [466, 140], [478, 147]]) L.sprite(['k...k', '.k.k.'], bx, by, { k: 0x4a1a24 })
   T.fog(horizonFog(150, 360, 0.3), 0xf0a868)
@@ -669,28 +720,33 @@ export function industrial() {
   // capa 2: fábricas medias con chimeneas humeantes
   L = T.layer(2)
   const mid = { dark: 0x8a3628, light: 0xc8603c, band: 0x6a2820, win: 0xf8c050, winOff: 0x6a2820, lamp: 0xff5a3a }
-  const stacks = [80, 250, 410, 610, 745].map((x) => ({ x, h: Math.round(150 + rand() * 70) }))
-  stacks.forEach(({ x, h }, i) => smoke(L, x, 385 - h - 2, 22, { dark: 0x7a4e48, mid: 0x9a6a5c, light: 0xc89276 }, i + 3))
+  // chimeneas lejos de los bordes (el humo deriva poco y no llega al borde), salvo la última, centrada en el
+  // borde derecho con el humo derecho
+  const stacks = [130, 280, 430, 600, BG_W].map((x) => ({ x, h: Math.round(150 + rand() * 70) }))
+  stacks.forEach(({ x, h }, i) => smoke(L, x, 385 - h - 2, 22, { dark: 0x7a4e48, mid: 0x9a6a5c, light: 0xc89276 }, i + 3, x === BG_W ? 0 : 0.3))
   for (let i = 0; i < 10; i++) {
     const x = Math.round(i * 86 + rand() * 30 - 20)
     factory(L, x, 385, 50 + Math.round(rand() * 40), 30 + Math.round(rand() * 34), mid, 10 + i)
   }
   stacks.forEach(({ x, h }) => chimney(L, x, 385, h, 8, mid))
-  coolingTower(L, 520, 392, 124, 54, mid.dark, mid.light)
+  // torre de enfriamiento centrada en el borde izquierdo: se ve la mitad derecha, con el canto de luz del sol
+  coolingTower(L, 0, 392, 124, 54, mid.dark, mid.light)
   T.fog(horizonFog(200, 390, 0.16), 0xf0a868)
   T.fog(groundFog(320, 110, 0.4, 10), 0xf8b868)
 
   // capa 3: andamios, grúas, carteles y tanques
   L = T.layer(3)
   const near = 0x541c1a
-  scaffold(L, 20, 420, 96, 130, near)
-  scaffold(L, 560, 420, 72, 100, near)
+  // repetible: nada grande a menos de ~80 px de un borde. Las grúas quedan a 330 y 600 (en la unión 800 sus
+  // reflejos caen a 400 px uno del otro, no enfrentadas) y en el borde izquierdo solo hay un tanque chico.
+  scaffold(L, 150, 420, 84, 130, near)
+  scaffold(L, 690, 420, 72, 100, near)
   crane(L, 330, 420, 220, 150, near)
-  crane(L, 700, 420, 176, -130, near)
-  billboard(L, 150, 300, 64, 34, { frame: near, bg: 0x8a3a28, ink: 0x3e1410, hi: 0xf0c060, lamp: 0xffe27a }, 'tank')
+  crane(L, 600, 420, 176, -130, near)
+  billboard(L, 244, 300, 64, 34, { frame: near, bg: 0x8a3a28, ink: 0x3e1410, hi: 0xf0c060, lamp: 0xffe27a }, 'tank')
   billboard(L, 440, 290, 44, 36, { frame: near, bg: 0xe0a83a, ink: 0x3e1410, hi: 0xffd070, lamp: 0xffe27a }, 'skull')
-  tankFarm(L, 250, 425, 20, 48, { dark: near, band: 0x421412, rim: 0xc05a34 })
-  tankFarm(L, 640, 425, 16, 40, { dark: near, band: 0x421412, rim: 0xc05a34 })
+  tankFarm(L, 84, 425, 20, 48, { dark: near, band: 0x421412, rim: 0xc05a34 })
+  tankFarm(L, 650, 425, 16, 40, { dark: near, band: 0x421412, rim: 0xc05a34 })
   for (let x = 0; x < 800; x++) for (let y = 412; y < 450; y++) L.put(x, y, near)
   T.fog(horizonFog(260, 420, 0.08), 0xf0a868)
   T.fog(groundFog(360, 80, 0.36, 8), 0xf8b868)
@@ -698,24 +754,25 @@ export function industrial() {
   // capa 4: siluetas cercanas con canto de luz naranja
   L = T.layer(4)
   const fg = { dark: 0x2a1210, rim: 0xd8683a, light: 0x5a2418, band: 0x1c0c0a }
-  const arms = pylon(L, 120, 452, 250, fg.dark, fg.light)
-  // cables al borde derecho
-  for (const [ax, ay] of arms.slice(1, 2)) {
-    for (let x = ax; x < 800; x++) {
-      const t = (x - ax) / (800 - ax)
-      L.put(x, ay + 6 + Math.sin(t * Math.PI) * 40 - t * 30, fg.dark)
+  // torre de alta tensión centrada en el borde izquierdo (el espejo la completa) y cables que cuelgan hasta el
+  // borde derecho, donde llegan horizontales: el espejo los sigue hasta la próxima torre, 1600 px más allá
+  const arms = pylon(L, 0, 452, 250, fg.dark, fg.light)
+  for (const [[ax, ay], sag] of [[arms[1], 64], [arms[3], 52]]) {
+    for (let x = ax; x < BG_W; x++) {
+      const t = (x - ax) / (BG_W - ax)
+      L.put(x, ay + 6 + Math.sin((t * Math.PI) / 2) * sag, fg.dark)
     }
   }
-  for (let x = 0; x < arms[0][0]; x++) L.put(x, arms[0][1] + 6 + Math.sin((x / arms[0][0]) * Math.PI) * 10, fg.dark)
   // puente de caños sobre pilares
-  for (const x of [560, 660, 760]) {
+  for (const x of [550, 650, 750]) {
     for (let y = 300; y < 452; y++) for (let k = 0; k < 4; k++) L.put(x + k, y, k === 3 ? fg.light : fg.dark)
     for (let dx = -8; dx <= 11; dx++) L.put(x + dx, 300, fg.dark), L.put(x + dx, 301, fg.dark)
   }
   pipe(L, 540, 800, 290, 6, fg)
   pipe(L, 540, 800, 282, 4, fg)
-  tankFarm(L, 40, 452, 34, 60, fg)
-  chimney(L, 790, 452, 300, 12, { dark: fg.dark, light: fg.light, band: fg.band, lamp: 0xff4a2a })
+  tankFarm(L, 220, 452, 34, 60, fg)
+  // chimenea grande centrada en el borde derecho: una sola cada 1600 px
+  chimney(L, BG_W, 452, 300, 12, { dark: fg.dark, light: fg.light, band: fg.band, lamp: 0xff4a2a })
   fence(L, 300, 520, 452, 20, fg.dark)
   T.fog(groundFog(400, 60, 0.28, 8), 0xf8b868)
   return T.layers
