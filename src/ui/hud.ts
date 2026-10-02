@@ -1,9 +1,52 @@
-// HUD al estilo Broforce: un canvas de 800×450 sobre el del juego, escalado igual y pixelado.
-import { ITEM_ORDER, WEAPONS, type CrewId, type ItemId, type Vec2, type WeaponId } from '../sim/types'
-import { VIEW_H, VIEW_W, type Viewport } from '../render/types'
+// HUD C, "tablero Broforce" (pulido v2): un canvas de 800×450 sobre el del juego, escalado igual y pixelado.
+// Referencia aprobada: scripts/lookdev/hud-proposals.mjs, propuesta C (preview/hud-c.png).
+//
+// Disposición (coordenadas lógicas):
+// - Abajo, a lo ancho y de HUD_BAR_H de alto, el tablero con los datos del que tiene el turno:
+//   retrato + nombre + vida + escudo | ÁNG | POT | VIENTO | COMB (◀ ▶) | las 8 armas.
+// - Arriba a la izquierda: ronda y plata, y al lado la fila de ítems (botones de 22 con su tecla).
+// - Arriba al centro: el minimapa (mapas que scrollean) y debajo, en una sola columna centrada, los
+//   carteles: estado ("TU TURNO", …), aviso o cartel de muerte súbita y "ESPERANDO A …" de la red.
+// - Arriba a la derecha: las placas compactas de los demás tanques apiladas, y debajo de ellas el panel
+//   de red (código de sala, peers con ping) y la cuenta regresiva del turno.
+// - Flechas en los bordes hacia los tanques fuera de cámara, entre los paneles de arriba y el tablero.
+// Sin extras (demo congelado) no hay tablero ni ítems: solo las placas de todos y el estado.
+import { ITEM_ORDER, SHIELD_HP, WEAPONS, type CrewId, type ItemId, type Vec2, type WeaponId } from '../sim/types'
+import { HUD_BAR_H, VIEW_H, VIEW_W, type Viewport } from '../render/types'
 import { uiAssets, type UiAssets } from './assets'
-import { OUT, css, drawText, measure } from './pixelfont'
+import { OUT, drawText, measure } from './pixelfont'
 import { MinimapTerrain, drawEdgeArrows, drawMinimap, minimapLayout, minimapPoint, type MinimapLayout } from './minimap'
+import {
+  BRONZE,
+  BRONZE_D,
+  BTN,
+  DARK,
+  DEAD,
+  FUEL,
+  FUEL_HI,
+  FUEL_LOW,
+  GOLD,
+  GREY,
+  INK,
+  POW_LO,
+  POW_MID,
+  SHIELD,
+  SHIELD_HI,
+  SLOT_BG,
+  WHITE,
+  bigText,
+  button,
+  dial,
+  divider,
+  measureBig,
+  mix,
+  moveArrow,
+  panel,
+  rect,
+  segBar,
+  windChevrons,
+  windColor,
+} from './hudkit'
 import type { HudControl, HudExtras, HudNet, MinimapInput } from './types'
 
 // Tecla de cada ítem usable (el paracaídas es pasivo). La lee también el flujo de entrada.
@@ -12,7 +55,7 @@ const ITEM_NAMES: Record<ItemId, string> = { shield: 'ESCUDO', parachute: 'PARAC
 
 export interface HudSide {
   name: string
-  tag: string // "P1".."P4", el mismo globo que dibuja el renderer sobre el tanque
+  tag: string // "P1".."P8", el mismo globo que dibuja el renderer sobre el tanque
   color: number
   crew: CrewId
   hp: number
@@ -24,7 +67,7 @@ export interface HudSide {
 export interface HudModel {
   human: HudSide | null
   rival: HudSide | null
-  others: HudSide[] // el resto de los tanques (3 o 4 jugadores): placas compactas
+  others: HudSide[] // el resto de los tanques
   angle: number
   power: number
   weapon: WeaponId
@@ -35,24 +78,14 @@ export interface HudModel {
   // munición de las 8 armas del que tiene el turno (0 = deshabilitada)
   ammoAll: Record<WeaponId, number>
   fuel: number // 0..1 del combustible del turno
-  showBar: boolean // selector y combustible: solo en el turno humano
-  extras?: HudExtras // ronda, plata, ítems (F10)
+  showBar: boolean // controles (armas, ítems, mover) activos: solo en el turno de un humano de esta pantalla
+  extras?: HudExtras // ronda, plata, ítems; ausente en el demo congelado (sin tablero)
 }
 
 const PIPS = 6
-const DARK = 0x0e0a09
-const BRONZE = 0xc4a574
-const GOLD = 0xffe27a
-const GREY = 0x9a8e80
 // Orden de la tira weaponIcons del manifiesto (el de WeaponId en types.ts). También es el de las teclas 1-8.
 export const WEAPON_SLOTS: WeaponId[] = ['normal', 'heavy', 'dirt', 'cluster', 'napalm', 'digger', 'roller', 'nuke']
-const ICON_ORDER = WEAPON_SLOTS
-const SLOT = 18
-const BAR_W = SLOT * WEAPON_SLOTS.length + 6
-const BAR_H = 38
-const BOX = 16
 const BLINK_MS = 280 // titileo del tanque del turno en el minimapa
-const MM_GAP = 6 // del borde de abajo del minimapa (marco incluido) al panel de puntería
 // v2 muerte súbita
 const SD_WARN_AT = 3 // el aviso "MUERTE SÚBITA EN N" aparece con calmLeft <= 3
 const SD_PULSE_MS = 1400 // período del titileo suave del indicador de lava activa
@@ -61,14 +94,39 @@ const LAVA = 0xff7a2a // el mismo naranja de la lava del minimapa
 const LAVA_HOT = 0xffd27a
 const LAVA_DEEP = 0xd0362c
 
+// ---------- geometría del tablero (x lógicas) ----------
+// Cinco separadores; cada sección empieza 7 px después del suyo. Las armas quedan contra el borde derecho.
+const BAR_Y = VIEW_H - HUD_BAR_H
+const BAR_TOP = BAR_Y + 6 // fila de los rótulos
+const DIV = [140, 259, 370, 477, 596]
+const SEC = { ang: DIV[0] + 7, pot: DIV[1] + 7, wind: DIV[2] + 7, fuel: DIV[3] + 7, arms: DIV[4] + 6 }
+const SEC_W = { ang: DIV[1] - DIV[0] - 7, pot: DIV[2] - DIV[1] - 7, wind: DIV[3] - DIV[2] - 7, fuel: DIV[4] - DIV[3] - 7 }
+const SLOT_GAP = 2
+const DIAL_R = 17
+const ITEM_STEP = BTN + 2
+// Margen táctil alrededor de cada botón, en px lógicos (≈ 8 px CSS a ×2). Entre vecinos gana el más cercano.
+const TOUCH = 4
+// Placas de los demás tanques: con más de 4 se apilan más juntas y el Pn pasa a la izquierda.
+const PLATE_H = 20
+const PLATE_STEP = 30
+const PLATE_STEP_DENSE = 24
+
+interface HitBox {
+  x: number
+  y: number
+  w: number
+  h: number
+  ctl: HudControl
+}
+
 export class Hud implements MinimapInput {
   private canvas: HTMLCanvasElement
   private ctx: CanvasRenderingContext2D
   private key = ''
   private vp: Viewport | null = null
-  private barVisible = false
   private mm: MinimapLayout | null = null // dónde quedó el minimapa en el último dibujo
   private mmTerrain = new MinimapTerrain()
+  private hits: HitBox[] = [] // controles activos del último dibujo
 
   constructor(private root: HTMLElement) {
     this.canvas = document.createElement('canvas')
@@ -103,42 +161,54 @@ export class Hud implements MinimapInput {
   }
 
   update(model: HudModel): void {
-    const mm = model.extras?.minimap ?? null
+    const now = performance.now()
+    const ex = model.extras ?? null
+    const mm = ex?.minimap ?? null
     // la grilla no entra en la clave (son bytes); su cambio lo marca terrainVersion
-    const blink = !!mm && mm.tanks.some((t) => t.current && t.alive) && Math.floor(performance.now() / BLINK_MS) % 2 === 0
+    const blink = !!mm && mm.tanks.some((t) => t.current && t.alive) && Math.floor(now / BLINK_MS) % 2 === 0
     // muerte súbita activa: el indicador titila suave; el nivel del pulso entra en la clave
-    const sd = model.extras?.suddenDeath ?? null
-    const pulse = sd?.active ? sdPulse(performance.now()) : -1
-    const key = JSON.stringify(model, (k, v) => (k === 'terrain' ? undefined : v)) + (blink ? '*' : '') + pulse
+    const sd = ex?.suddenDeath ?? null
+    const pulse = sd?.active ? sdPulse(now) : -1
+    const assets = uiAssets()
+    const sock = ex ? sockFrame(model.wind, now, assets.windsock?.frames ?? 7) : -1
+    const key = JSON.stringify(model, (k, v) => (k === 'terrain' ? undefined : v)) + (blink ? '*' : '') + pulse + '/' + sock
     if (key === this.key) return
     this.key = key
     const ctx = this.ctx
-    const assets = uiAssets()
     ctx.clearRect(0, 0, VIEW_W, VIEW_H)
-    if (model.human) this.side(assets, model.human, false)
-    const right = model.rival ? this.side(assets, model.rival, true) : VIEW_W - 2
-    this.compacts(assets, model.others, right, model.showBar)
-    // v2: el minimapa va arriba al centro y el panel de puntería baja debajo de él
+    this.hits = []
+
+    // el tablero muestra al que tiene el turno; las placas, a todos los demás (sin tablero, a todos)
+    const sides = [model.human, model.rival, ...model.others].filter((s): s is HudSide => !!s)
+    const subject = ex ? (sides.find((s) => s.active) ?? model.human ?? model.rival) : null
+    const plates = sides.filter((s) => s !== subject).sort((a, b) => tagNum(a) - tagNum(b))
+
+    // arriba a la izquierda: ronda, plata e ítems
+    const leftBottom = ex ? this.roundAndItems(assets, ex, model.showBar) : 3
+
+    // arriba al centro: minimapa y la columna de carteles debajo
     this.mm = mm ? minimapLayout(mm.terrain) : null
-    let topY = 3
+    let below = 6
     if (mm && this.mm) {
       drawMinimap(ctx, this.mm, mm, this.mmTerrain.image(mm.terrain, mm.terrainVersion), blink)
-      topY = this.mm.y + this.mm.h + MM_GAP
+      below = this.mm.y + this.mm.h + 3 + 4
     }
-    let below = this.top(assets, model, topY)
-    // el aviso de muerte súbita va centrado debajo del panel de puntería (y del estado, si hay);
-    // el "ESPERANDO A..." de la red se corre debajo de él
+    if (model.status) below = this.banner(assets, model.status.toUpperCase(), below, GOLD) + 3
     if (sd) below = this.suddenDeath(assets, sd, below, pulse)
-    let leftBottom = 3
-    let rightBottom = 3
-    if (model.extras) leftBottom = this.extras(assets, model.extras, model.showBar)
-    if (model.extras?.net) rightBottom = this.net(assets, model.extras.net, below)
+    if (ex?.net?.waiting) {
+      const text = ex.net.waiting.toUpperCase().replace(/…/g, '...')
+      below = this.banner(assets, text, below + 1, /RECONECT|DESCONECT/.test(text) ? 0xff8a6a : GOLD, BRONZE) + 3
+    }
+
+    // arriba a la derecha: placas y, debajo, la red
+    let rightBottom = this.plates(assets, plates)
+    if (ex?.net) rightBottom = this.net(assets, ex.net, rightBottom + 6)
+
+    if (subject) this.board(assets, model, subject, ex?.shield ?? 0, sock)
     if (mm) {
       const pad = Math.max(10, assets.font.h + 4)
-      drawEdgeArrows(ctx, assets.font, mm, { leftTop: leftBottom + pad, rightTop: rightBottom + pad, bottom: VIEW_H - 64 })
+      drawEdgeArrows(ctx, assets.font, mm, { leftTop: leftBottom + pad, rightTop: rightBottom + pad, bottom: (subject ? BAR_Y : VIEW_H) - 12 })
     }
-    this.barVisible = model.showBar
-    if (model.showBar) this.weaponBar(assets, model)
   }
 
   // Punto de la ventana → mundo si cae sobre el minimapa (con margen táctil); si no, null.
@@ -149,318 +219,231 @@ export class Hud implements MinimapInput {
     return p ? minimapPoint(mm, p.x, p.y) : null
   }
 
+  // Control del HUD bajo un punto de la ventana: arma (8 ranuras), ítem usable (escudo, combustible,
+  // reparar, trazador; el paracaídas es pasivo) o mover ◀ ▶. Solo en el turno de un humano de esta
+  // pantalla (showBar). Cada botón de 22 cuenta con TOUCH px lógicos de margen alrededor; si el punto cae
+  // en el margen de dos vecinos, gana el centro más cercano. Devuelve también armas sin munición e ítems
+  // en 0 (el flujo decide si los ignora), así el toque no se cuela al mundo. Fuera de todo: null.
+  controlAt(clientX: number, clientY: number): HudControl | null {
+    if (!this.vp || this.root.hidden || !this.hits.length) return null
+    const p = this.toLogical(clientX, clientY)
+    if (!p) return null
+    let best: HitBox | null = null
+    let bestD = Infinity
+    for (const b of this.hits) {
+      if (p.x < b.x - TOUCH || p.x >= b.x + b.w + TOUCH || p.y < b.y - TOUCH || p.y >= b.y + b.h + TOUCH) continue
+      const d = Math.hypot(p.x - (b.x + b.w / 2), p.y - (b.y + b.h / 2))
+      if (d < bestD) {
+        bestD = d
+        best = b
+      }
+    }
+    return best ? best.ctl : null
+  }
+
+  // Arma bajo un punto de la ventana (clientX/Y), o null. Compatibilidad: delega en controlAt.
+  weaponAt(clientX: number, clientY: number): WeaponId | null {
+    const c = this.controlAt(clientX, clientY)
+    return c?.kind === 'weapon' ? c.id : null
+  }
+
   private toLogical(clientX: number, clientY: number): { x: number; y: number } | null {
     const rect = this.root.getBoundingClientRect()
     if (rect.width <= 0 || rect.height <= 0) return null
     return { x: ((clientX - rect.left) / rect.width) * VIEW_W, y: ((clientY - rect.top) / rect.height) * VIEW_H }
   }
 
-  // HUD C: stub del contrato sobre el HUD de hoy (solo armas); lo reemplaza el área vistas.
-  controlAt(clientX: number, clientY: number): HudControl | null {
-    const id = this.weaponAt(clientX, clientY)
-    return id ? { kind: 'weapon', id } : null
-  }
+  // ---------- tablero inferior ----------
 
-  // Arma bajo un punto de la ventana (clientX/Y), o null.
-  weaponAt(clientX: number, clientY: number): WeaponId | null {
-    const vp = this.vp
-    if (!vp || !this.barVisible || this.root.hidden) return null
-    const p = this.toLogical(clientX, clientY)
-    if (!p) return null
-    const lx = p.x
-    const ly = p.y
-    const bx = barX()
-    const by = VIEW_H - 2 - BAR_H
-    if (ly < by + 2 || ly > by + 4 + BOX + 8 || lx < bx + 3) return null
-    const i = Math.floor((lx - bx - 3) / SLOT)
-    return i >= 0 && i < WEAPON_SLOTS.length ? WEAPON_SLOTS[i] : null
-  }
-
-  private weaponBar(assets: UiAssets, model: HudModel): void {
+  private board(assets: UiAssets, model: HudModel, who: HudSide, shield: number, sock: number): void {
     const ctx = this.ctx
     const font = assets.font
-    const bx = barX()
-    const by = VIEW_H - 2 - BAR_H
-    rect(ctx, bx, by, BAR_W, BAR_H, OUT)
-    rect(ctx, bx + 1, by + 1, BAR_W - 2, BAR_H - 2, BRONZE)
-    rect(ctx, bx + 2, by + 2, BAR_W - 4, BAR_H - 4, DARK)
+    const y0 = BAR_Y
+    const top = BAR_TOP
+    // franja: contorno, filo de bronce con remaches y fondo oscuro
+    rect(ctx, 0, y0, VIEW_W, HUD_BAR_H, OUT)
+    rect(ctx, 0, y0 + 1, VIEW_W, 2, BRONZE)
+    rect(ctx, 0, y0 + 3, VIEW_W, 1, BRONZE_D)
+    rect(ctx, 0, y0 + 4, VIEW_W, HUD_BAR_H - 4, DARK)
+    for (let x = 6; x < VIEW_W; x += 40) {
+      rect(ctx, x, y0 + 1, 2, 2, BRONZE_D)
+      rect(ctx, x, y0 + 1, 1, 1, mix(BRONZE, WHITE, 0.4))
+    }
+    for (const d of DIV) divider(ctx, d, top - 1, HUD_BAR_H - 8)
+    const label = (s: string, x: number) => drawText(ctx, font, s, x, top + 1, GREY)
+    // fuera del apuntado (vuelo, IA pensando) los números se apagan un poco
+    const dimmed = !model.showAim
+    const tone = (c: number) => (dimmed ? mix(c, GREY, 0.45) : c)
+
+    // --- retrato, nombre, vida y escudo
+    this.portrait(assets, who, 4, top + 2, 36, false)
+    if (who.you && who.alive) {
+      rect(ctx, 5, top + 3, 34, 1, GOLD)
+      drawText(ctx, font, 'VOS', 22 - Math.floor(measure(font, 'VOS') / 2), top + 41, GOLD)
+    } else {
+      drawText(ctx, font, who.tag, 22 - Math.floor(measure(font, who.tag) / 2), top + 41, who.alive ? who.color : GREY)
+    }
+    const nx = 46
+    drawText(ctx, font, clip(font, who.name.toUpperCase(), DIV[0] - nx - 4), nx, top + 1, who.alive ? WHITE : GREY)
+    this.pips(assets, nx, top + 11, who.alive ? Math.ceil((Math.max(0, who.hp) / 100) * PIPS) : 0, 2)
+    this.shieldBar(assets, nx, top + 32, DIV[0] - nx - 6, who.alive ? shield : 0)
+
+    // --- ÁNG: número ×3 y el dial chico a la derecha
+    let x = SEC.ang
+    label('ANG', x)
+    const dialCx = x + SEC_W.ang - DIAL_R - 3
+    this.number(assets, `${fine(model.angle)}°`, x, top + 16, tone(WHITE), dialCx - DIAL_R - 4 - x)
+    dial(ctx, dialCx, top + 40, DIAL_R, model.angle, dimmed)
+
+    // --- POT: número ×3 y barra de 10 segmentos
+    x = SEC.pot
+    label('POT', x)
+    this.number(assets, fine(model.power), x, top + 12, tone(GOLD), SEC_W.pot - 4)
+    segBar(ctx, x, top + 36, SEC_W.pot - 6, 11, model.power / 100, [POW_LO, POW_MID, GOLD], 10)
+
+    // --- VIENTO: número ×3, chevrons según fuerza y dirección, y la manga que flamea
+    x = SEC.wind
+    label('VIENTO', x)
+    const wind = Math.round(Math.abs(model.wind))
+    if (sock >= 0) this.windsock(assets, sock, x + SEC_W.wind - 35, top - 2)
+    bigText(ctx, font, `${wind}`, x + 2, top + 12, wind === 0 ? GREY : windColor(model.wind), 3)
+    windChevrons(ctx, x, top + 31, Math.round(model.wind), 2)
+
+    // --- COMB: bidón, barra segmentada, % y los botones ◀ ▶
+    x = SEC.fuel
+    const fw = SEC_W.fuel - 6
+    const lw = label('COMB', x)
+    this.itemIcon(assets, 'fuel', x + lw + 6, top - 2, model.fuel <= 0)
+    const fuel = Math.max(0, Math.min(1, model.fuel))
+    const low = fuel < 0.25
+    segBar(ctx, x, top + 12, fw, 10, fuel, low ? [FUEL_LOW, 0xff7a5a, 0xffc0a0] : [FUEL, FUEL_HI, 0xd8ffb0], 6)
+    const canMove = model.showBar && fuel > 0
+    const by = top + 26
+    for (const dir of [-1, 1] as const) {
+      const bx = dir < 0 ? x : x + fw - BTN
+      button(ctx, font, bx, by, BTN, { on: canMove, key: dir < 0 ? 'A' : 'D' })
+      moveArrow(ctx, bx + 7 + (dir > 0 ? 1 : 0), by + 6, dir, canMove ? WHITE : GREY)
+      if (model.showBar) this.hits.push({ x: bx, y: by, w: BTN, h: BTN, ctl: { kind: 'move', dir } })
+    }
+    const pct = `${Math.round(fuel * 100)}%`
+    drawText(ctx, font, pct, x + Math.floor((fw - measure(font, pct)) / 2), by + 8, low ? 0xff7a5a : FUEL_HI)
+
+    // --- ARMAS: nombre y munición del arma elegida arriba, las 8 ranuras abajo
+    x = SEC.arms
+    const name = (WEAPONS[model.weapon]?.name ?? model.weapon).toUpperCase()
+    const w0 = drawText(ctx, font, name, x + 1, top + 1, WHITE)
+    if (model.ammo < 50) drawText(ctx, font, `x${model.ammo}`, x + w0 + 6, top + 1, model.ammo > 0 ? GOLD : FUEL_LOW)
     WEAPON_SLOTS.forEach((id, i) => {
-      const x = bx + 3 + i * SLOT
-      const y = by + 3
-      const ammo = model.ammoAll[id] ?? 0
-      const selected = id === model.weapon
-      if (selected) {
-        rect(ctx, x, y, SLOT - 1, BOX, GOLD)
-        rect(ctx, x + 1, y + 1, SLOT - 3, BOX - 2, 0x3a2a18)
-      } else {
-        rect(ctx, x, y, SLOT - 1, BOX, 0x2a2220)
-      }
-      ctx.save()
-      if (ammo <= 0) {
-        ctx.globalAlpha = 0.3
-        ctx.filter = 'grayscale(1)'
-      }
-      this.icon(assets, id, x + 3, y + 2)
-      ctx.restore()
-      if (ammo > 0 && ammo < 50) {
-        const t = `${ammo}`
-        drawText(ctx, font, t, x + SLOT - 3 - measure(font, t), y + BOX - font.h, 0xffffff)
-      }
-      const n = `${i + 1}`
-      drawText(ctx, font, n, x + Math.floor((SLOT - 1 - measure(font, n)) / 2), y + BOX + 2, selected ? GOLD : ammo > 0 ? GREY : 0x4a4440)
+      const sx = x + i * (BTN + SLOT_GAP)
+      const sy = top + 11
+      this.weaponSlot(assets, id, i, sx, sy, model.ammoAll[id] ?? 0, id === model.weapon)
+      if (model.showBar) this.hits.push({ x: sx, y: sy, w: BTN, h: BTN, ctl: { kind: 'weapon', id } })
     })
-    // combustible
-    const fy = by + BAR_H - 10
-    const label = 'COMB'
-    const lw = drawText(ctx, font, label, bx + 4, fy + 1, GREY)
-    const gx = bx + 8 + lw
-    const gw = BAR_W - (gx - bx) - 5
-    rect(ctx, gx, fy + 1, gw, 6, OUT)
-    rect(ctx, gx + 1, fy + 2, gw - 2, 4, 0x2a2220)
-    const fill = Math.round((gw - 2) * Math.max(0, Math.min(1, model.fuel)))
-    if (fill > 0) {
-      const low = model.fuel < 0.25
-      rect(ctx, gx + 1, fy + 2, fill, 4, low ? 0xd0362c : 0x3a9a3a)
-      rect(ctx, gx + 1, fy + 2, fill, 1, low ? 0xff7a5a : 0x9ae06a)
-    }
   }
 
-  // Devuelve la x más a la izquierda que ocupa la placa.
-  private side(assets: UiAssets, side: HudSide, flip: boolean): number {
+  // Número grande del tablero en ×3. Si no entra en maxW (ángulo con décimas), la parte decimal y el
+  // "°" van en ×2 apoyados en la misma base; si ni así entra, todo en ×2.
+  private number(assets: UiAssets, text: string, x: number, y: number, color: number, maxW: number): void {
     const ctx = this.ctx
     const font = assets.font
-    const size = 36
-    const fx = flip ? VIEW_W - 2 - size : 2
-    const fy = VIEW_H - 2 - size
-    rect(ctx, fx, fy, size, size, OUT)
-    rect(ctx, fx + 1, fy + 1, size - 2, size - 2, side.alive ? side.color : 0x4a4440)
-    rect(ctx, fx + 2, fy + 2, size - 4, size - 4, 0x1c1614)
-    const portrait = assets.portraits[side.crew]
-    ctx.save()
-    if (!side.alive) ctx.filter = 'grayscale(1) brightness(0.55)'
-    if (portrait) {
-      if (flip) {
-        ctx.translate(fx + 2 + 32, fy + 2)
-        ctx.scale(-1, 1)
-        ctx.drawImage(portrait, 0, 0, 32, 32)
-      } else {
-        ctx.drawImage(portrait, fx + 2, fy + 2, 32, 32)
-      }
-    } else {
-      silhouette(ctx, fx + 2, fy + 2, side.color)
+    if (measureBig(font, text, 3) <= maxW) {
+      bigText(ctx, font, text, x, y, color, 3)
+      return
     }
-    ctx.restore()
-
-    const name = side.name.toUpperCase()
-    const bw = Math.max(80, measure(font, name) + 12)
-    const bh = Math.max(22, font.h + 17)
-    const bx = flip ? fx - bw + 1 : fx + size - 1
-    const by = VIEW_H - 2 - bh
-    rect(ctx, bx, by, bw, bh, OUT)
-    rect(ctx, bx + 1, by + 1, bw - 2, bh - 2, side.alive ? side.color : 0x4a4440)
-    rect(ctx, bx + 2, by + 2, bw - 4, bh - 4, DARK)
-    drawText(ctx, font, name, bx + 5, by + 4, side.alive ? 0xffffff : GREY)
-    const on = side.alive ? Math.ceil((Math.max(0, side.hp) / 100) * PIPS) : 0
-    const pw = this.pips(assets, bx + 5, by + bh - 9, on)
-    // número de jugador a la derecha de los pips: el mismo "Pn" del globo sobre el tanque
-    const tw = measure(font, side.tag)
-    if (bx + 5 + pw + 6 + tw < bx + bw - 4) drawText(ctx, font, side.tag, bx + bw - 5 - tw, by + bh - 9 - font.h + 5, side.alive ? side.color : GREY)
-    if (side.active && side.alive) {
-      rect(ctx, bx + 2, by - 2, bw - 4, 1, OUT)
-      rect(ctx, bx + 2, by - 3, bw - 4, 1, GOLD)
+    const cut = text.search(/[,°]/)
+    const head = cut < 0 ? text : text.slice(0, cut)
+    const tail = cut < 0 ? '' : text.slice(cut)
+    const hw = measureBig(font, head, 3)
+    if (hw + 3 + measureBig(font, tail, 2) <= maxW) {
+      bigText(ctx, font, head, x, y, color, 3)
+      bigText(ctx, font, tail, x + hw + 3, y + font.h, color, 2)
+      return
     }
-    if (side.you) {
-      // pestaña "VOS" sobre el retrato: identifica al humano aunque su tanque esté a la derecha
-      const label = 'VOS'
-      const lw = measure(font, label)
-      const th = font.h + 5
-      const tw2 = Math.max(lw + 8, 24)
-      const tx = flip ? fx + size - tw2 : fx
-      const ty = fy - th + 1
-      rect(ctx, tx, ty, tw2, th, OUT)
-      rect(ctx, tx + 1, ty + 1, tw2 - 2, th - 1, GOLD)
-      rect(ctx, tx + 2, ty + 2, tw2 - 4, th - 2, DARK)
-      drawText(ctx, font, label, tx + Math.floor((tw2 - lw) / 2), ty + 3, GOLD)
-      rect(ctx, fx + 1, fy + 1, size - 2, 1, GOLD)
-    }
-    return Math.min(fx, bx)
+    bigText(ctx, font, text, x, y + font.h, color, 2)
   }
 
-  // Placas chicas del resto de los tanques: retrato de 16 + nombre + pips. Van en fila hacia la
-  // izquierda desde la placa del rival; si chocarían con el selector de armas, suben una fila.
-  private compacts(assets: UiAssets, list: HudSide[], right: number, bar: boolean): void {
-    if (!list.length) return
+  private weaponSlot(assets: UiAssets, id: WeaponId, i: number, x: number, y: number, ammo: number, sel: boolean): void {
     const ctx = this.ctx
     const font = assets.font
-    const ps = 20
-    const h = 20
-    const limit = bar ? barX() + BAR_W + 4 : VIEW_W / 2 - 40
-    let x = right - 4
-    let y = VIEW_H - 2 - h
-    for (const side of list) {
-      const name = side.name.toUpperCase()
-      const pipW = PIPS * 7 - 3
-      const bw = Math.max(pipW + 10, measure(font, name) + 10)
-      const w = ps - 1 + bw
-      if (x - w < limit && x !== right - 4) {
-        x = right - 4
-        y -= h + 6
-      }
-      const bx = x - w
-      const rx = bx + bw - 1 // retrato a la derecha, como la placa del rival
-      const col = side.alive ? side.color : 0x4a4440
-      // cuadro del nombre
-      rect(ctx, bx, y, bw, h, OUT)
-      rect(ctx, bx + 1, y + 1, bw - 2, h - 2, col)
-      rect(ctx, bx + 2, y + 2, bw - 4, h - 4, DARK)
-      drawText(ctx, font, name, bx + 5, y + 4, side.alive ? 0xffffff : GREY)
-      this.pips(assets, bx + 5, y + h - 9, side.alive ? Math.ceil((Math.max(0, side.hp) / 100) * PIPS) : 0)
-      // retrato
-      rect(ctx, rx, y, ps, ps, OUT)
-      rect(ctx, rx + 1, y + 1, ps - 2, ps - 2, col)
-      rect(ctx, rx + 2, y + 2, ps - 4, ps - 4, 0x1c1614)
-      const portrait = assets.portraits[side.crew]
-      ctx.save()
-      if (!side.alive) ctx.filter = 'grayscale(1) brightness(0.55)'
-      if (portrait) {
-        ctx.translate(rx + 2 + 16, y + 2)
-        ctx.scale(-1, 1)
-        ctx.drawImage(portrait, 0, 0, 16, 16)
-      } else {
-        rect(ctx, rx + 2, y + 2, 16, 16, side.color)
-      }
-      ctx.restore()
-      // número de jugador sobre el retrato
-      const tw = measure(font, side.tag)
-      const tx = rx + ps - tw - 1
-      rect(ctx, tx - 2, y - font.h - 2, tw + 4, font.h + 3, OUT)
-      drawText(ctx, font, side.tag, tx, y - font.h - 1, side.alive ? side.color : GREY)
-      if (side.active && side.alive) {
-        rect(ctx, bx + 2, y - 2, bw - 4, 1, OUT)
-        rect(ctx, bx + 2, y - 3, bw - 4, 1, GOLD)
-      }
-      x = bx - 4
+    button(ctx, font, x, y, BTN, { on: ammo > 0, sel })
+    // tecla arriba a la izquierda (chica y apagada), ícono corrido a la derecha, munición abajo
+    drawText(ctx, font, `${i + 1}`, x + 3, y + 3, sel ? GOLD : ammo > 0 ? GREY : DEAD)
+    this.icon(assets, id, x + 7, y + 3, ammo <= 0)
+    if (ammo > 0 && ammo < 50) {
+      const t = `${ammo}`
+      drawText(ctx, font, t, x + 19 - measure(font, t), y + 15, WHITE)
     }
   }
 
-  // Devuelve el ancho que ocupan.
-  private pips(assets: UiAssets, x: number, y: number, on: number): number {
-    const ctx = this.ctx
-    const pip = assets.pip
-    const width = pip ? PIPS * (pip.w + 3) - 3 : PIPS * 7 - 3
-    for (let i = 0; i < PIPS; i++) {
-      const lit = i < on
-      if (pip) {
-        const frame = lit ? 0 : Math.min(1, pip.frames - 1)
-        ctx.drawImage(pip.img, frame * pip.w, 0, pip.w, pip.h, x + i * (pip.w + 3), y + 5 - pip.h, pip.w, pip.h)
-        continue
-      }
-      const sx = x + i * 7
-      const rows = ['.kk.', 'kyyk', 'krrk', 'krrk', 'kkkk']
-      const pal: Record<string, number> = { k: OUT, y: lit ? GOLD : 0x3a3230, r: lit ? 0xd0362c : 0x2a2220 }
-      rows.forEach((row, ry) => {
-        for (let rx = 0; rx < row.length; rx++) {
-          const c = pal[row[rx]]
-          if (c != null) rect(ctx, sx + rx, y + ry, 1, 1, c)
-        }
-      })
-    }
-    return width
+  // Escudo: ícono, barra azul de SHIELD_HP y el número.
+  private shieldBar(assets: UiAssets, x: number, y: number, w: number, sh: number): void {
+    const font = assets.font
+    const n = `${Math.ceil(Math.max(0, sh))}`
+    this.itemIcon(assets, 'shield', x, y - 3, sh <= 0)
+    const nw = measure(font, n)
+    segBar(this.ctx, x + 14, y, w - 14 - nw - 4, 6, sh / SHIELD_HP, [SHIELD, SHIELD_HI, 0xd8ecff])
+    drawText(this.ctx, font, n, x + w - nw, y, sh > 0 ? SHIELD_HI : GREY)
   }
 
-  // Panel de puntería centrado en y0 y el cartel de estado debajo. Devuelve la y donde terminan.
-  private top(assets: UiAssets, model: HudModel, y0: number): number {
+  private windsock(assets: UiAssets, frame: number, x: number, y: number): void {
+    const s = assets.windsock
+    if (!s) return
+    this.ctx.drawImage(s.img, frame * s.w, 0, s.w, s.h, x, y, s.w, s.h)
+  }
+
+  // ---------- arriba a la izquierda ----------
+
+  // Ronda y plata en un panel, y a su derecha los 5 ítems en botones de 22. Devuelve la y de abajo.
+  private roundAndItems(assets: UiAssets, ex: HudExtras, active: boolean): number {
     const ctx = this.ctx
     const font = assets.font
-    const h = Math.max(20, font.h + 13)
-    const ty = Math.round((h - font.h) / 2)
-    const weapon = WEAPONS[model.weapon]
-    const weaponName = (weapon?.name ?? model.weapon).toUpperCase()
-    const ammoText = model.ammo >= 50 ? '' : `x${model.ammo}`
-    const slot = WEAPON_SLOTS.indexOf(model.weapon) + 1
-    // v2: con el ajuste fino el valor puede tener décimas; se muestran solo si las hay
-    const fine = (v: number) => (Math.abs(v - Math.round(v)) < 0.05 ? `${Math.round(v)}` : v.toFixed(1).replace('.', ','))
-    const angle = `${fine(model.angle)}°`
-    const power = fine(model.power)
-    const bar = 48
-    const windN = Math.min(3, Math.ceil(Math.abs(model.wind) / 3.4))
-    const windArrows = model.wind === 0 ? '' : (model.wind > 0 ? '>' : '<').repeat(windN)
-    const windText = `${Math.abs(Math.round(model.wind))}`
-
-    const lbl = (s: string) => measure(font, s)
-    const sections: number[] = [
-      lbl('ANG') + 4 + lbl('180,0°'),
-      lbl('POT') + 4 + bar + 4 + lbl('100,0'),
-      12 + 4 + lbl(`${slot}`) + 4 + lbl(weaponName) + (ammoText ? 4 + lbl(ammoText) : 0),
-      lbl('VIENTO') + 4 + lbl('>>>') + 3 + lbl('10'),
-    ]
-    const pad = 7
-    const total = sections.reduce((a, b) => a + b, 0) + pad * (sections.length + 1)
-    const x0 = Math.round((VIEW_W - total) / 2)
-    rect(ctx, x0, y0, total, h, OUT)
-    rect(ctx, x0 + 1, y0 + 1, total - 2, h - 2, BRONZE)
-    rect(ctx, x0 + 2, y0 + 2, total - 4, h - 4, DARK)
-    rect(ctx, x0 + 2, y0 + 2, total - 4, 1, 0x2a2220)
-
-    let x = x0 + pad
-    const dim = model.showAim ? 0xffffff : GREY
-    // ángulo
-    x += drawText(ctx, font, 'ANG', x, y0 + ty, GREY) + 4
-    drawText(ctx, font, angle, x, y0 + ty, dim)
-    x = x0 + pad + sections[0] + pad
-    sep(ctx, x - Math.ceil(pad / 2) - 1, y0 + 4, h - 8)
-    // potencia
-    x += drawText(ctx, font, 'POT', x, y0 + ty, GREY) + 4
-    const by = y0 + Math.round(h / 2) - 3
-    rect(ctx, x, by, bar, 6, OUT)
-    rect(ctx, x + 1, by + 1, bar - 2, 4, 0x2a2220)
-    const fill = Math.round(((bar - 2) * Math.max(0, Math.min(100, model.power))) / 100)
-    if (fill > 0) {
-      rect(ctx, x + 1, by + 1, fill, 4, 0xe05a1c)
-      rect(ctx, x + 1, by + 1, fill, 2, 0xffa23a)
-      rect(ctx, x + 1, by + 1, fill, 1, GOLD)
+    const r = `RONDA ${ex.round}/${ex.rounds}`
+    const m = `$${ex.money}`
+    const x0 = 3
+    const y0 = 3
+    const w = Math.max(measure(font, r), measure(font, m)) + 12
+    const h = Math.max(24, font.h * 2 + 12)
+    panel(ctx, x0, y0, w, h)
+    drawText(ctx, font, r, x0 + 6, y0 + 5, GREY)
+    drawText(ctx, font, m, x0 + 6, y0 + 8 + font.h, GOLD)
+    let ix = x0 + w + 3
+    for (const id of ITEM_ORDER) {
+      const n = ex.items[id] ?? 0
+      const key = ITEM_KEYS[id] ?? ''
+      // el trazador encendido queda marcado en dorado
+      button(ctx, font, ix, y0 + 1, BTN, { on: n > 0, sel: id === 'tracer' && ex.tracer, key })
+      this.itemIcon(assets, id, ix + 3, y0 + 6, n <= 0)
+      const t = `${n}`
+      drawText(ctx, font, t, ix + 19 - measure(font, t), y0 + 16, n > 0 ? WHITE : 0x6a625a)
+      if (active && key) this.hits.push({ x: ix, y: y0 + 1, w: BTN, h: BTN, ctl: { kind: 'item', id } })
+      ix += ITEM_STEP
     }
-    x += bar + 4
-    drawText(ctx, font, power, x, y0 + ty, dim)
-    x = x0 + pad * 2 + sections[0] + sections[1] + pad
-    sep(ctx, x - Math.ceil(pad / 2) - 1, y0 + 4, h - 8)
-    // arma
-    const iy = y0 + Math.round((h - 12) / 2)
-    this.icon(assets, model.weapon, x, iy)
-    x += 16
-    x += drawText(ctx, font, `${slot}`, x, y0 + ty, GREY) + 4
-    x += drawText(ctx, font, weaponName, x, y0 + ty, 0xffffff) + 4
-    if (ammoText) drawText(ctx, font, ammoText, x, y0 + ty, model.ammo > 0 ? GOLD : 0xd0362c)
-    x = x0 + pad * 3 + sections[0] + sections[1] + sections[2] + pad
-    sep(ctx, x - Math.ceil(pad / 2) - 1, y0 + 4, h - 8)
-    // viento
-    x += drawText(ctx, font, 'VIENTO', x, y0 + ty, GREY) + 4
-    const strength = Math.abs(model.wind) / 10
-    const windColor = strength > 0.66 ? 0xff6a3a : strength > 0.33 ? GOLD : 0xbfe8ff
-    const arrowsW = lbl('>>>')
-    if (windArrows) {
-      const aw = lbl(windArrows)
-      drawText(ctx, font, windArrows, model.wind > 0 ? x + arrowsW - aw : x, y0 + ty, windColor)
-    } else {
-      drawText(ctx, font, '-', x + Math.floor(arrowsW / 2) - 1, y0 + ty, GREY)
-    }
-    x += arrowsW + 3
-    drawText(ctx, font, windText, x, y0 + ty, 0xffffff)
-
-    if (model.status) {
-      const text = model.status.toUpperCase()
-      const w = measure(font, text)
-      const sx = Math.round((VIEW_W - w) / 2)
-      const sy = y0 + h + 4
-      rect(ctx, sx - 5, sy - 3, w + 10, font.h + 6, OUT)
-      rect(ctx, sx - 4, sy - 2, w + 8, font.h + 4, DARK)
-      drawText(ctx, font, text, sx, sy, GOLD)
-      return sy + font.h + 3
-    }
-    return y0 + h
+    return y0 + Math.max(h, BTN + 1)
   }
 
-  // Muerte súbita, centrado debajo de y0. Antes: chip chico "MUERTE SÚBITA EN N" (solo con calmLeft <= 3).
+  // ---------- arriba al centro ----------
+
+  // Cartel centrado de una línea (estado, "ESPERANDO A…"). Devuelve la y de abajo.
+  private banner(assets: UiAssets, text: string, y: number, color: number, edge: number | null = null): number {
+    const ctx = this.ctx
+    const font = assets.font
+    const w = measure(font, text)
+    const x = Math.round((VIEW_W - w) / 2)
+    const h = font.h + 7
+    if (edge != null) {
+      rect(ctx, x - 6, y, w + 12, h + 2, OUT)
+      rect(ctx, x - 5, y + 1, w + 10, h, edge)
+      rect(ctx, x - 4, y + 2, w + 8, h - 2, DARK)
+      drawText(ctx, font, text, x, y + 4, color)
+      return y + h + 2
+    }
+    rect(ctx, x - 5, y, w + 10, h, OUT)
+    rect(ctx, x - 4, y + 1, w + 8, h - 2, DARK)
+    drawText(ctx, font, text, x, y + 3, color)
+    return y + h
+  }
+
+  // Muerte súbita, centrado desde y0. Antes: chip chico "MUERTE SÚBITA EN N" (solo con calmLeft <= 3).
   // Activa: cartel más grande con marco de lava que titila suave y una franja de lava abajo.
   // pulse: nivel 0..SD_STEPS-1 del titileo. Devuelve la y donde termina (y0 si no dibuja nada).
   private suddenDeath(assets: UiAssets, sd: NonNullable<HudExtras['suddenDeath']>, y0: number, pulse: number): number {
@@ -472,14 +455,14 @@ export class Hud implements MinimapInput {
       const text = `MUERTE SÚBITA EN ${n}`
       const w = measure(font, text)
       const sx = Math.round((VIEW_W - w) / 2)
-      const sy = y0 + 5
+      const sy = y0 + 3
       // con 1 tiro de margen el borde pasa de naranja a rojo
       rect(ctx, sx - 5, sy - 3, w + 10, font.h + 6, OUT)
       rect(ctx, sx - 4, sy - 2, w + 8, font.h + 4, n <= 1 ? LAVA_DEEP : LAVA)
       rect(ctx, sx - 3, sy - 1, w + 6, font.h + 2, DARK)
       const lw = drawText(ctx, font, 'MUERTE SÚBITA EN ', sx, sy, LAVA_HOT)
-      drawText(ctx, font, `${n}`, sx + lw, sy, 0xffffff)
-      return sy + font.h + 3
+      drawText(ctx, font, `${n}`, sx + lw, sy, WHITE)
+      return sy + font.h + 6
     }
     const t = pulse / Math.max(1, SD_STEPS - 1) // 0..1
     const text = 'MUERTE SÚBITA'
@@ -487,7 +470,7 @@ export class Hud implements MinimapInput {
     const bw = w + 24
     const bh = font.h + 14
     const bx = Math.round((VIEW_W - bw) / 2)
-    const by = y0 + 5
+    const by = y0 + 1
     rect(ctx, bx, by, bw, bh, OUT)
     rect(ctx, bx + 1, by + 1, bw - 2, bh - 2, mix(LAVA_DEEP, LAVA, t))
     rect(ctx, bx + 2, by + 2, bw - 4, bh - 4, OUT)
@@ -506,69 +489,61 @@ export class Hud implements MinimapInput {
       rect(ctx, bx + dx, ty + 3, 2, 1, LAVA_DEEP)
     }
     drawText(ctx, font, text, bx + Math.round((bw - w) / 2), ty, mix(LAVA, LAVA_HOT, t))
-    return by + bh
+    return by + bh + 3
   }
 
-  // Esquina superior izquierda: ronda y plata, y debajo los ítems con cantidad y tecla. Devuelve la y de abajo.
-  private extras(assets: UiAssets, ex: HudExtras, showItems: boolean): number {
+  // ---------- arriba a la derecha ----------
+
+  // Placas compactas apiladas contra el borde derecho: nombre, pips y retrato de 16, con el Pn arriba
+  // (o a la izquierda si son más de 4). Devuelve la y de abajo de la columna.
+  private plates(assets: UiAssets, list: HudSide[]): number {
+    if (!list.length) return 3
     const ctx = this.ctx
     const font = assets.font
-    const round = `RONDA ${ex.round}/${ex.rounds}`
-    const money = `$${ex.money}`
-    const w = Math.max(measure(font, round), measure(font, money)) + 10
-    const h = font.h * 2 + 12
-    const x0 = 3
-    const y0 = 3
-    rect(ctx, x0, y0, w, h, OUT)
-    rect(ctx, x0 + 1, y0 + 1, w - 2, h - 2, BRONZE)
-    rect(ctx, x0 + 2, y0 + 2, w - 4, h - 4, DARK)
-    drawText(ctx, font, round, x0 + 5, y0 + 4, GREY)
-    drawText(ctx, font, money, x0 + 5, y0 + 6 + font.h, GOLD)
-    let y = y0 + h + 3
-    if (ex.shield > 0) {
-      const t = `ESCUDO ${Math.ceil(ex.shield)}`
-      const tw = measure(font, t) + 8
-      rect(ctx, x0, y, tw, font.h + 6, OUT)
-      rect(ctx, x0 + 1, y + 1, tw - 2, font.h + 4, 0x2a5aa0)
-      drawText(ctx, font, t, x0 + 4, y + 3, 0xffffff)
-      y += font.h + 9
-    }
-    if (ex.tracer) {
-      const t = 'TRAZADOR'
-      const tw = measure(font, t) + 8
-      rect(ctx, x0, y, tw, font.h + 6, OUT)
-      rect(ctx, x0 + 1, y + 1, tw - 2, font.h + 4, 0xa07a1a)
-      drawText(ctx, font, t, x0 + 4, y + 3, 0xffffff)
-      y += font.h + 9
-    }
-    if (!showItems) return y - 3
-    for (const id of ITEM_ORDER) {
-      const n = ex.items[id] ?? 0
-      const key = ITEM_KEYS[id]
-      const label = `x${n}`
-      const cw = 12 + 4 + measure(font, label) + (key ? 4 + measure(font, key) + 6 : 0) + 6
-      rect(ctx, x0, y, cw, 16, OUT)
-      rect(ctx, x0 + 1, y + 1, cw - 2, 14, n > 0 ? 0x2a2220 : 0x14100e)
-      ctx.save()
-      if (n <= 0) ctx.globalAlpha = 0.35
-      this.itemIcon(assets, id, x0 + 3, y + 2)
-      ctx.restore()
-      let tx = x0 + 3 + 12 + 4
-      tx += drawText(ctx, font, label, tx, y + 5, n > 0 ? 0xffffff : 0x6a625a) + 4
-      if (key) {
-        rect(ctx, tx, y + 3, measure(font, key) + 4, font.h + 4, n > 0 ? GOLD : 0x4a4440)
-        drawText(ctx, font, key, tx + 2, y + 5, DARK, null)
+    const dense = list.length > 4
+    const step = dense ? PLATE_STEP_DENSE : PLATE_STEP
+    const right = VIEW_W - 3
+    let y = dense ? 4 : font.h + 7
+    for (const side of list) {
+      const name = side.name.toUpperCase()
+      const col = side.alive ? side.color : DEAD
+      const bw = Math.max(PIPS * 6 + 8, measure(font, name) + 10)
+      const bx = right - (PLATE_H - 1) - bw
+      panel(ctx, bx, y, bw, PLATE_H, col)
+      drawText(ctx, font, name, bx + 5, y + 4, side.alive ? WHITE : GREY)
+      this.pips(assets, bx + 5, y + PLATE_H - 9, side.alive ? Math.ceil((Math.max(0, side.hp) / 100) * PIPS) : 0, 1)
+      this.portrait(assets, side, bx + bw - 1, y, PLATE_H, true)
+      if (side.active && side.alive) {
+        rect(ctx, bx + 2, y - 2, bw - 4, 1, OUT)
+        rect(ctx, bx + 2, y - 3, bw - 4, 1, GOLD)
       }
-      y += 17
+      // número de jugador: el mismo "Pn" del globo sobre el tanque; el humano de esta pantalla, en dorado
+      const tw = measure(font, side.tag)
+      const edge = side.you ? GOLD : OUT
+      if (dense) {
+        const tx = bx - tw - 5
+        const ty = y + Math.floor((PLATE_H - font.h) / 2)
+        rect(ctx, tx - 2, ty - 2, tw + 4, font.h + 4, edge)
+        rect(ctx, tx - 1, ty - 1, tw + 2, font.h + 2, OUT)
+        drawText(ctx, font, side.tag, tx, ty, side.alive ? side.color : GREY)
+      } else {
+        const tx = right - tw - 1
+        rect(ctx, tx - 2, y - font.h - 3, tw + 4, font.h + 3, OUT)
+        drawText(ctx, font, side.tag, tx, y - font.h - 2, side.alive ? side.color : GREY)
+        if (side.you) {
+          const vw = measure(font, 'VOS')
+          rect(ctx, tx - vw - 7, y - font.h - 3, vw + 4, font.h + 3, OUT)
+          drawText(ctx, font, 'VOS', tx - vw - 5, y - font.h - 2, GOLD)
+        }
+      }
+      y += step
     }
-    return y - 1
+    return y - step + PLATE_H
   }
 
-
-  // Esquina superior derecha: código de sala, peers con conexión y ping, cuenta regresiva del turno.
-  // Debajo del panel superior, centrado: "ESPERANDO A <NOMBRE>...".
-  // below: la y donde terminan el panel de puntería y el estado. Devuelve la y de abajo de la columna derecha.
-  private net(assets: UiAssets, net: HudNet, below: number): number {
+  // Panel de red debajo de las placas, contra el borde derecho: código de sala, peers con conexión y
+  // ping, y debajo la cuenta regresiva del turno. Devuelve la y de abajo.
+  private net(assets: UiAssets, net: HudNet, y0: number): number {
     const ctx = this.ctx
     const font = assets.font
     const code = net.code
@@ -582,85 +557,148 @@ export class Hud implements MinimapInput {
     const w = inner + 10
     const h = 4 + font.h + (rows.length ? 4 + rows.length * (font.h + 3) : 0) + 4
     const x0 = VIEW_W - 3 - w
-    const y0 = 3
-    rect(ctx, x0, y0, w, h, OUT)
-    rect(ctx, x0 + 1, y0 + 1, w - 2, h - 2, BRONZE)
-    rect(ctx, x0 + 2, y0 + 2, w - 4, h - 4, DARK)
+    panel(ctx, x0, y0, w, h)
     drawText(ctx, font, code, x0 + 5, y0 + 4, GOLD)
     let y = y0 + 4 + font.h + 4
     for (const r of rows) {
       rect(ctx, x0 + 5, y + 1, 5, 5, OUT)
       rect(ctx, x0 + 6, y + 2, 3, 3, r.ok ? 0x3ac04a : 0xd0362c)
-      drawText(ctx, font, r.name, x0 + 14, y, r.ok ? 0xffffff : GREY)
+      drawText(ctx, font, r.name, x0 + 14, y, r.ok ? WHITE : GREY)
       const pw = measure(font, r.ping)
       const slow = r.ok && r.ping !== '--' && Number.parseInt(r.ping, 10) > 250
       drawText(ctx, font, r.ping, x0 + w - 5 - pw, y, !r.ok ? 0xd0362c : slow ? 0xff6a3a : GREY)
       y += font.h + 3
     }
-    let right = y0 + h + 3
+    let bottom = y0 + h
     if (net.turnLeft != null) {
       const secs = Math.max(0, Math.ceil(net.turnLeft))
       const urgent = secs <= 10
       const text = String(secs)
-      const scale = urgent ? 3 : 2
-      const tw = measure(font, text) * scale
+      const scale = 2 // en ×3 los huecos de los dígitos se tapan con el contorno; la urgencia la da el rojo
+      const tw = measureBig(font, text, scale)
       const bw = Math.max(tw + 12, 30)
-      const bh = (font.h + 2) * scale + 6
+      const bh = font.h * scale + 9
       const bx = VIEW_W - 3 - bw
-      rect(ctx, bx, right, bw, bh, OUT)
-      rect(ctx, bx + 1, right + 1, bw - 2, bh - 2, urgent ? 0xd0362c : BRONZE)
-      rect(ctx, bx + 2, right + 2, bw - 4, bh - 4, urgent ? 0x3a0e0a : DARK)
-      bigText(ctx, font, text, bx + Math.floor((bw - tw) / 2), right + 3, scale, urgent ? 0xff5a4a : 0xffffff)
-      right += bh + 3
+      const by = bottom + 3
+      panel(ctx, bx, by, bw, bh, urgent ? 0xd0362c : BRONZE, urgent ? 0x3a0e0a : DARK)
+      bigText(ctx, font, text, bx + Math.floor((bw - tw) / 2), by + 4, urgent ? 0xff5a4a : WHITE, scale)
+      bottom = by + bh
     }
-    if (net.waiting) {
-      const text = net.waiting.toUpperCase().replace(/…/g, '...')
-      const tw = measure(font, text)
-      const sx = Math.round((VIEW_W - tw) / 2)
-      const sy = Math.max(44, below + 8)
-      rect(ctx, sx - 6, sy - 4, tw + 12, font.h + 8, OUT)
-      rect(ctx, sx - 5, sy - 3, tw + 10, font.h + 6, BRONZE)
-      rect(ctx, sx - 4, sy - 2, tw + 8, font.h + 4, DARK)
-      drawText(ctx, font, text, sx, sy, /RECONECT|DESCONECT/.test(text) ? 0xff8a6a : GOLD)
-    }
-    return right - 3
+    return bottom
   }
 
-  private itemIcon(assets: UiAssets, id: ItemId, x: number, y: number): void {
+  // ---------- piezas ----------
+
+  // Retrato con marco del color del jugador; s = 36 (32 px de retrato) o 20 (retrato a 16).
+  private portrait(assets: UiAssets, side: HudSide, x: number, y: number, s: number, flip: boolean): void {
+    const ctx = this.ctx
+    rect(ctx, x, y, s, s, OUT)
+    rect(ctx, x + 1, y + 1, s - 2, s - 2, side.alive ? side.color : DEAD)
+    rect(ctx, x + 2, y + 2, s - 4, s - 4, INK)
+    const img = assets.portraits[side.crew]
+    const ps = s - 4
+    ctx.save()
+    if (!side.alive) ctx.filter = 'grayscale(1) brightness(0.55)'
+    if (img) {
+      if (flip) {
+        ctx.translate(x + 2 + ps, y + 2)
+        ctx.scale(-1, 1)
+        ctx.drawImage(img, 0, 0, ps, ps)
+      } else {
+        ctx.drawImage(img, x + 2, y + 2, ps, ps)
+      }
+    } else {
+      silhouette(ctx, x + 2, y + 2, ps, side.color)
+    }
+    ctx.restore()
+  }
+
+  // Seis pips de vida, ×sc. Devuelve el ancho.
+  private pips(assets: UiAssets, x: number, y: number, on: number, sc: number): number {
+    const ctx = this.ctx
+    const pip = assets.pip
+    const pw = pip ? pip.w : 4
+    const step = (pw + 2) * sc
+    for (let i = 0; i < PIPS; i++) {
+      const lit = i < on
+      if (pip) {
+        const frame = lit ? 0 : Math.min(1, pip.frames - 1)
+        ctx.drawImage(pip.img, frame * pip.w, 0, pip.w, pip.h, x + i * step, y, pip.w * sc, pip.h * sc)
+        continue
+      }
+      rect(ctx, x + i * step, y, 4 * sc, 5 * sc, OUT)
+      rect(ctx, x + i * step + sc, y + sc, 2 * sc, 3 * sc, lit ? 0xd0362c : SLOT_BG)
+    }
+    return PIPS * step - 2 * sc
+  }
+
+  private itemIcon(assets: UiAssets, id: ItemId, x: number, y: number, off = false): void {
     const ctx = this.ctx
     const icons = assets.itemIcons
     const index = ITEM_ORDER.indexOf(id)
+    ctx.save()
+    if (off) {
+      ctx.globalAlpha = 0.45
+      ctx.filter = 'grayscale(1)'
+    }
     if (icons && index >= 0 && index < icons.frames) {
       ctx.drawImage(icons.img, index * icons.w, 0, icons.w, icons.h, x, y, 12, 12)
-      return
+    } else {
+      rect(ctx, x, y, 12, 12, OUT)
+      rect(ctx, x + 1, y + 1, 10, 10, 0x3d8cf0)
+      drawText(ctx, assets.font, ITEM_NAMES[id][0], x + 4, y + 3, WHITE, null)
     }
-    rect(ctx, x, y, 12, 12, OUT)
-    rect(ctx, x + 1, y + 1, 10, 10, 0x3d8cf0)
-    drawText(ctx, assets.font, ITEM_NAMES[id][0], x + 4, y + 3, 0xffffff, null)
+    ctx.restore()
   }
 
-  private icon(assets: UiAssets, weapon: WeaponId, x: number, y: number): void {
+  private icon(assets: UiAssets, weapon: WeaponId, x: number, y: number, off = false): void {
     const ctx = this.ctx
     const icons = assets.weaponIcons
-    const index = ICON_ORDER.indexOf(weapon)
+    const index = WEAPON_SLOTS.indexOf(weapon)
+    ctx.save()
+    if (off) {
+      ctx.globalAlpha = 0.35
+      ctx.filter = 'grayscale(1)'
+    }
     if (icons && index >= 0 && index < icons.frames) {
       ctx.drawImage(icons.img, index * icons.w, 0, icons.w, icons.h, x, y, 12, 12)
-      return
+    } else {
+      // respaldo: un obús
+      rect(ctx, x + 2, y + 4, 8, 5, OUT)
+      rect(ctx, x + 3, y + 5, 5, 3, weapon === 'heavy' ? 0xd0362c : weapon === 'dirt' ? 0x8a5a34 : 0xb8b0a0)
+      rect(ctx, x + 8, y + 5, 2, 3, GOLD)
     }
-    // respaldo: un obús
-    rect(ctx, x + 2, y + 4, 8, 5, OUT)
-    rect(ctx, x + 3, y + 5, 5, 3, weapon === 'heavy' ? 0xd0362c : weapon === 'dirt' ? 0x8a5a34 : 0xb8b0a0)
-    rect(ctx, x + 8, y + 5, 2, 3, GOLD)
+    ctx.restore()
   }
 }
 
-function barX(): number {
-  return Math.round((VIEW_W - BAR_W) / 2)
+// Con el ajuste fino el valor puede tener décimas; se muestran solo si las hay, con coma decimal.
+function fine(v: number): string {
+  return Math.abs(v - Math.round(v)) < 0.05 ? `${Math.round(v)}` : v.toFixed(1).replace('.', ',')
 }
 
-function rect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, c: number): void {
-  ctx.fillStyle = css(c)
-  ctx.fillRect(x, y, w, h)
+function tagNum(s: HudSide): number {
+  return Number.parseInt(s.tag.replace(/\D/g, ''), 10) || 0
+}
+
+// Recorta un texto con "." al final para que entre en w.
+function clip(font: UiAssets['font'], text: string, w: number): string {
+  if (measure(font, text) <= w) return text
+  let t = text
+  while (t.length > 1 && measure(font, `${t}.`) > w) t = t.slice(0, -1)
+  return `${t}.`
+}
+
+// Cuadro de la manga de viento: el de la fuerza actual (−10..10 en `frames` pasos) y, con viento, cada
+// tanto una ráfaga que la estira un cuadro más hacia el lado del viento (en el tope, la afloja uno), más
+// seguido cuanto más fuerte sopla. Así flamea sin dejar de leerse la dirección.
+function sockFrame(wind: number, now: number, frames: number): number {
+  const base = Math.max(0, Math.min(frames - 1, Math.round(((wind + 10) / 20) * (frames - 1))))
+  if (Math.abs(wind) < 0.5) return base
+  const period = Math.max(160, 560 - 36 * Math.abs(wind))
+  if (Math.floor(now / period) % 2 === 0) return base
+  const gust = base + Math.sign(wind)
+  return gust >= 0 && gust < frames ? gust : base - Math.sign(wind)
 }
 
 // Nivel del titileo de la muerte súbita activa: seno cuantizado en SD_STEPS escalones.
@@ -669,32 +707,13 @@ function sdPulse(now: number): number {
   return Math.min(SD_STEPS - 1, Math.floor(s * SD_STEPS))
 }
 
-function mix(a: number, b: number, t: number): number {
-  const ch = (s: number) => Math.round(((a >> s) & 255) * (1 - t) + ((b >> s) & 255) * t)
-  return (ch(16) << 16) | (ch(8) << 8) | ch(0)
-}
-
-function sep(ctx: CanvasRenderingContext2D, x: number, y: number, h: number): void {
-  rect(ctx, x, y, 1, h, 0x3a3028)
-}
-
-function silhouette(ctx: CanvasRenderingContext2D, x: number, y: number, color: number): void {
-  rect(ctx, x, y, 32, 32, 0x2a2220)
-  rect(ctx, x + 9, y + 6, 14, 6, color)
-  rect(ctx, x + 10, y + 12, 12, 10, 0xd8966c)
-  rect(ctx, x + 12, y + 15, 2, 2, OUT)
-  rect(ctx, x + 18, y + 15, 2, 2, OUT)
-  rect(ctx, x + 6, y + 23, 20, 9, 0x4a5a2a)
-}
-
-// Texto ampliado por un factor entero (cuenta regresiva).
-function bigText(ctx: CanvasRenderingContext2D, font: UiAssets['font'], text: string, x: number, y: number, scale: number, color: number): void {
-  const w = measure(font, text) + 2
-  const tmp = document.createElement('canvas')
-  tmp.width = w
-  tmp.height = font.h + 2
-  const t = tmp.getContext('2d')
-  if (!t) return
-  drawText(t, font, text, 0, 0, color)
-  ctx.drawImage(tmp, 0, 0, w, tmp.height, x, y, w * scale, tmp.height * scale)
+function silhouette(ctx: CanvasRenderingContext2D, x: number, y: number, s: number, color: number): void {
+  const k = s / 32
+  const r = (rx: number, ry: number, w: number, h: number, c: number) => rect(ctx, x + Math.round(rx * k), y + Math.round(ry * k), Math.max(1, Math.round(w * k)), Math.max(1, Math.round(h * k)), c)
+  r(0, 0, 32, 32, 0x2a2220)
+  r(9, 6, 14, 6, color)
+  r(10, 12, 12, 10, 0xd8966c)
+  r(12, 15, 2, 2, OUT)
+  r(18, 15, 2, 2, OUT)
+  r(6, 23, 20, 9, 0x4a5a2a)
 }
