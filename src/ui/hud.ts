@@ -372,8 +372,10 @@ export class Hud implements MinimapInput {
     const weaponName = (weapon?.name ?? model.weapon).toUpperCase()
     const ammoText = model.ammo >= 50 ? '' : `x${model.ammo}`
     const slot = WEAPON_SLOTS.indexOf(model.weapon) + 1
-    const angle = `${Math.round(model.angle)}°`
-    const power = `${Math.round(model.power)}`
+    // v2: con el ajuste fino el valor puede tener décimas; se muestran solo si las hay
+    const fine = (v: number) => (Math.abs(v - Math.round(v)) < 0.05 ? `${Math.round(v)}` : v.toFixed(1).replace('.', ','))
+    const angle = `${fine(model.angle)}°`
+    const power = fine(model.power)
     const bar = 48
     const windN = Math.min(3, Math.ceil(Math.abs(model.wind) / 3.4))
     const windArrows = model.wind === 0 ? '' : (model.wind > 0 ? '>' : '<').repeat(windN)
@@ -381,8 +383,8 @@ export class Hud implements MinimapInput {
 
     const lbl = (s: string) => measure(font, s)
     const sections: number[] = [
-      lbl('ANG') + 4 + lbl('180°'),
-      lbl('POT') + 4 + bar + 4 + lbl('100'),
+      lbl('ANG') + 4 + lbl('180,0°'),
+      lbl('POT') + 4 + bar + 4 + lbl('100,0'),
       12 + 4 + lbl(`${slot}`) + 4 + lbl(weaponName) + (ammoText ? 4 + lbl(ammoText) : 0),
       lbl('VIENTO') + 4 + lbl('>>>') + 3 + lbl('10'),
     ]
