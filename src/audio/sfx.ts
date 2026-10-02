@@ -314,6 +314,59 @@ export class Sfx {
     this.tone({ freq: 120, to: 80, dur: 0.12, type: 'sine', gain: 0.3, delay: 0.2 })
   }
 
+  // ---------- muerte súbita (v2) ----------
+
+  // La lava sube: rugido grave que crece y se apaga (~1 s, lo que dura la subida) con burbujeo encima.
+  // k: 1 en cada subida, más cuando aparece desde el fondo.
+  lavaRise(k = 1): void {
+    if (!this.ready) return
+    const r = Math.random
+    this.noise({ dur: 1.3 * k, type: 'lowpass', freq: 110, to: 70, gain: 0.55 * k, attack: 0.35 })
+    this.tone({ freq: 42, to: 30, dur: 1.2 * k, type: 'triangle', gain: 0.35 * k, delay: 0.05 })
+    this.tone({ freq: 63, to: 47, dur: 0.9 * k, type: 'sawtooth', gain: 0.03 * k, delay: 0.1 })
+    // burbujas: blups cortos que suben de tono
+    const bubbles = Math.round(9 * k)
+    for (let i = 0; i < bubbles; i++) {
+      const f = 160 + r() * 260
+      this.tone({ freq: f, to: f * 1.9, dur: 0.06 + r() * 0.05, type: 'sine', gain: 0.07 + r() * 0.06, delay: 0.1 + r() * 1.1 * k })
+    }
+  }
+
+  // Proyectil que se derrite en la lava: siseo con chisporroteo, sin explosión.
+  melt(): void {
+    if (!this.ready) return
+    const r = Math.random
+    this.noise({ dur: 0.7, type: 'highpass', freq: 2600, to: 5200, gain: 0.22, attack: 0.02 })
+    this.noise({ dur: 0.35, type: 'bandpass', freq: 900, to: 400, q: 1.2, gain: 0.18 })
+    for (let i = 0; i < 10; i++) {
+      this.noise({ dur: 0.012 + r() * 0.015, type: 'highpass', freq: 2500 + r() * 3000, gain: 0.08 + r() * 0.1, delay: r() * 0.6 })
+    }
+    this.tone({ freq: 220, to: 420, dur: 0.08, type: 'sine', gain: 0.1, delay: 0.05 })
+  }
+
+  // Tanque quemándose en la lava: chapa que chirría, fritura y un golpe sordo.
+  lavaBurn(): void {
+    if (!this.ready) return
+    const r = Math.random
+    this.tone({ freq: 70, to: 40, dur: 0.25, type: 'sine', gain: 0.45 })
+    this.noise({ dur: 0.9, type: 'bandpass', freq: 1500, to: 700, q: 0.8, gain: 0.28, attack: 0.05 })
+    this.tone({ freq: 610, to: 480, dur: 0.45, type: 'triangle', gain: 0.05, delay: 0.05 })
+    for (let i = 0; i < 8; i++) {
+      this.noise({ dur: 0.02 + r() * 0.02, type: 'highpass', freq: 2000 + r() * 2500, gain: 0.08 + r() * 0.1, delay: 0.05 + r() * 0.7 })
+    }
+  }
+
+  // Empieza la muerte súbita: sirena corta de dos tonos que baja, con un golpe grave abajo.
+  suddenDeath(): void {
+    if (!this.ready) return
+    for (let i = 0; i < 2; i++) {
+      this.tone({ freq: 740, to: 520, dur: 0.28, type: 'square', gain: 0.06, delay: i * 0.32 })
+      this.tone({ freq: 370, to: 260, dur: 0.28, type: 'triangle', gain: 0.1, delay: i * 0.32 })
+    }
+    this.tone({ freq: 55, to: 32, dur: 0.8, type: 'sine', gain: 0.6, delay: 0.62 })
+    this.noise({ dur: 0.8, type: 'lowpass', freq: 160, to: 60, gain: 0.4, attack: 0.1, delay: 0.62 })
+  }
+
   // Cartel de turno en hot-seat: corneta corta.
   banner(): void {
     if (!this.ready) return

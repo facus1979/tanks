@@ -18,10 +18,10 @@ import type {
   Vec2,
   WeaponId,
 } from '../sim/types'
-import { FUEL_PER_TURN, ITEM_ORDER, SHOP, WEAPONS } from '../sim/types'
+import { FUEL_PER_TURN, ITEM_ORDER, SHOP, SUDDEN_DEATH_CALM, WEAPONS } from '../sim/types'
 import { VIEW_W, type Camera, type RenderFrame } from '../render/types'
 import type { HudModel, HudSide } from '../ui/hud'
-import type { BannerModel, HudNet, MinimapModel, ScoreModel, ShopModel } from '../ui/types'
+import type { BannerModel, HudExtras, HudNet, MinimapModel, ScoreModel, ShopModel } from '../ui/types'
 import { AiClient } from './ai-client'
 import { CameraController, shotZoom } from './camera'
 import { pickDemoShot, seededRandom } from './demo'
@@ -60,7 +60,7 @@ interface Playback {
   end: number
   before: GameState
   after: GameState
-  flights: { flight: Flight; start: number; dur: number }[]
+  flights: { flight: Flight; start: number; dur: number; done: boolean }[]
   timeline: TimedEvent[]
   next: number
   firstImpact: number
@@ -74,6 +74,12 @@ interface Playback {
   finisher: GameEvent | null // la muerte que cierra la ronda: arranca la cámara lenta
   flightsEnd: number // fin del último vuelo
   zoom: number // zoom de la cámara durante el vuelo (shotZoom)
+  // v2: punto donde se asienta la cámara al terminar los vuelos (último impacto o fin del último vuelo)
+  settle: Vec2 | null
+  // v2 muerte súbita: lava y tiros sin daño que muestra el tiro mientras se reproduce. Arrancan como
+  // estaban antes del disparo y cambian cuando llegan los eventos lava y calm en su t.
+  lava: number | null
+  calmLeft: number
 }
 
 interface AiDrive {
@@ -96,6 +102,13 @@ const SLOW_TIME = 1.2
 const LATE = new Set<GameEvent['type']>(['turn', 'wind', 'gameover', 'roundover', 'round', 'shop'])
 // Anticipación de la cámara sobre el proyectil (segundos de vuelo hacia adelante).
 const LOOKAHEAD = 0.35
+// v2 muerte súbita. La lava sube (o aparece desde el fondo) en LAVA_ANIM segundos, con un respiro de
+// LAVA_GAP después de la última explosión del tiro; el daño de lava sin t llega LAVA_HIT después de que
+// empieza a subir, y el turno siguiente arranca LAVA_TAIL después de que termina de subir.
+const LAVA_ANIM = 0.8
+const LAVA_GAP = 0.3
+const LAVA_HIT = 0.5
+const LAVA_TAIL = 0.4
 
 export class Session {
   state: GameState | null = null
@@ -129,6 +142,11 @@ export class Session {
   private cam = new CameraController()
   private camKey = '' // turno que sigue la cámara; si cambia, vuelve al tanque
   private lastImpacts = new Map<number, Vec2>() // último impacto de cada jugador en la ronda
+  // v2 muerte súbita: subida de la lava en curso (presentación) y avisos para el audio
+  private lavaAnim: { from: number; to: number; t: number } | null = null
+  private suddenDeathSaid = false // ya se avisó en esta ronda que empezó la muerte súbita
+  private suddenDeathNews = false // se avisó y main.ts todavía no lo levantó (sonido y vibración)
+  private melts: Vec2[] = [] // proyectiles derretidos en la lava desde la última llamada a pullMelts
   // online
   private mode: SessionMode = 'local'
   private localIds = new Set<number>()
@@ -239,10 +257,19 @@ export class Session {
     this.scale = 1
     this.lastHumanId = null
     this.tracerCache = null
+    this.resetLava()
     this.resetCamera()
     this.demo = demo ? { ...demo, shotDone: false, seed } : null
     this.random = demo ? seededRandom(seed ^ 0x5bd1e995) : Math.random
     if (!demo?.freeze && !this.aiClient && this.mode !== 'client') this.aiClient = new AiClient()
+  }
+
+  // QA (?play=...&calm=N): arranca la ronda con N tiros sin daño ya contados, para probar la muerte
+  // súbita rápido. Solo en partidas locales, antes del primer tiro.
+  qaCalm(calm: number): void {
+    const s = this.state
+    if (!s || this.mode !== 'local' || this.playback) return
+    this.state = { ...s, calm: Math.max(0, Math.round(calm)) }
   }
 
   // ---------- online ----------
@@ -291,7 +318,10 @@ export class Session {
     this.awaitFire = 0
     this.aim = null
     this.terrainVersion++
+    this.lavaAnim = null
     if (round !== state.round) this.newRound()
+    // ya empezada (reconexión): no se vuelve a avisar
+    if (state.lava != null) this.suddenDeathSaid = true
   }
 
   // Cañón de otro jugador en vivo (aimLive): solo visual, no toca el estado.
@@ -339,7 +369,8 @@ export class Session {
     aim.power = clamp(Math.round(power), 0, 100)
   }
 
-  // Ajuste continuo del ángulo y la potencia del humano. Se manda a la sim al disparar.
+  // Ajuste continuo del ángulo y la potencia del humano (con Shift o el paso táctil corto, fino y con
+  // decimales). Se manda a la sim al disparar, redondeado a un decimal.
   nudge(dAngle: number, dPower: number): void {
     if (!this.inputEnabled || !this.state || (dAngle === 0 && dPower === 0)) return
     const aim = this.currentAim()
@@ -558,6 +589,10 @@ export class Session {
       this.slow = Math.max(0, this.slow - dt)
     }
     if (this.awaitFire > 0) this.awaitFire = Math.max(0, this.awaitFire - dt)
+    if (this.lavaAnim) {
+      this.lavaAnim.t += dt * this.scale
+      if (this.lavaAnim.t >= LAVA_ANIM) this.lavaAnim = null
+    }
     if (this.playback) {
       this.advance(dt * this.scale)
       return
@@ -579,6 +614,20 @@ export class Session {
     const events = this.fx
     this.fx = []
     return events
+  }
+
+  // Proyectiles que se derritieron en la lava desde la última llamada (chisporroteo).
+  pullMelts(): Vec2[] {
+    const melts = this.melts
+    this.melts = []
+    return melts
+  }
+
+  // true una vez por ronda, cuando empieza la muerte súbita (aviso sonoro y vibración).
+  pullSuddenDeath(): boolean {
+    const news = this.suddenDeathNews
+    this.suddenDeathNews = false
+    return news
   }
 
   // Disparos que salieron desde la última llamada (para el audio).
@@ -609,7 +658,7 @@ export class Session {
         freeze: this.frozen,
         aimPreview: null,
         camera: this.cam.camera,
-        lava: pb.before.lava ?? null, // v2: stub; la animación de la subida la hace el área flujo
+        lava: this.lavaView(),
       }
     }
     return {
@@ -627,8 +676,62 @@ export class Session {
       freeze: this.frozen,
       aimPreview: this.tracerPath(s),
       camera: this.cam.camera,
-      lava: s.lava ?? null,
+      lava: this.lavaView(),
     }
+  }
+
+  // ---------- muerte súbita (v2) ----------
+
+  // y de la superficie de la lava que se ve: subiendo suave tras el evento lava; con un tiro en
+  // reproducción, la del tiro (la de antes hasta que llega el evento); si no, la del estado.
+  private lavaView(): number | null {
+    const a = this.lavaAnim
+    if (a) {
+      const k = clamp(a.t / LAVA_ANIM, 0, 1)
+      const e = k * k * (3 - 2 * k) // arranca y se asienta suave
+      return a.from + (a.to - a.from) * e
+    }
+    if (this.playback) return this.playback.lava
+    return this.state?.lava ?? null
+  }
+
+  private resetLava(): void {
+    this.lavaAnim = null
+    this.suddenDeathSaid = false
+    this.suddenDeathNews = false
+    this.melts = []
+  }
+
+  // Eventos de la muerte súbita, en su momento (playback) o al aplicarse (fuera de un tiro).
+  private noteEvent(event: GameEvent, pb: Playback | null): void {
+    if (event.type === 'lava') {
+      const shown = this.lavaView()
+      const h = (pb ? pb.terrain : this.state?.terrain)?.h ?? 450
+      // sin lava todavía: aparece subiendo desde el fondo del mapa
+      const from = shown ?? event.from ?? h
+      this.lavaAnim = from !== event.to ? { from, to: event.to, t: 0 } : null
+      if (pb) {
+        pb.lava = event.to
+        pb.calmLeft = Math.max(0, event.warn)
+      }
+      if (event.from == null) this.announceSuddenDeath()
+    } else if (event.type === 'calm') {
+      if (pb) pb.calmLeft = Math.max(0, event.left)
+      if (event.left <= 0) this.announceSuddenDeath()
+    }
+  }
+
+  private announceSuddenDeath(): void {
+    if (this.suddenDeathSaid || this.demo?.freeze) return
+    this.suddenDeathSaid = true
+    this.suddenDeathNews = true
+  }
+
+  // HudExtras.suddenDeath: tiros sin daño que faltan y si la lava ya sube.
+  private suddenDeathModel(s: GameState): HudExtras['suddenDeath'] {
+    const pb = this.playback
+    const calmLeft = pb ? pb.calmLeft : Math.max(0, SUDDEN_DEATH_CALM - (s.calm ?? 0))
+    return { active: this.lavaView() !== null, calmLeft }
   }
 
   // ---------- cámara (v2) ----------
@@ -687,7 +790,8 @@ export class Session {
       } else if (pb.t < pb.flightsEnd) {
         this.cam.holdShot(pb.zoom)
       } else {
-        const at = this.lastImpact ?? pb.players.find((p) => p.id === pb.shooterId) ?? null
+        // se queda donde terminó el tiro (también mientras sube la lava y quema a los de cerca)
+        const at = pb.settle ?? pb.players.find((p) => p.id === pb.shooterId) ?? null
         if (at) this.cam.settleAt(at.x, at.y)
         else this.cam.holdShot(1)
       }
@@ -721,6 +825,7 @@ export class Session {
       tanks: players.map((p, i) => ({ id: p.id, x: p.x, y: p.y, color: p.color, alive: p.alive, current: i === currentIndex })),
       projectiles: pb ? this.projectiles(pb) : [],
       lastImpacts,
+      lava: this.lavaView(),
     }
   }
 
@@ -806,6 +911,7 @@ export class Session {
         tracer: !!ammoOwner?.tracer,
         net: this.netHud,
         minimap: this.minimap(players, currentIndex, pb ? pb.terrain : s.terrain),
+        suddenDeath: this.suddenDeathModel(s),
       },
     }
   }
@@ -879,8 +985,8 @@ export class Session {
     const p = s.players[s.current]
     if (!p || !p.tracer || !this.controlledHere(p) || this.bannerFor()) return null
     const aim = this.aim && this.aim.playerId === p.id ? this.aim : p
-    const angle = Math.round(aim.angle)
-    const power = Math.round(aim.power)
+    const angle = quantize(aim.angle)
+    const power = quantize(aim.power)
     const key = `${this.matchId}:${s.turn}:${p.x}:${p.y}:${angle}:${power}:${s.wind}:${this.terrainVersion}`
     if (this.tracerCache?.key === key) return this.tracerCache.path
     let path: Vec2[] = []
@@ -918,8 +1024,8 @@ export class Session {
     if (!p || p.id !== playerId) return
     const aim = this.currentAim()
     if (aim) {
-      const angle = exact ? aim.angle : Math.round(aim.angle)
-      const power = exact ? aim.power : Math.round(aim.power)
+      const angle = exact ? aim.angle : quantize(aim.angle)
+      const power = exact ? aim.power : quantize(aim.power)
       if (angle !== p.angle || power !== p.power || this.mode !== 'local') this.act({ type: 'aim', playerId, angle, power })
     }
     this.act({ type: 'fire', playerId })
@@ -975,6 +1081,7 @@ export class Session {
     const changed = result.state !== s
     this.state = result.state
     if (result.events.length) this.fx.push(...result.events)
+    for (const e of result.events) this.noteEvent(e, null)
     if (result.events.some((e) => e.type === 'empty')) this.flash('Sin municion')
     if (command.type === 'move' && changed && result.state.terrain !== s.terrain) this.terrainVersion++
     if (result.events.some((e) => e.type === 'round') || (s.phase !== 'aiming' && result.state.phase === 'aiming')) this.newRound()
@@ -996,6 +1103,7 @@ export class Session {
     this.tracerCache = null
     this.sentReady.clear()
     this.sentNext = false
+    this.resetLava()
     this.resetCamera()
   }
 
@@ -1015,11 +1123,16 @@ export class Session {
       flight,
       start: flight.startT ?? 0,
       dur: Math.max(0, (flight.path.length - 1) * PATH_DT),
+      done: false,
     }))
     const flightsEnd = timed.reduce((m, f) => Math.max(m, f.start + f.dur), 0)
     let lastT = 0
     let firstImpact = Infinity
     let bigBlast = false
+    // v2 muerte súbita: calm, lava y lo que viene después de la lava (o el daño de lava) sin t propio
+    // se ubican al final del tiro, cuando ya se asentaron las explosiones (ver abajo).
+    const deferred: TimedEvent[] = []
+    let lavaPhase = false
     const timeline: TimedEvent[] = events.map((event) => {
       if (event.type === 'impact') {
         lastT = Number.isFinite(event.t) ? event.t : flightsEnd
@@ -1027,14 +1140,33 @@ export class Session {
         if (event.blast === 'nuke' || event.blast === 'bigfire') bigBlast = true
       }
       if (LATE.has(event.type)) return { t: Infinity, event }
-      const own = event.type !== 'impact' && 't' in event && typeof event.t === 'number' ? event.t : null
+      const own = ownT(event)
+      if (event.type === 'lava' || (event.type === 'damage' && event.cause === 'lava')) lavaPhase = true
+      if (own == null && (lavaPhase || event.type === 'calm') && event.type !== 'impact') {
+        const item = { t: NaN, event }
+        deferred.push(item)
+        return item
+      }
       return { t: own ?? lastT, event }
     })
+    // Base de la lava: después de los vuelos y de todo lo que ya tiene su momento.
+    let base = flightsEnd
+    for (const e of timeline) if (Number.isFinite(e.t)) base = Math.max(base, e.t)
+    const lavaEvent = events.find((e) => e.type === 'lava')
+    const hasLava = !!lavaEvent || deferred.some((d) => d.event.type === 'damage')
+    const lavaT = (lavaEvent && ownT(lavaEvent)) ?? base + LAVA_GAP
+    for (const d of deferred) {
+      if (d.event.type === 'lava') d.t = lavaT
+      else if (d.event.type === 'calm') d.t = hasLava ? lavaT : base
+      else d.t = lavaT + LAVA_HIT
+    }
     timeline.sort((a, b) => a.t - b.t)
     if (!Number.isFinite(firstImpact)) firstImpact = flightsEnd
     const eventsEnd = timeline.reduce((m, e) => (Number.isFinite(e.t) ? Math.max(m, e.t) : m), 0)
     const hasShot = flights.length > 0 || timeline.some((e) => e.event.type === 'impact')
     const settle = hasShot ? SETTLE + (bigBlast ? 0.5 : 0) : 0
+    // con lava, el turno siguiente espera a que termine de subir
+    const lavaEnd = hasLava ? lavaT + LAVA_ANIM + LAVA_TAIL : 0
     const weapon = before.players.find((p) => p.id === shooterId)?.weapon ?? 'normal'
     const { terrain, reveal, pending } = splitTerrain(before.terrain, after.terrain, timeline)
     // la ronda termina con este tiro: la última muerte va en cámara lenta
@@ -1044,7 +1176,7 @@ export class Session {
     }
     this.playback = {
       t: 0,
-      end: Math.max(flightsEnd, eventsEnd) + settle,
+      end: Math.max(Math.max(flightsEnd, eventsEnd) + settle, lavaEnd),
       before,
       after,
       flights: timed,
@@ -1064,6 +1196,9 @@ export class Session {
         flights.map((f) => f.path),
         before.terrain.h,
       ),
+      settle: null,
+      lava: before.lava ?? null,
+      calmLeft: Math.max(0, SUDDEN_DEATH_CALM - (before.calm ?? 0)),
     }
     if (hasShot) {
       this.shots.push({ playerId: shooterId, weapon })
@@ -1076,6 +1211,7 @@ export class Session {
     const pb = this.playback
     if (!pb) return
     pb.t += dt
+    this.landFlights(pb)
     while (pb.next < pb.timeline.length && pb.timeline[pb.next].t <= pb.t) {
       this.deliver(pb, pb.timeline[pb.next].event)
       pb.next++
@@ -1097,8 +1233,28 @@ export class Session {
     this.cam.mode = 'tank'
   }
 
+  // Vuelos que terminaron: la cámara se asienta en su punto final si no hubo impacto, y los que se
+  // derritieron en la lava (sin explosión ni evento impact) chisporrotean.
+  private landFlights(pb: Playback): void {
+    for (const f of pb.flights) {
+      if (f.done || pb.t < f.start + f.dur) continue
+      f.done = true
+      const path = f.flight.path
+      const end: Vec2 | null = path.length ? path[path.length - 1] : null
+      if (f.flight.impact.kind === 'lava') {
+        const at = { x: f.flight.impact.x, y: f.flight.impact.y }
+        this.melts.push(at)
+        pb.settle = at
+        this.lastImpacts.set(pb.shooterId, at)
+      } else if (!pb.settle && end) {
+        pb.settle = { x: end.x, y: end.y }
+      }
+    }
+  }
+
   private deliver(pb: Playback, event: GameEvent): void {
     this.fx.push(event)
+    this.noteEvent(event, pb)
     if (event === pb.finisher) this.slow = SLOW_TIME
     const pixels = pb.reveal.get(event)
     if (pixels && pixels.length) {
@@ -1113,6 +1269,7 @@ export class Session {
     switch (event.type) {
       case 'impact':
         this.lastImpact = { x: event.x, y: event.y }
+        pb.settle = this.lastImpact
         if (event.source !== 'barrel') this.lastImpacts.set(pb.shooterId, { x: event.x, y: event.y })
         break
       case 'damage': {
@@ -1378,6 +1535,18 @@ function samplePath(path: Vec2[], t: number): Vec2 {
     x: path[i].x + (path[i + 1].x - path[i].x) * f,
     y: path[i].y + (path[i + 1].y - path[i].y) * f,
   }
+}
+
+// t propio de un evento (los que lo traen opcional); el de impact se maneja aparte.
+function ownT(event: GameEvent): number | null {
+  if (event.type === 'impact') return null
+  const t = (event as { t?: unknown }).t
+  return typeof t === 'number' && Number.isFinite(t) ? t : null
+}
+
+// Un decimal: el ajuste fino (Shift, paso táctil) mueve de a 0,2 y eso tiene que llegar a la sim.
+function quantize(v: number): number {
+  return Math.round(v * 10) / 10
 }
 
 function clamp(v: number, lo: number, hi: number): number {
