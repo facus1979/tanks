@@ -1,6 +1,9 @@
 // Prueba e2e del online SIN internet (transporte local = BroadcastChannel entre pestañas).
 // Uso: npm run net-test            partida real: anfitrión + cliente con ?autotest=1 hasta el fin
+//      npm run net-test -- --players 8   v5: partida Grande con 8 casilleros (2 humanos + 6 IA)
+//                                        (también NET_TEST_PLAYERS=8; N de 3 a 8, el mapa más chico que los admite)
 //      npm run net-test -- --layer solo la capa de red (src/net) con una sim de juguete
+//      NET_TEST_DEBUG=1 ...       además vuelca el texto visible de las dos pestañas en cada lectura
 // Levanta vite, abre Chrome headless con --remote-debugging-port y dos pestañas del mismo perfil.
 // Lee window.__tanksNet = { role, code, seq, hash, phase } por CDP y verifica que las dos pestañas
 // terminan con el mismo seq y hash, en roundover/gameover. Sale con código 1 si falla.
@@ -15,7 +18,11 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const layer = process.argv.includes('--layer')
-const TIMEOUT = Number(process.env.NET_TEST_TIMEOUT ?? 10 * 60) * 1000 // la máquina es lenta
+const playersArg = process.argv.indexOf('--players')
+const PLAYERS = Number(playersArg >= 0 ? process.argv[playersArg + 1] : process.env.NET_TEST_PLAYERS ?? 0) || 0
+if (PLAYERS && (PLAYERS < 3 || PLAYERS > 8)) fail('--players va de 3 a 8')
+// la máquina es lenta; con 8 tanques en Grande la ronda dura ~10 min en headless: 25 min por defecto
+const TIMEOUT = Number(process.env.NET_TEST_TIMEOUT ?? (PLAYERS > 4 ? 25 : 10) * 60) * 1000
 const port = 5250 + Math.floor(Math.random() * 50)
 const debugPort = 9300 + Math.floor(Math.random() * 200)
 // NET_TEST_URL=https://facus1979.github.io/tanks prueba el sitio publicado (sin levantar vite).
@@ -106,7 +113,9 @@ try {
 // ---------- partida real ----------
 
 async function gameTest() {
-  const a = await openTab(`${base}/?net=${TRANSPORT}&host=1&autotest=1`, 'A')
+  const extra = PLAYERS ? `&players=${PLAYERS}` : ''
+  if (PLAYERS) log(`modo ${PLAYERS} casilleros: 2 humanos + ${PLAYERS - 2} IA`)
+  const a = await openTab(`${base}/?net=${TRANSPORT}&host=1&autotest=1${extra}`, 'A')
   const hostState = await waitFor(
     async () => {
       const s = await readNet(a)
@@ -117,6 +126,16 @@ async function gameTest() {
   )
   log('sala abierta:', hostState.code)
   const b = await openTab(`${base}/?net=${TRANSPORT}&join=${encodeURIComponent(hostState.code)}&autotest=1`, 'B')
+  // En esta máquina la primera carga de B a veces tarda tanto (las dos pestañas comparten proceso)
+  // que el join local vence a los 5 s y B queda en el menú sin __tanksNet: se recarga hasta 2 veces.
+  for (let tries = 0; ; tries++) {
+    const ok = await waitFor(async () => (await readNet(b)) || null, 120000, 'sin __tanksNet').catch(() => null)
+    if (ok) break
+    if (tries >= 2) throw new Error(`La pestaña B no se unió a la sala (sin __tanksNet)${errors()}`)
+    log('pestaña B sin __tanksNet: recargo')
+    await cdp.send('Page.reload', {}, b.sessionId)
+    await sleep(3000)
+  }
 
   const END = ['roundover', 'gameover']
   let last = ''
@@ -127,6 +146,12 @@ async function gameTest() {
       const line = `A ${fmt(sa)} | B ${fmt(sb)}`
       if (line !== last) log(line)
       last = line
+      if (process.env.NET_TEST_DEBUG) {
+        const t = performance.now()
+        const txt = `document.readyState + ' ' + (document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 200)`
+        const [da, db] = [await evaluate(a, txt), await evaluate(b, txt)]
+        log('DBG', `${(performance.now() - t).toFixed(0)}ms`, 'A:', da, '| B:', db)
+      }
       const done = sa && sb && END.includes(sa.phase) && END.includes(sb.phase) && sa.seq === sb.seq && sa.hash === sb.hash
       stable = done ? stable + 1 : 0
       return stable >= 3 ? true : null // 3 lecturas iguales seguidas: nada más en vuelo
@@ -136,7 +161,10 @@ async function gameTest() {
     2000,
   )
   const s = await readNet(a)
-  log(`OK: las dos pestañas terminaron en ${s.phase}, seq ${s.seq}, hash ${s.hash}`)
+  // que la partida haya sido realmente de N tanques (y en el tamaño esperado)
+  const info = await evaluate(a, 'window.__tanksNet ? JSON.parse(JSON.stringify(window.__tanksNet)) : null')
+  if (PLAYERS && info.players !== PLAYERS) throw new Error(`La partida tuvo ${info.players} tanques en vez de ${PLAYERS}`)
+  log(`OK: las dos pestañas terminaron en ${s.phase}, seq ${s.seq}, hash ${s.hash} (${info.players} tanques, ${info.size})`)
 }
 
 function fmt(s) {
@@ -213,6 +241,24 @@ async function layerTest() {
   )
   await waitFor(async () => (await evaluate(b, 'window.__room.mySlot')) === 1 || null, 20000, () => 'B no tomó el casillero 1')
   log('B en el casillero 1')
+
+  // v5: 8 casilleros, solo se ocupan los que admite el tamaño; al achicar se reacomodan o se liberan
+  const fit = await evaluate(
+    a,
+    `(() => {
+      const r = window.__room, k = () => r.lobby.slots.map((s) => s.kind === 'off' ? '-' : s.kind[0]).join('')
+      const out = [r.lobby.slots.length]
+      r.setOption('size', 'small'); r.setSlot(5, 'ai'); out.push(k())        // Chico: el 5 no se puede
+      r.setOption('size', 'large'); for (const i of [4, 5, 6, 7]) r.setSlot(i, 'ai'); out.push(k())
+      r.setOption('size', 'medium'); out.push(k())                           // 6 y 7 pasan al 2 y 3
+      r.setOption('size', 'small'); out.push(k())                            // ya no hay libres: se van
+      for (let i = 2; i < 8; i++) r.setSlot(i, 'off')
+      return out.join(' ')
+    })()`,
+  )
+  if (fit !== '8 hh------ hh--aaaa hhaaaa-- hhaa----') throw new Error('límite por tamaño: ' + fit)
+  if ((await evaluate(b, 'window.__room.mySlot')) !== 1) throw new Error('B perdió su casillero al cambiar el tamaño')
+  log('límite de casilleros por tamaño OK:', fit)
   const started = await evaluate(
     a,
     `(() => { const r = window.__room; r.setSlot(2, 'ai'); if (!r.canStart()) return 'no puede empezar'; const s = r.start(42); return s.config.slots.length })()`,
@@ -297,7 +343,7 @@ async function openTab(url, name) {
     if (method === 'Runtime.exceptionThrown') {
       const d = params.exceptionDetails
       pageErrors.push(`${name}: ${d.exception?.description ?? d.text}`)
-    } else if (method === 'Runtime.consoleAPICalled' && params.type === 'error') {
+    } else if (method === 'Runtime.consoleAPICalled' && (params.type === 'error' || params.type === 'warning')) {
       pageErrors.push(`${name}: ${params.args.map((x) => x.value ?? x.description ?? '').join(' ')}`)
     }
   })
