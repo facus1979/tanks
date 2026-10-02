@@ -367,6 +367,39 @@ export class Sfx {
     this.noise({ dur: 0.8, type: 'lowpass', freq: 160, to: 60, gain: 0.4, attack: 0.1, delay: 0.62 })
   }
 
+  // ---------- abismo (v3) ----------
+
+  // Tanque que cae al abismo: silbido que baja de tono y se aleja (se apaga y se opaca) durante dur
+  // segundos, con aire que pasa. Sin explosión: el golpe lejano lo pone abyssThud al perderse.
+  abyssFall(dur = 1): void {
+    if (!this.ready) return
+    const d = Math.max(0.5, dur + 0.25)
+    this.tone({ freq: 1500, to: 260, dur: d, type: 'sine', gain: 0.11 })
+    this.tone({ freq: 1510, to: 250, dur: d * 0.9, type: 'triangle', gain: 0.03 })
+    // aire: ruido que se cierra a medida que se aleja
+    this.noise({ dur: d, type: 'bandpass', freq: 2200, to: 300, q: 1.4, gain: 0.16, attack: 0.08 })
+    this.noise({ dur: d * 0.8, type: 'lowpass', freq: 900, to: 120, gain: 0.12, attack: 0.15 })
+    // chapa que se suelta al empezar a caer
+    this.tone({ freq: 210, to: 140, dur: 0.12, type: 'square', gain: 0.035 })
+  }
+
+  // El tanque perdido en el abismo pega allá abajo: golpe lejano y apagado, con eco corto.
+  abyssThud(): void {
+    if (!this.ready) return
+    this.tone({ freq: 70, to: 34, dur: 0.5, type: 'sine', gain: 0.32 })
+    this.noise({ dur: 0.6, type: 'lowpass', freq: 220, to: 60, gain: 0.26, attack: 0.02 })
+    this.tone({ freq: 60, to: 32, dur: 0.45, type: 'sine', gain: 0.1, delay: 0.32 })
+    this.noise({ dur: 0.45, type: 'lowpass', freq: 160, to: 50, gain: 0.08, delay: 0.32 })
+  }
+
+  // Aviso del borde de un abismo (el tanque frenó solo): dos pitidos cortos que bajan.
+  edgeWarn(): void {
+    if (!this.ready) return
+    this.tone({ freq: 988, dur: 0.07, type: 'square', gain: 0.055 })
+    this.tone({ freq: 740, dur: 0.11, type: 'square', gain: 0.055, delay: 0.09 })
+    this.noise({ dur: 0.08, type: 'lowpass', freq: 500, gain: 0.15 })
+  }
+
   // Cartel de turno en hot-seat: corneta corta.
   banner(): void {
     if (!this.ready) return

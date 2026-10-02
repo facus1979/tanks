@@ -18,7 +18,7 @@ import type {
   Vec2,
   WeaponId,
 } from '../sim/types'
-import { FUEL_PER_TURN, ITEM_ORDER, SHOP, SUDDEN_DEATH_CALM, WEAPONS } from '../sim/types'
+import { FUEL_PER_TURN, ITEM_ORDER, SHOP, SUDDEN_DEATH_CALM, TANK_H, TANK_W, WEAPONS } from '../sim/types'
 import { VIEW_W, type Camera, type RenderFrame } from '../render/types'
 import type { HudModel, HudSide } from '../ui/hud'
 import type { BannerModel, HudExtras, HudNet, MinimapModel, ScoreModel, ShopModel } from '../ui/types'
@@ -80,6 +80,19 @@ interface Playback {
   // estaban antes del disparo y cambian cuando llegan los eventos lava y calm en su t.
   lava: number | null
   calmLeft: number
+  // v3: tanques que caen al abismo en este tiro (ver planDrops)
+  drops: Drop[]
+}
+
+// v3 abismo: caída animada de un tanque que se pierde por debajo del mapa. Arranca con el evento fall
+// (t0) y la muerte llega cuando el tanque ya salió por abajo (t0 + dur).
+interface Drop {
+  playerId: number
+  from: number // y del piso al empezar a caer
+  to: number // y final, con el tanque entero por debajo del mapa
+  t0: number
+  dur: number
+  follow: boolean | null // la cámara lo acompaña (se decide al empezar la caída)
 }
 
 interface AiDrive {
@@ -109,6 +122,29 @@ const LAVA_ANIM = 0.8
 const LAVA_GAP = 0.3
 const LAVA_HIT = 0.5
 const LAVA_TAIL = 0.4
+// v3 abismo. Gravedad de la caída (px/s²; más que la del tiro para que se sienta pesada), cuánto se queda
+// la cámara mirando el fondo después de que el tanque se perdió y cuánto espera el turno siguiente.
+const ABYSS_G = 700
+const ABYSS_MIN = 0.5
+const ABYSS_MAX = 1.6
+const ABYSS_HOLD = 0.45
+const ABYSS_TAIL = 0.7
+// Pixels debajo del mapa donde termina la caída: el tanque, el tripulante y el cartel ya no se ven.
+const ABYSS_BELOW = TANK_H + 30
+
+// Caída al abismo desde y (piso del tanque) en un mapa de alto h: hasta dónde baja y cuánto tarda.
+// También la usa main.ts para que el silbido dure lo mismo que la caída.
+export function abyssDrop(from: number, h: number): { to: number; dur: number } {
+  const to = h + ABYSS_BELOW
+  const dist = Math.max(0, to - from)
+  const dur = clamp(Math.sqrt((2 * dist) / ABYSS_G), ABYSS_MIN, ABYSS_MAX)
+  return { to, dur }
+}
+
+// Un fall que termina por debajo del mapa: el tanque cayó a un abismo (contrato v3).
+export function isAbyssFall(event: GameEvent, h: number): boolean {
+  return event.type === 'fall' && event.to > h
+}
 
 export class Session {
   state: GameState | null = null
@@ -147,6 +183,11 @@ export class Session {
   private suddenDeathSaid = false // ya se avisó en esta ronda que empezó la muerte súbita
   private suddenDeathNews = false // se avisó y main.ts todavía no lo levantó (sonido y vibración)
   private melts: Vec2[] = [] // proyectiles derretidos en la lava desde la última llamada a pullMelts
+  // v3 abismo: tanques perdidos en la ronda (se dibujan debajo del mapa, no apoyados en el fondo) y el
+  // tope del borde: el humano que camina hacia un abismo frena una vez; si suelta y vuelve a apretar, cae.
+  private lost = new Set<number>()
+  private edge: { key: string; dir: -1 | 1; x: number; armed: boolean } | null = null
+  private edgeNews = false // frenó en un borde y main.ts todavía no lo levantó (sonido de aviso)
   // online
   private mode: SessionMode = 'local'
   private localIds = new Set<number>()
@@ -258,6 +299,7 @@ export class Session {
     this.lastHumanId = null
     this.tracerCache = null
     this.resetLava()
+    this.resetAbyss()
     this.resetCamera()
     this.demo = demo ? { ...demo, shotDone: false, seed } : null
     this.random = demo ? seededRandom(seed ^ 0x5bd1e995) : Math.random
@@ -384,16 +426,73 @@ export class Session {
     this.moveAcc += MOVE_SPEED * dt
     let steps = Math.min(3, Math.floor(this.moveAcc))
     this.moveAcc -= steps
-    const p = this.state.players[this.state.current]
     while (steps-- > 0) {
+      const s = this.state
+      const p = s?.players[s.current]
+      if (!s || !p || this.playback) break
       if (this.mode === 'client' && (p.fuel ?? 0) <= 0) break
+      if (this.edgeStop(s, p, dir)) {
+        this.moveAcc = 0
+        break
+      }
       if (!this.act({ type: 'move', playerId: p.id, dir })) break
       this.movedT = 0.12
     }
   }
 
+  // Soltó la dirección (o no aprieta ninguna): el tope del borde queda armado y el próximo intento
+  // en la misma dirección, desde el mismo lugar, pasa y cae.
   stopMove(): void {
     this.moveAcc = 0
+    if (this.edge) this.edge.armed = true
+  }
+
+  // true una vez cada vez que el humano frena en el borde de un abismo (sonido de aviso).
+  pullEdgeWarning(): boolean {
+    const news = this.edgeNews
+    this.edgeNews = false
+    return news
+  }
+
+  // v3: el paso siguiente tiraría al tanque al abismo. Lo frena la primera vez (aviso) y lo deja pasar
+  // si el jugador soltó y volvió a apretar hacia el mismo lado sin moverse de ahí. Solo para el input
+  // humano: la sim permite caer y la IA decide por su cuenta.
+  private edgeStop(s: GameState, p: Player, dir: -1 | 1): boolean {
+    const key = `${this.matchId}:${s.turn}:${p.id}`
+    const e = this.edge
+    const same = !!e && e.key === key && e.dir === dir && e.x === p.x
+    if (same && e.armed) {
+      this.edge = null
+      return false
+    }
+    if (same) return true // sigue apretando desde el tope
+    if (!this.stepFallsIntoAbyss(s, p, dir)) {
+      // se alejó del borde o cambió de turno: el tope se olvida
+      if (e && (e.key !== key || e.x !== p.x)) this.edge = null
+      return false
+    }
+    this.edge = { key, dir, x: p.x, armed: false }
+    this.edgeNews = true
+    this.flash('Abismo! Apreta otra vez')
+    return true
+  }
+
+  // Prueba el paso en una copia (applyCommand es puro) y mira si termina en una caída al abismo.
+  private stepFallsIntoAbyss(s: GameState, p: Player, dir: -1 | 1): boolean {
+    // sin columnas de abismo en el mapa no hace falta probar nada (Chico, mapas de v2)
+    const pits = s.terrain.pits
+    if (!pits) return false
+    let near = false
+    const x0 = Math.max(0, Math.round(p.x) - TANK_W)
+    const x1 = Math.min(s.terrain.w - 1, Math.round(p.x) + TANK_W)
+    for (let x = x0; x <= x1 && !near; x++) near = pits[x] === 1
+    if (!near) return false
+    try {
+      const r = applyCommand(s, { type: 'move', playerId: p.id, dir })
+      return hasAbyss(r.events, s.terrain.h)
+    } catch {
+      return false
+    }
   }
 
   select(weapon: WeaponId): void {
@@ -667,7 +766,7 @@ export class Session {
       terrainVersion: this.terrainVersion,
       matchId: this.matchId,
       props: s.props ?? [],
-      players: this.playersWithAim(s),
+      players: this.withLost(this.playersWithAim(s), s.terrain.h),
       current: s.current,
       wind: s.wind,
       projectiles: [],
@@ -773,7 +872,11 @@ export class Session {
     if (this.cam.world.w !== t.w || this.cam.world.h !== t.h) this.resetCamera()
     if (pb) {
       const now = this.projectiles(pb)
-      if (now.length) {
+      const fall = this.fallFocus(pb)
+      if (fall) {
+        // v3: un tanque cae al abismo: la cámara lo acompaña hasta el borde de abajo del mundo
+        this.cam.followFall(fall.x, fall.y)
+      } else if (now.length) {
         // el grupo de proyectiles (racimo) y dónde van a estar en un rato: la cámara mira adelante
         const ahead = this.projectiles(pb, pb.t + LOOKAHEAD, true)
         let x0 = Infinity
@@ -822,7 +925,8 @@ export class Session {
       terrain,
       terrainVersion: this.terrainVersion,
       view: this.cam.view(),
-      tanks: players.map((p, i) => ({ id: p.id, x: p.x, y: p.y, color: p.color, alive: p.alive, current: i === currentIndex })),
+      // el perdido en un abismo queda marcado en el fondo del mapa
+      tanks: players.map((p, i) => ({ id: p.id, x: p.x, y: Math.min(p.y, terrain.h), color: p.color, alive: p.alive, current: i === currentIndex })),
       projectiles: pb ? this.projectiles(pb) : [],
       lastImpacts,
       lava: this.lavaView(),
@@ -833,7 +937,7 @@ export class Session {
     const s = this.state
     if (!s) return null
     const pb = this.playback
-    const players = pb ? pb.players : this.playersWithAim(s)
+    const players = pb ? pb.players : this.withLost(this.playersWithAim(s), s.terrain.h)
     const currentIndex = pb ? pb.before.current : s.current
     const current = players[currentIndex]
     const human = this.focusHuman(players, current) ?? players[0] ?? null
@@ -1078,6 +1182,16 @@ export class Session {
       this.startPlayback(s, result.state, result.events, result.flights ?? [], command.playerId)
       return true
     }
+    // v3: un paso que cae al abismo se reproduce como un tiro sin vuelos, para animar la caída antes
+    // de la muerte y del cambio de turno (si no, el tanque desaparecería de golpe)
+    if (command.type === 'move' && hasAbyss(result.events, s.terrain.h)) {
+      this.aim = null
+      this.ai = null
+      this.moveAcc = 0
+      this.edge = null
+      this.startPlayback(s, result.state, result.events, [], command.playerId)
+      return true
+    }
     const changed = result.state !== s
     this.state = result.state
     if (result.events.length) this.fx.push(...result.events)
@@ -1104,6 +1218,7 @@ export class Session {
     this.sentReady.clear()
     this.sentNext = false
     this.resetLava()
+    this.resetAbyss()
     this.resetCamera()
   }
 
@@ -1149,6 +1264,9 @@ export class Session {
       }
       return { t: own ?? lastT, event }
     })
+    // v3: caídas al abismo con su momento ya conocido (la muerte se corre al final de la caída)
+    const drops: Drop[] = []
+    this.planDrops(before, timeline, drops)
     // Base de la lava: después de los vuelos y de todo lo que ya tiene su momento.
     let base = flightsEnd
     for (const e of timeline) if (Number.isFinite(e.t)) base = Math.max(base, e.t)
@@ -1160,8 +1278,12 @@ export class Session {
       else if (d.event.type === 'calm') d.t = hasLava ? lavaT : base
       else d.t = lavaT + LAVA_HIT
     }
+    // las que caen por un evento diferido (después de la lava) se ubican ahora
+    this.planDrops(before, timeline, drops)
     timeline.sort((a, b) => a.t - b.t)
     if (!Number.isFinite(firstImpact)) firstImpact = flightsEnd
+    // el turno siguiente espera a que el tanque se pierda y la cámara mire un momento el fondo
+    const dropsEnd = drops.reduce((m, d) => Math.max(m, d.t0 + d.dur + ABYSS_TAIL), 0)
     const eventsEnd = timeline.reduce((m, e) => (Number.isFinite(e.t) ? Math.max(m, e.t) : m), 0)
     const hasShot = flights.length > 0 || timeline.some((e) => e.event.type === 'impact')
     const settle = hasShot ? SETTLE + (bigBlast ? 0.5 : 0) : 0
@@ -1176,7 +1298,7 @@ export class Session {
     }
     this.playback = {
       t: 0,
-      end: Math.max(Math.max(flightsEnd, eventsEnd) + settle, lavaEnd),
+      end: Math.max(Math.max(flightsEnd, eventsEnd) + settle, lavaEnd, dropsEnd),
       before,
       after,
       flights: timed,
@@ -1185,7 +1307,7 @@ export class Session {
       firstImpact,
       shooterId,
       weapon,
-      players: before.players.map((p) => ({ ...p })),
+      players: before.players.map((p) => this.shownPlayer({ ...p }, before.terrain.h)),
       props: (before.props ?? []).map((p) => ({ ...p })),
       terrain,
       reveal,
@@ -1199,6 +1321,7 @@ export class Session {
       settle: null,
       lava: before.lava ?? null,
       calmLeft: Math.max(0, SUDDEN_DEATH_CALM - (before.calm ?? 0)),
+      drops,
     }
     if (hasShot) {
       this.shots.push({ playerId: shooterId, weapon })
@@ -1216,6 +1339,7 @@ export class Session {
       this.deliver(pb, pb.timeline[pb.next].event)
       pb.next++
     }
+    this.stepDrops(pb)
     if (this.demo?.freeze && this.demo.shotDone && pb.t >= pb.firstImpact + 0.35) {
       this.frozen = true
       return
@@ -1288,13 +1412,20 @@ export class Session {
           p.alive = false
           p.hp = 0
         }
+        const drop = pb.drops.find((d) => d.playerId === event.playerId)
+        if (drop) {
+          // se perdió en el abismo: queda debajo del mapa hasta que termine la ronda
+          this.lost.add(event.playerId)
+          if (p) p.y = drop.to
+        }
         break
       }
       case 'fall': {
         const p = pb.players.find((q) => q.id === event.playerId)
         const final = pb.after.players.find((q) => q.id === event.playerId)
         if (p) {
-          p.y = event.to
+          // al abismo: la y la anima stepDrops; si no, el tanque se apoya en su piso nuevo
+          if (!pb.drops.some((d) => d.playerId === event.playerId)) p.y = event.to
           if (final) p.x = final.x
         }
         break
@@ -1314,6 +1445,84 @@ export class Session {
       default:
         break
     }
+  }
+
+  // ---------- abismo (v3) ----------
+
+  // Arma las caídas al abismo de un tiro (o de un paso) sobre la línea de tiempo, en el orden de los
+  // eventos (antes de ordenarla). Cada fall que termina debajo del mapa (o una muerte 'abyss' sin fall)
+  // empieza una caída en su t; el daño y la muerte de ese tanque que vienen después en la lista se
+  // corren al final de la caída, así se ve caer y perderse antes de morir. Se llama dos veces: los
+  // eventos con t todavía sin decidir (NaN, los diferidos de la lava) se toman en la segunda pasada.
+  private planDrops(before: GameState, timeline: TimedEvent[], drops: Drop[]): void {
+    const h = before.terrain.h
+    for (let i = 0; i < timeline.length; i++) {
+      const { event, t } = timeline[i]
+      if (!Number.isFinite(t)) continue
+      let from: number
+      if (event.type === 'fall' && isAbyssFall(event, h)) from = event.from
+      else if (event.type === 'death' && event.cause === 'abyss') from = before.players.find((p) => p.id === event.playerId)?.y ?? h
+      else continue
+      const id = event.playerId
+      if (drops.some((d) => d.playerId === id)) continue
+      const { to, dur } = abyssDrop(from, h)
+      drops.push({ playerId: id, from, to, t0: t, dur, follow: null })
+      for (let j = i; j < timeline.length; j++) {
+        const e = timeline[j]
+        if ((e.event.type === 'death' || e.event.type === 'damage') && e.event.playerId === id && Number.isFinite(e.t)) {
+          e.t = Math.max(e.t, t + dur)
+        }
+      }
+    }
+  }
+
+  // Posición de los tanques que caen: aceleración constante desde el piso hasta debajo del mapa,
+  // ajustada para llegar justo al final de la caída (cuando llega la muerte).
+  private stepDrops(pb: Playback): void {
+    for (const d of pb.drops) {
+      if (pb.t < d.t0) continue
+      const p = pb.players.find((q) => q.id === d.playerId)
+      if (!p || !p.alive) continue
+      const k = clamp((pb.t - d.t0) / d.dur, 0, 1)
+      p.y = d.from + (d.to - d.from) * k * k
+    }
+  }
+
+  // Caída que la cámara acompaña ahora: la del tanque del turno, o la de uno que estaba en pantalla
+  // cuando empezó a caer. Sigue un momento (ABYSS_HOLD) después de perderse, mirando el fondo.
+  private fallFocus(pb: Playback): Vec2 | null {
+    const currentId = pb.before.players[pb.before.current]?.id
+    const h = pb.terrain.h
+    for (const d of pb.drops) {
+      if (pb.t < d.t0 || pb.t > d.t0 + d.dur + ABYSS_HOLD) continue
+      const p = pb.players.find((q) => q.id === d.playerId)
+      if (!p) continue
+      if (d.follow === null) {
+        const v = this.cam.view()
+        const seen = p.x >= v.x && p.x <= v.x + v.w && d.from >= v.y && d.from - TANK_H <= v.y + v.h
+        d.follow = d.playerId === currentId || seen
+      }
+      if (d.follow) return { x: p.x, y: Math.min(p.y, h) }
+    }
+    return null
+  }
+
+  // Tanque perdido en el abismo: se dibuja debajo del mapa (no apoyado en el fondo ni en su último piso).
+  // Sirve también para un snapshot (online): un tanque muerto con el piso en el fondo del mapa cayó.
+  private shownPlayer(p: Player, h: number): Player {
+    if (!p.alive && (this.lost.has(p.id) || p.y >= h)) p.y = Math.max(p.y, h + ABYSS_BELOW)
+    return p
+  }
+
+  private withLost(players: Player[], h: number): Player[] {
+    if (!players.some((p) => !p.alive && (this.lost.has(p.id) || p.y >= h))) return players
+    return players.map((p) => (p.alive ? p : this.shownPlayer({ ...p }, h)))
+  }
+
+  private resetAbyss(): void {
+    this.lost.clear()
+    this.edge = null
+    this.edgeNews = false
   }
 
   // Proyectiles en vuelo en el tiempo t del tiro. hold: los que siguen en vuelo ahora pero terminan antes
@@ -1551,4 +1760,9 @@ function quantize(v: number): number {
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v))
+}
+
+// v3: los eventos traen una caída al abismo (fall por debajo del mapa o muerte con cause 'abyss').
+function hasAbyss(events: GameEvent[], h: number): boolean {
+  return events.some((e) => isAbyssFall(e, h) || (e.type === 'death' && e.cause === 'abyss'))
 }
