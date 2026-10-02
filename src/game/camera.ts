@@ -31,6 +31,11 @@ const TANK_LIFT = 40
 // manual: el jugador paneó; la cámara se queda donde la dejó hasta recentrar o cambiar de turno.
 export type CameraMode = 'tank' | 'manual' | 'shot'
 
+// HUD C: margen de arriba que ocupan el minimapa y los carteles (px lógicos) y cuánto puede subir la cámara
+// por encima del encuadre normal para no tapar un objetivo alto.
+const TOP_SAFE = 100
+const MAX_RISE = 160
+
 export class CameraController {
   mode: CameraMode = 'tank'
   private w = VIEW_W
@@ -207,11 +212,15 @@ export class CameraController {
     return clamp(x, half, this.w - half)
   }
 
-  // En y, el piso del mundo queda siempre apoyado sobre el tablero (como en v1 quedaba en el borde de
-  // abajo): la cámara no sube ni baja siguiendo al objetivo; con zoom < 1 se ve más cielo arriba. El alto
-  // del mundo es fijo (450), así que no hace falta recorrer en y.
-  private clampY(_y: number, zoom: number): number {
-    return this.floorY(zoom)
+  // En y, el piso del mundo queda apoyado sobre el tablero (como en v1 quedaba en el borde de abajo); con
+  // zoom < 1 se ve más cielo arriba. Si el objetivo queda tan alto que lo taparían el minimapa y los carteles
+  // de arriba (una cima de montaña en Mediano/Grande), la cámara sube lo justo para dejarlo a TOP_SAFE px del
+  // borde de arriba, hasta MAX_RISE px de mundo; lo de abajo del mundo queda detrás del tablero.
+  private clampY(y: number, zoom: number): number {
+    const floor = this.floorY(zoom)
+    if (this.bar <= 0) return floor
+    const need = y + (VIEW_H / 2 - TOP_SAFE) / zoom
+    return clamp(need, floor - MAX_RISE / zoom, floor)
   }
 
   // Centro en y que deja el piso del mundo (h) en la fila VIEW_H − bar de la pantalla.
