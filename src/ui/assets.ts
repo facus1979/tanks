@@ -19,6 +19,7 @@ export interface UiAssets {
   logo: HTMLImageElement | null
   forest: HTMLImageElement[] // capas del bioma bosque, de atrás hacia adelante
   arrow: HTMLImageElement | null
+  windsock: StripImage | null // manga de viento (props.windsock): 7 cuadros de viento −10 a 10
 }
 
 const BASE = 'assets/'
@@ -32,6 +33,7 @@ let current: UiAssets = {
   logo: null,
   forest: [],
   arrow: null,
+  windsock: null,
 }
 let loading: Promise<UiAssets> | null = null
 
@@ -55,11 +57,12 @@ async function load(): Promise<UiAssets> {
   const ui = manifest?.ui
   const crews = manifest?.crews
   const forestLayers = manifest?.backgrounds?.forest?.layers ?? []
-  const [fontImg, pip, icons, itemIcons, logo, arrow, forest, ...portraits] = await Promise.all([
+  const [fontImg, pip, icons, itemIcons, windsock, logo, arrow, forest, ...portraits] = await Promise.all([
     ui?.font?.file ? image(ui.font.file) : Promise.resolve(null),
     strip(ui?.pip),
     strip(ui?.weaponIcons),
     strip(ui?.itemIcons),
+    strip(manifest?.props?.windsock),
     ui?.logo ? image(ui.logo) : Promise.resolve(null),
     ui?.arrow ? image(ui.arrow) : Promise.resolve(null),
     Promise.all(forestLayers.map((f) => image(f))),
@@ -87,6 +90,7 @@ async function load(): Promise<UiAssets> {
     logo: logo as HTMLImageElement | null,
     forest: (forest as (HTMLImageElement | null)[]).filter((i): i is HTMLImageElement => !!i),
     arrow: arrow as HTMLImageElement | null,
+    windsock,
   }
   return current
 }

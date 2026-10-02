@@ -107,27 +107,36 @@ export async function mountUiTest(name: string): Promise<boolean> {
     const sdParam = params.get('sd')
     const suddenDeath = sdParam == null ? null : sdParam === 'lava' ? { active: true, calmLeft: 0 } : { active: false, calmLeft: Number(sdParam) || 0 }
     if (minimap && suddenDeath?.active) minimap.lava = MAP_SIZES[size].h - 80
-    const side = (n: number, name: string, color: number, crew: 'bandana' | 'sarge') => ({ name, tag: `P${n}`, color, crew, hp: 80, alive: true, active: n === 1, you: n === 1 })
+    // HUD C: &players=N (2..8) arma N tanques (placas apiladas arriba a la derecha); &turn=ai le da el turno
+    // al rival (el tablero muestra sus datos y los controles quedan inactivos); &fine=1 prueba las décimas.
+    const crews = ['bandana', 'sarge', 'rookie', 'desert', 'bandana', 'sarge', 'rookie', 'desert'] as const
+    const names = ['Bandana', 'Sargento', 'Novato', 'Desierto', 'Rulo', 'Coronel', 'Pibe', 'Duna']
+    const colors = [0x3d8cf0, 0xe23d3d, 0xe2c13d, 0x3dbe5a, 0xa65ae0, 0xf0903a, 0x3ad0d0, 0xe070b0]
+    const nPlayers = Math.max(2, Math.min(8, Number(params.get('players')) || 2))
+    const aiTurn = params.get('turn') === 'ai'
+    const turn = aiTurn ? 2 : 1
+    const side = (n: number) => ({ name: names[n - 1], tag: `P${n}`, color: colors[n - 1], crew: crews[n - 1], hp: [80, 100, 45, 20, 60, 0, 100, 35][n - 1], alive: n !== 6, active: n === turn, you: n === 1 })
+    const fineAim = params.has('fine')
     const model: Parameters<Hud['update']>[0] = {
-      human: side(1, 'Bandana', 0x3d8cf0, 'bandana'),
-      rival: side(2, 'Sargento', 0xe23d3d, 'sarge'),
-      others: [],
-      angle: 45,
-      power: 60,
+      human: side(1),
+      rival: side(2),
+      others: Array.from({ length: nPlayers - 2 }, (_, i) => side(i + 3)),
+      angle: fineAim ? 135.5 : aiTurn ? 140 : 45,
+      power: fineAim ? 100 : 60,
       weapon: 'heavy',
       ammo: 2,
-      wind: 4,
-      status: params.get('status') ?? '',
-      showAim: true,
+      wind: Number(params.get('wind') ?? 4),
+      status: params.get('status') ?? (aiTurn ? 'SARGENTO PIENSA' : ''),
+      showAim: !aiTurn,
       ammoAll: { normal: 99, heavy: 2, dirt: 3, cluster: 0, napalm: 2, digger: 2, roller: 2, nuke: 1 },
-      fuel: 0.7,
-      showBar: true,
+      fuel: aiTurn ? 1 : 0.7,
+      showBar: !aiTurn,
       extras: {
         round: 2,
         rounds: 3,
         money: 1250,
         items,
-        shield: 25,
+        shield: aiTurn ? 0 : 25,
         tracer: true,
         net: params.has('net')
           ? { role: 'host', code: 'TANK-4F7K', peers: [{ name: 'Sargento', connected: true, ping: 48 }, { name: 'Novato', connected: false, ping: null }], turnLeft: Number(params.get('net')) || 27, waiting: 'ESPERANDO A SARGENTO…' }
@@ -142,7 +151,11 @@ export async function mountUiTest(name: string): Promise<boolean> {
       requestAnimationFrame(tick)
     }
     tick()
-    root.addEventListener('pointerdown', (e) => console.log('minimapAt', JSON.stringify(hud.minimapAt(e.clientX, e.clientY))))
+    // #hud no recibe eventos (pointer-events: none, como en el juego): se escucha en la ventana
+    window.addEventListener('pointerdown', (e) => {
+      console.log('minimapAt', JSON.stringify(hud.minimapAt(e.clientX, e.clientY)))
+      console.log('controlAt', JSON.stringify(hud.controlAt(e.clientX, e.clientY)))
+    })
   } else if (name === 'online') {
     const view = createOnlineMenuView()
     const handlers = { host: () => console.log('host'), join: (c: string) => { console.log('join', c); view.error('SALA NO ENCONTRADA') }, back: () => console.log('back') }

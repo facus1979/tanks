@@ -134,11 +134,11 @@ export function fontFromImage(img: HTMLImageElement, glyphW: number, glyphH: num
   return { h, glyphs }
 }
 
-function glyphFor(font: PixelFont, ch: string): Glyph | undefined {
+export function glyphFor(font: PixelFont, ch: string): Glyph | undefined {
   return font.glyphs.get(ch) ?? font.glyphs.get(ch.toUpperCase()) ?? font.glyphs.get(ch.toLowerCase())
 }
 
-function clean(str: string): string {
+export function clean(str: string): string {
   return str.normalize('NFD').replace(/[̀-ͯ]/g, '')
 }
 
