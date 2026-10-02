@@ -53,6 +53,13 @@ const BAR_H = 38
 const BOX = 16
 const BLINK_MS = 280 // titileo del tanque del turno en el minimapa
 const MM_GAP = 6 // del borde de abajo del minimapa (marco incluido) al panel de puntería
+// v2 muerte súbita
+const SD_WARN_AT = 3 // el aviso "MUERTE SÚBITA EN N" aparece con calmLeft <= 3
+const SD_PULSE_MS = 1400 // período del titileo suave del indicador de lava activa
+const SD_STEPS = 5 // niveles del titileo (cada cambio de nivel redibuja el HUD)
+const LAVA = 0xff7a2a // el mismo naranja de la lava del minimapa
+const LAVA_HOT = 0xffd27a
+const LAVA_DEEP = 0xd0362c
 
 export class Hud implements MinimapInput {
   private canvas: HTMLCanvasElement
@@ -99,7 +106,10 @@ export class Hud implements MinimapInput {
     const mm = model.extras?.minimap ?? null
     // la grilla no entra en la clave (son bytes); su cambio lo marca terrainVersion
     const blink = !!mm && mm.tanks.some((t) => t.current && t.alive) && Math.floor(performance.now() / BLINK_MS) % 2 === 0
-    const key = JSON.stringify(model, (k, v) => (k === 'terrain' ? undefined : v)) + (blink ? '*' : '')
+    // muerte súbita activa: el indicador titila suave; el nivel del pulso entra en la clave
+    const sd = model.extras?.suddenDeath ?? null
+    const pulse = sd?.active ? sdPulse(performance.now()) : -1
+    const key = JSON.stringify(model, (k, v) => (k === 'terrain' ? undefined : v)) + (blink ? '*' : '') + pulse
     if (key === this.key) return
     this.key = key
     const ctx = this.ctx
@@ -115,7 +125,10 @@ export class Hud implements MinimapInput {
       drawMinimap(ctx, this.mm, mm, this.mmTerrain.image(mm.terrain, mm.terrainVersion), blink)
       topY = this.mm.y + this.mm.h + MM_GAP
     }
-    const below = this.top(assets, model, topY)
+    let below = this.top(assets, model, topY)
+    // el aviso de muerte súbita va centrado debajo del panel de puntería (y del estado, si hay);
+    // el "ESPERANDO A..." de la red se corre debajo de él
+    if (sd) below = this.suddenDeath(assets, sd, below, pulse)
     let leftBottom = 3
     let rightBottom = 3
     if (model.extras) leftBottom = this.extras(assets, model.extras, model.showBar)
@@ -439,6 +452,55 @@ export class Hud implements MinimapInput {
     return y0 + h
   }
 
+  // Muerte súbita, centrado debajo de y0. Antes: chip chico "MUERTE SÚBITA EN N" (solo con calmLeft <= 3).
+  // Activa: cartel más grande con marco de lava que titila suave y una franja de lava abajo.
+  // pulse: nivel 0..SD_STEPS-1 del titileo. Devuelve la y donde termina (y0 si no dibuja nada).
+  private suddenDeath(assets: UiAssets, sd: NonNullable<HudExtras['suddenDeath']>, y0: number, pulse: number): number {
+    const ctx = this.ctx
+    const font = assets.font
+    if (!sd.active) {
+      if (sd.calmLeft > SD_WARN_AT) return y0
+      const n = Math.max(0, Math.ceil(sd.calmLeft))
+      const text = `MUERTE SÚBITA EN ${n}`
+      const w = measure(font, text)
+      const sx = Math.round((VIEW_W - w) / 2)
+      const sy = y0 + 5
+      // con 1 tiro de margen el borde pasa de naranja a rojo
+      rect(ctx, sx - 5, sy - 3, w + 10, font.h + 6, OUT)
+      rect(ctx, sx - 4, sy - 2, w + 8, font.h + 4, n <= 1 ? LAVA_DEEP : LAVA)
+      rect(ctx, sx - 3, sy - 1, w + 6, font.h + 2, DARK)
+      const lw = drawText(ctx, font, 'MUERTE SÚBITA EN ', sx, sy, LAVA_HOT)
+      drawText(ctx, font, `${n}`, sx + lw, sy, 0xffffff)
+      return sy + font.h + 3
+    }
+    const t = pulse / Math.max(1, SD_STEPS - 1) // 0..1
+    const text = 'MUERTE SÚBITA'
+    const w = measure(font, text)
+    const bw = w + 24
+    const bh = font.h + 14
+    const bx = Math.round((VIEW_W - bw) / 2)
+    const by = y0 + 5
+    rect(ctx, bx, by, bw, bh, OUT)
+    rect(ctx, bx + 1, by + 1, bw - 2, bh - 2, mix(LAVA_DEEP, LAVA, t))
+    rect(ctx, bx + 2, by + 2, bw - 4, bh - 4, OUT)
+    rect(ctx, bx + 3, by + 3, bw - 6, bh - 6, 0x2a0c08)
+    // franja de lava al pie del cartel: superficie ondulada más clara, cuerpo naranja
+    const ly = by + bh - 6
+    rect(ctx, bx + 3, ly + 1, bw - 6, 2, LAVA)
+    for (let x = bx + 3; x < bx + bw - 3; x++) {
+      const crest = (x + Math.round(t * 4)) % 6 < 2
+      rect(ctx, x, crest ? ly : ly + 1, 1, 1, mix(LAVA, LAVA_HOT, 0.6))
+    }
+    // gotitas de lava a los costados del texto
+    const ty = by + 4
+    for (const dx of [6, bw - 8]) {
+      rect(ctx, bx + dx, ty + 1, 2, 2, mix(LAVA, LAVA_HOT, t))
+      rect(ctx, bx + dx, ty + 3, 2, 1, LAVA_DEEP)
+    }
+    drawText(ctx, font, text, bx + Math.round((bw - w) / 2), ty, mix(LAVA, LAVA_HOT, t))
+    return by + bh
+  }
+
   // Esquina superior izquierda: ronda y plata, y debajo los ítems con cantidad y tecla. Devuelve la y de abajo.
   private extras(assets: UiAssets, ex: HudExtras, showItems: boolean): number {
     const ctx = this.ctx
@@ -591,6 +653,17 @@ function barX(): number {
 function rect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, c: number): void {
   ctx.fillStyle = css(c)
   ctx.fillRect(x, y, w, h)
+}
+
+// Nivel del titileo de la muerte súbita activa: seno cuantizado en SD_STEPS escalones.
+function sdPulse(now: number): number {
+  const s = (Math.sin((now / SD_PULSE_MS) * Math.PI * 2) + 1) / 2
+  return Math.min(SD_STEPS - 1, Math.floor(s * SD_STEPS))
+}
+
+function mix(a: number, b: number, t: number): number {
+  const ch = (s: number) => Math.round(((a >> s) & 255) * (1 - t) + ((b >> s) & 255) * t)
+  return (ch(16) << 16) | (ch(8) << 8) | ch(0)
 }
 
 function sep(ctx: CanvasRenderingContext2D, x: number, y: number, h: number): void {
