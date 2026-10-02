@@ -570,6 +570,8 @@ function step1(dt: number, live: boolean, draw = true): void {
 
   for (const shot of session.pullShots()) sfx.fire(shot.weapon)
   for (const _ of session.pullMelts()) sfx.melt()
+  // v4: proyectiles que entran al agua, en su momento del vuelo
+  for (const _ of session.pullSplashes()) sfx.splash()
   // v3: el tanque frenó solo en el borde de un abismo
   if (session.pullEdgeWarning()) sfx.edgeWarn()
   if (session.pullSuddenDeath() && live) {
@@ -679,7 +681,9 @@ function playSounds(events: GameEvent[]): void {
     switch (e.type) {
       case 'impact':
         if (e.source === 'barrel') break // el evento prop del barril ya suena
-        if (e.weapon === 'cluster') sfx.bomblet(e.radius, e.debris)
+        // v4: con el centro bajo el agua suena apagado y burbujeante
+        if (session.isSubmerged(e)) sfx.boomUnder(e.radius)
+        else if (e.weapon === 'cluster') sfx.bomblet(e.radius, e.debris)
         else sfx.boom(e.blast, e.radius, e.debris)
         break
       case 'burn':
@@ -691,6 +695,7 @@ function playSounds(events: GameEvent[]): void {
       case 'fall':
         // v3: al abismo, silbido que se aleja durante la caída (la sesión la anima con abyssDrop)
         if (isAbyssFall(e, h)) sfx.abyssFall(abyssDrop(e.from, h).dur)
+        else if (e.water) sfx.plunge(Math.abs(e.to - e.from)) // v4: cayó al agua, sin daño
         else if (e.parachute) sfx.parachute()
         else sfx.fall(Math.abs(e.to - e.from))
         break
@@ -701,6 +706,15 @@ function playSounds(events: GameEvent[]): void {
         break
       case 'damage':
         if (e.cause === 'lava') sfx.lavaBurn()
+        break
+      case 'flow': {
+        // v4: líquido corriendo mientras dura el flujo; grave y burbujeante si lo que más se movió es lava
+        const info = session.flowInfo(e)
+        if (info && info.water + info.lava > 0) sfx.flow(info.dur, info.water + info.lava, info.lava > info.water)
+        break
+      }
+      case 'steam':
+        sfx.steam(e.n)
         break
       case 'lava':
         sfx.lavaRise(e.from == null ? 1.4 : 1)

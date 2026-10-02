@@ -15,15 +15,16 @@ import type {
   ShopId,
   StepResult,
   Terrain,
+  TerrainPatch,
   Vec2,
   WeaponId,
 } from '../sim/types'
-import { FUEL_PER_TURN, ITEM_ORDER, SHOP, SUDDEN_DEATH_CALM, TANK_H, TANK_W, WEAPONS } from '../sim/types'
-import { VIEW_W, type Camera, type RenderFrame } from '../render/types'
+import { FUEL_PER_TURN, ITEM_ORDER, LAVA, SHOP, SUDDEN_DEATH_CALM, TANK_H, TANK_W, WATER, WEAPONS } from '../sim/types'
+import { VIEW_H, VIEW_W, type Camera, type RenderFrame } from '../render/types'
 import type { HudModel, HudSide } from '../ui/hud'
 import type { BannerModel, HudExtras, HudNet, MinimapModel, ScoreModel, ShopModel } from '../ui/types'
 import { AiClient } from './ai-client'
-import { CameraController, shotZoom } from './camera'
+import { CameraController, MIN_ZOOM, shotZoom } from './camera'
 import { pickDemoShot, seededRandom } from './demo'
 
 export interface DemoOptions {
@@ -69,6 +70,7 @@ interface Playback {
   players: Player[]
   props: Prop[]
   terrain: Terrain // grilla que se ve: arranca en before y suma los cambios de cada evento
+  target: Terrain // lo que muestra cada impact/burn (after, o su parte seca donde hay flujo)
   reveal: Map<GameEvent, Int32Array> // pixels que cambia cada impact/burn
   pending: number // pixels todavía sin mostrar
   finisher: GameEvent | null // la muerte que cierra la ronda: arranca la cámara lenta
@@ -82,6 +84,33 @@ interface Playback {
   calmLeft: number
   // v3: tanques que caen al abismo en este tiro (ver planDrops)
   drops: Drop[]
+  // v4: flujos de líquido del tiro (eventos flow), con sus parches pendientes
+  flows: FlowPlay[]
+  // v4: próxima salpicadura por reproducir de cada vuelo (índice en Flight.splashes)
+  splashNext: number[]
+}
+
+// v4 líquidos: un evento flow en reproducción. Cada parche se copia a la grilla que se ve en
+// start + i * dt; el último deja la grilla final.
+interface FlowPlay {
+  event: Extract<GameEvent, { type: 'flow' }>
+  start: number // t del primer parche (el del evento, corrido después de los impactos si hacía falta)
+  dt: number
+  end: number // t del último parche
+  next: number // próximo parche por aplicar
+  info: FlowInfo | null // se calcula al empezar (con la grilla que se ve en ese momento)
+  follow: boolean | null // la cámara lo mira mientras corre (se decide al empezar)
+}
+
+// Lo que movió un flujo, para el audio y la cámara: celdas que cambiaron por líquido y dónde.
+export interface FlowInfo {
+  dur: number // segundos que dura (del primer al último parche)
+  water: number // celdas que cambiaron con agua (llenándose o vaciándose)
+  lava: number // celdas que cambiaron con lava
+  x0: number
+  y0: number
+  x1: number
+  y1: number
 }
 
 // v3 abismo: caída animada de un tanque que se pierde por debajo del mapa. Arranca con el evento fall
@@ -131,6 +160,17 @@ const ABYSS_HOLD = 1.5
 const ABYSS_TAIL = 1.7
 // Pixels debajo del mapa donde termina la caída: el tanque, el tripulante y el cartel ya no se ven.
 const ABYSS_BELOW = TANK_H + 30
+// v4 líquidos. El turno siguiente espera FLOW_TAIL después del último parche; lo que llega después
+// del flujo en la lista (daño de lava del turno, escudo, muerte) va FLOW_GAP después de que termina.
+// La cámara mira un flujo de FLOW_BIG celdas o más si está a la vista o a menos de FLOW_NEAR px del
+// borde de la pantalla, y se queda FLOW_HOLD después de que termina.
+const FLOW_TAIL = 0.45
+const FLOW_GAP = 0.25
+const FLOW_BIG = 300
+const FLOW_NEAR = 260
+const FLOW_HOLD = 0.35
+// Después del flujo: consecuencias del cambio de turno que no pueden adelantarse a la animación.
+const AFTER_FLOW = new Set<GameEvent['type']>(['damage', 'shield', 'death'])
 
 // Caída al abismo desde y (piso del tanque) en un mapa de alto h: hasta dónde baja y cuánto tarda.
 // También la usa main.ts para que el silbido dure lo mismo que la caída.
@@ -188,6 +228,11 @@ export class Session {
   private lost = new Set<number>()
   private edge: { key: string; dir: -1 | 1; x: number; armed: boolean } | null = null
   private edgeNews = false // frenó en un borde y main.ts todavía no lo levantó (sonido de aviso)
+  // v4 líquidos: salpicaduras de proyectiles que entraron al agua desde la última llamada a
+  // pullSplashes, impactos con el centro bajo el agua y lo que movió cada flujo (para el audio)
+  private splashes: Vec2[] = []
+  private submerged = new WeakSet<GameEvent>()
+  private flowInfos = new WeakMap<GameEvent, FlowInfo>()
   // online
   private mode: SessionMode = 'local'
   private localIds = new Set<number>()
@@ -722,6 +767,23 @@ export class Session {
     return melts
   }
 
+  // v4: proyectiles que entraron al agua desde la última llamada (salpicadura), en su momento del vuelo.
+  pullSplashes(): Vec2[] {
+    const out = this.splashes
+    this.splashes = []
+    return out
+  }
+
+  // v4: el impacto fue con el centro bajo el agua (explosión sumergida, sonido apagado).
+  isSubmerged(event: GameEvent): boolean {
+    return this.submerged.has(event)
+  }
+
+  // v4: qué movió un evento flow ya entregado (celdas de agua y de lava, duración, zona), o null.
+  flowInfo(event: GameEvent): FlowInfo | null {
+    return this.flowInfos.get(event) ?? null
+  }
+
   // true una vez por ronda, cuando empieza la muerte súbita (aviso sonoro y vibración).
   pullSuddenDeath(): boolean {
     const news = this.suddenDeathNews
@@ -893,9 +955,12 @@ export class Session {
       } else if (pb.t < pb.flightsEnd) {
         this.cam.holdShot(pb.zoom)
       } else {
-        // se queda donde terminó el tiro (también mientras sube la lava y quema a los de cerca)
+        // v4: un flujo grande a la vista o cerca: la cámara lo mira mientras corre
+        const flow = this.flowFocus(pb)
+        // si no, se queda donde terminó el tiro (también mientras sube la lava y quema a los de cerca)
         const at = pb.settle ?? pb.players.find((p) => p.id === pb.shooterId) ?? null
-        if (at) this.cam.settleAt(at.x, at.y)
+        if (flow) this.cam.watch(flow.x, flow.y, flow.zoom)
+        else if (at) this.cam.settleAt(at.x, at.y)
         else this.cam.holdShot(1)
       }
     } else if (s.phase === 'aiming') {
@@ -1198,6 +1263,8 @@ export class Session {
     for (const e of result.events) this.noteEvent(e, null)
     if (result.events.some((e) => e.type === 'empty')) this.flash('Sin municion')
     if (command.type === 'move' && changed && result.state.terrain !== s.terrain) this.terrainVersion++
+    // v4: un flujo fuera de un tiro (no debería pasar) muestra directamente la grilla final
+    else if (result.events.some((e) => e.type === 'flow')) this.terrainVersion++
     if (result.events.some((e) => e.type === 'round') || (s.phase !== 'aiming' && result.state.phase === 'aiming')) this.newRound()
     return changed
   }
@@ -1264,12 +1331,15 @@ export class Session {
       }
       return { t: own ?? lastT, event }
     })
+    // v4: flujos de líquido; corre después del flujo lo que no puede adelantarse a la animación
+    const flows = planFlows(timeline)
     // v3: caídas al abismo con su momento ya conocido (la muerte se corre al final de la caída)
     const drops: Drop[] = []
     this.planDrops(before, timeline, drops)
-    // Base de la lava: después de los vuelos y de todo lo que ya tiene su momento.
+    // Base de la lava: después de los vuelos, de los flujos y de todo lo que ya tiene su momento.
     let base = flightsEnd
     for (const e of timeline) if (Number.isFinite(e.t)) base = Math.max(base, e.t)
+    for (const f of flows) base = Math.max(base, f.end + FLOW_GAP)
     const lavaEvent = events.find((e) => e.type === 'lava')
     const hasLava = !!lavaEvent || deferred.some((d) => d.event.type === 'damage')
     const lavaT = (lavaEvent && ownT(lavaEvent)) ?? base + LAVA_GAP
@@ -1289,8 +1359,10 @@ export class Session {
     const settle = hasShot ? SETTLE + (bigBlast ? 0.5 : 0) : 0
     // con lava, el turno siguiente espera a que termine de subir
     const lavaEnd = hasLava ? lavaT + LAVA_ANIM + LAVA_TAIL : 0
+    // con flujo, el turno siguiente espera a que el líquido termine de correr
+    const flowsEnd = flows.reduce((m, f) => Math.max(m, f.end + FLOW_TAIL), 0)
     const weapon = before.players.find((p) => p.id === shooterId)?.weapon ?? 'normal'
-    const { terrain, reveal, pending } = splitTerrain(before.terrain, after.terrain, timeline)
+    const { terrain, target, reveal, pending } = splitTerrain(before.terrain, after.terrain, timeline, flows)
     // la ronda termina con este tiro: la última muerte va en cámara lenta
     let finisher: GameEvent | null = null
     if (after.phase !== 'aiming' && !this.demo?.freeze) {
@@ -1298,7 +1370,7 @@ export class Session {
     }
     this.playback = {
       t: 0,
-      end: Math.max(Math.max(flightsEnd, eventsEnd) + settle, lavaEnd, dropsEnd),
+      end: Math.max(Math.max(flightsEnd, eventsEnd) + settle, lavaEnd, dropsEnd, flowsEnd),
       before,
       after,
       flights: timed,
@@ -1310,6 +1382,7 @@ export class Session {
       players: before.players.map((p) => this.shownPlayer({ ...p }, before.terrain.h)),
       props: (before.props ?? []).map((p) => ({ ...p })),
       terrain,
+      target,
       reveal,
       pending,
       finisher,
@@ -1322,6 +1395,8 @@ export class Session {
       lava: before.lava ?? null,
       calmLeft: Math.max(0, SUDDEN_DEATH_CALM - (before.calm ?? 0)),
       drops,
+      flows,
+      splashNext: flights.map(() => 0),
     }
     if (hasShot) {
       this.shots.push({ playerId: shooterId, weapon })
@@ -1339,6 +1414,8 @@ export class Session {
       this.deliver(pb, pb.timeline[pb.next].event)
       pb.next++
     }
+    this.stepFlows(pb)
+    this.stepSplashes(pb)
     this.stepDrops(pb)
     if (this.demo?.freeze && this.demo.shotDone && pb.t >= pb.firstImpact + 0.35) {
       this.frozen = true
@@ -1349,7 +1426,8 @@ export class Session {
       this.deliver(pb, pb.timeline[pb.next].event)
       pb.next++
     }
-    if (pb.pending > 0) this.terrainVersion++
+    // lo que no llegó a mostrarse (cráteres o parches de flujo) aparece con la grilla final
+    if (pb.pending > 0 || pb.flows.some((f) => f.next < f.event.patches.length)) this.terrainVersion++
     this.state = pb.after
     this.playback = null
     this.phaseT = 0
@@ -1377,12 +1455,15 @@ export class Session {
   }
 
   private deliver(pb: Playback, event: GameEvent): void {
+    // v4: explosión con el centro bajo el agua (se mira antes de mostrar su cráter)
+    if (event.type === 'impact' && underwater(pb.terrain, event.x, event.y)) this.submerged.add(event)
+    if (event.type === 'flow') this.startFlow(pb, event)
     this.fx.push(event)
     this.noteEvent(event, pb)
     if (event === pb.finisher) this.slow = SLOW_TIME
     const pixels = pb.reveal.get(event)
     if (pixels && pixels.length) {
-      const { front, back } = pb.after.terrain
+      const { front, back } = pb.target
       for (const i of pixels) {
         pb.terrain.front[i] = front[i]
         pb.terrain.back[i] = back[i]
@@ -1445,6 +1526,62 @@ export class Session {
       default:
         break
     }
+  }
+
+  // ---------- líquidos (v4) ----------
+
+  // Empieza un flujo: mide qué mueve (con la grilla que se ve ahora) y decide si la cámara lo mira.
+  private startFlow(pb: Playback, event: Extract<GameEvent, { type: 'flow' }>): void {
+    const f = pb.flows.find((q) => q.event === event)
+    if (!f || f.info) return
+    const info = measureFlow(pb.terrain, event.patches, f.end - f.start)
+    f.info = info
+    this.flowInfos.set(event, info)
+    // grande y a la vista o cerca: la cámara se queda mirándolo; lejos o chico, no hace falta ir
+    const v = this.cam.view()
+    const big = info.water + info.lava >= FLOW_BIG
+    const near = info.x1 >= v.x - FLOW_NEAR && info.x0 <= v.x + v.w + FLOW_NEAR
+    f.follow = !this.cam.fixed && big && near
+  }
+
+  // Parches de flujo que ya llegaron: se copian a la grilla que se ve y el render repinta.
+  private stepFlows(pb: Playback): void {
+    for (const f of pb.flows) {
+      if (!f.info) continue // el evento todavía no se entregó
+      const patches = f.event.patches
+      let changed = false
+      while (f.next < patches.length && f.start + f.next * f.dt <= pb.t) {
+        applyPatch(pb.terrain, patches[f.next])
+        f.next++
+        changed = true
+      }
+      if (changed) this.terrainVersion++
+    }
+  }
+
+  // Salpicaduras de los vuelos, en el momento en que cada proyectil entra al agua.
+  private stepSplashes(pb: Playback): void {
+    pb.flights.forEach((f, k) => {
+      const list = f.flight.splashes
+      if (!list) return
+      while (pb.splashNext[k] < list.length && f.start + list[pb.splashNext[k]].t <= pb.t) {
+        const sp = list[pb.splashNext[k]++]
+        this.splashes.push({ x: sp.x, y: sp.y })
+      }
+    })
+  }
+
+  // Flujo que la cámara mira ahora (centro y zoom que lo encuadra), o null.
+  private flowFocus(pb: Playback): { x: number; y: number; zoom: number } | null {
+    for (const f of pb.flows) {
+      if (!f.info || !f.follow || pb.t < f.start || pb.t > f.end + FLOW_HOLD) continue
+      const { x0, y0, x1, y1 } = f.info
+      const w = Math.max(1, x1 - x0 + 1)
+      const h = Math.max(1, y1 - y0 + 1)
+      const zoom = clamp(Math.min(1, (VIEW_W * 0.8) / w, (VIEW_H * 0.8) / h), MIN_ZOOM, 1)
+      return { x: (x0 + x1) / 2, y: (y0 + y1) / 2, zoom }
+    }
+    return null
   }
 
   // ---------- abismo (v3) ----------
@@ -1680,27 +1817,174 @@ function fallbackPlan(actor: Player): ShotPlan {
 
 const BURN_REACH = 8
 
+// v4: arma los flujos de un tiro sobre la línea de tiempo (antes de ordenarla). Cada flow arranca en su
+// t, pero nunca antes del último impacto o quema que lo precede en la lista (el líquido corre por el
+// cráter ya abierto), y dura (parches − 1) · dt. Lo que viene después del flujo en la lista y pertenece
+// al cambio de turno (daño de lava de inicio de turno, escudo, muerte) se corre a FLOW_GAP después de
+// que termina si la sim no le puso un t mayor; el vapor sin t propio va con el arranque del flujo.
+function planFlows(timeline: TimedEvent[]): FlowPlay[] {
+  const flows: FlowPlay[] = []
+  let lastSrc = 0
+  for (let i = 0; i < timeline.length; i++) {
+    const { event, t } = timeline[i]
+    if ((event.type === 'impact' || event.type === 'burn') && Number.isFinite(t)) lastSrc = Math.max(lastSrc, t)
+    if (event.type !== 'flow' || event.patches.length === 0) continue
+    const dt = Number.isFinite(event.dt) ? Math.max(0, event.dt) : 0
+    const start = Math.max(Number.isFinite(event.t) ? event.t : 0, lastSrc)
+    const end = start + (event.patches.length - 1) * dt
+    timeline[i].t = start
+    flows.push({ event, start, dt, end, next: 0, info: null, follow: null })
+    for (let j = i + 1; j < timeline.length; j++) {
+      const e = timeline[j]
+      if (e.event.type === 'steam' && ownT(e.event) == null && Number.isFinite(e.t)) e.t = Math.max(e.t, start)
+      else if (AFTER_FLOW.has(e.event.type) && Number.isFinite(e.t) && e.t < end + FLOW_GAP) e.t = end + FLOW_GAP
+    }
+  }
+  return flows
+}
+
+function isLiquid(m: number): boolean {
+  return m === WATER || m === LAVA
+}
+
+// Copia el rectángulo del parche (front y back completos) a la grilla, recortado a sus bordes.
+function applyPatch(terrain: Terrain, p: TerrainPatch): void {
+  const { w, h } = terrain
+  const x0 = Math.max(0, p.x)
+  const x1 = Math.min(w, p.x + p.w)
+  const y0 = Math.max(0, p.y)
+  const y1 = Math.min(h, p.y + p.h)
+  if (x1 <= x0 || y1 <= y0) return
+  for (let y = y0; y < y1; y++) {
+    const src = (y - p.y) * p.w + (x0 - p.x)
+    const dst = y * w + x0
+    terrain.front.set(p.front.subarray(src, src + x1 - x0), dst)
+    terrain.back.set(p.back.subarray(src, src + x1 - x0), dst)
+  }
+}
+
+// Qué mueve un flujo partiendo de la grilla que se ve: aplica los parches sobre una copia de front y
+// cuenta las celdas que cambian con agua o con lava, con la caja que las encierra.
+function measureFlow(grid: Terrain, patches: TerrainPatch[], dur: number): FlowInfo {
+  const { w, h } = grid
+  const scratch = grid.front.slice()
+  const info: FlowInfo = { dur, water: 0, lava: 0, x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }
+  for (const p of patches) {
+    for (let r = 0; r < p.h; r++) {
+      const y = p.y + r
+      if (y < 0 || y >= h) continue
+      for (let c = 0; c < p.w; c++) {
+        const x = p.x + c
+        if (x < 0 || x >= w) continue
+        const gi = y * w + x
+        const v = p.front[r * p.w + c]
+        const old = scratch[gi]
+        if (v === old) continue
+        scratch[gi] = v
+        if (v === LAVA || old === LAVA) info.lava++
+        else if (v === WATER || old === WATER) info.water++
+        else continue
+        if (x < info.x0) info.x0 = x
+        if (x > info.x1) info.x1 = x
+        if (y < info.y0) info.y0 = y
+        if (y > info.y1) info.y1 = y
+      }
+    }
+  }
+  if (!Number.isFinite(info.x0)) {
+    // no cambió ningún líquido (raro): la caja es la del primer parche
+    const p = patches[0]
+    info.x0 = p?.x ?? 0
+    info.y0 = p?.y ?? 0
+    info.x1 = p ? p.x + p.w - 1 : 0
+    info.y1 = p ? p.y + p.h - 1 : 0
+  }
+  return info
+}
+
+// El centro de la explosión está bajo el agua (la celda del impacto o la de arriba).
+function underwater(t: Terrain, x: number, y: number): boolean {
+  const cx = Math.round(x)
+  const cy = Math.round(y)
+  if (cx < 0 || cx >= t.w) return false
+  for (const yy of [cy, cy - 1]) {
+    if (yy >= 0 && yy < t.h && t.front[yy * t.w + cx] === WATER) return true
+  }
+  return false
+}
+
 // Reparte los pixels que cambian entre before y after entre los impact/burn del tiro, para que
 // cada cráter aparezca en el momento de su evento. Cada pixel va al primer evento (en el tiempo)
-// que lo alcanza; si ninguno, al más cercano.
+// que lo alcanza; si ninguno, al más cercano. target es la grilla que muestran esos eventos.
+// v4: los pixels que cubre algún parche de flujo los termina de pintar el flujo. A los impactos les
+// toca solo la parte "seca" del cambio, tomada del primer parche que cubre ese pixel: si ahí ya hay
+// líquido, el impacto abre aire (si había algo sólido) y el líquido llega con el flujo; si el líquido
+// se fue o se volvió piedra, eso también lo muestra el flujo.
 function splitTerrain(
   before: Terrain,
   after: Terrain,
   timeline: TimedEvent[],
-): { terrain: Terrain; reveal: Map<GameEvent, Int32Array>; pending: number } {
+  flows: FlowPlay[],
+): { terrain: Terrain; target: Terrain; reveal: Map<GameEvent, Int32Array>; pending: number } {
   const reveal = new Map<GameEvent, Int32Array>()
-  if (after === before || after.w !== before.w || after.h !== before.h) {
-    return { terrain: after, reveal, pending: 0 }
-  }
   const sources = timeline
     .map((e) => e.event)
     .filter((e): e is Extract<GameEvent, { type: 'impact' | 'burn' }> => e.type === 'impact' || e.type === 'burn')
+  if (after === before || after.w !== before.w || after.h !== before.h || (sources.length === 0 && flows.length === 0)) {
+    return { terrain: after, target: after, reveal, pending: 0 }
+  }
   const { w, h } = before
+  // v4: primer parche (en el tiempo) que cubre cada pixel; 0 = ninguno
+  const patches = flows
+    .flatMap((f) => f.event.patches.map((p, i) => ({ p, t: f.start + i * f.dt })))
+    .sort((a, b) => a.t - b.t)
+    .map((q) => q.p)
+  const cover = patches.length ? new Int32Array(w * h) : null
+  if (cover) {
+    patches.forEach((p, k) => {
+      const x0 = Math.max(0, p.x)
+      const x1 = Math.min(w, p.x + p.w)
+      for (let y = Math.max(0, p.y); y < Math.min(h, p.y + p.h); y++) {
+        for (let x = x0; x < x1; x++) {
+          const gi = y * w + x
+          if (cover[gi] === 0) cover[gi] = k + 1
+        }
+      }
+    })
+  }
+  // con flujo, los impactos muestran after salvo en los pixels del flujo (ahí, la parte seca)
+  const target: Terrain = cover ? { ...after, front: after.front.slice(), back: after.back.slice() } : after
   const changed: number[] = []
   for (let i = 0; i < w * h; i++) {
-    if (before.front[i] !== after.front[i] || before.back[i] !== after.back[i]) changed.push(i)
+    if (before.front[i] === after.front[i] && before.back[i] === after.back[i]) continue
+    const k = cover ? cover[i] : 0
+    if (k > 0) {
+      const p = patches[k - 1]
+      const x = i % w
+      const y = (i - x) / w
+      const pi = (y - p.y) * p.w + (x - p.x)
+      const fp = p.front[pi]
+      const bf = before.front[i]
+      let pre: number
+      if (isLiquid(fp)) pre = bf === 0 || isLiquid(bf) ? bf : 0 // cráter que después se inunda
+      else if (isLiquid(bf)) pre = bf // se vació o se volvió piedra: lo muestra el flujo
+      else pre = fp
+      const preBack = p.back[pi]
+      target.front[i] = pre
+      target.back[i] = preBack
+      if (pre === bf && preBack === before.back[i]) continue // todo el cambio es del flujo
+    }
+    changed.push(i)
   }
-  if (sources.length === 0 || changed.length === 0) return { terrain: after, reveal, pending: 0 }
+  const terrain: Terrain = { ...before, front: before.front.slice(), back: before.back.slice() }
+  if (sources.length === 0 || changed.length === 0) {
+    // sin impactos ni quemas: lo seco aparece ya y el flujo hace el resto
+    for (const i of changed) {
+      terrain.front[i] = target.front[i]
+      terrain.back[i] = target.back[i]
+    }
+    return { terrain, target, reveal, pending: 0 }
+  }
   const reach = (e: (typeof sources)[number], x: number, y: number): number => {
     if (e.type === 'impact') {
       const r = Math.max(4, e.radius)
@@ -1731,8 +2015,7 @@ function splitTerrain(
     buckets[pick >= 0 ? pick : bestAt].push(i)
   }
   sources.forEach((e, k) => reveal.set(e, Int32Array.from(buckets[k])))
-  const terrain: Terrain = { ...before, front: before.front.slice(), back: before.back.slice() }
-  return { terrain, reveal, pending: changed.length }
+  return { terrain, target, reveal, pending: changed.length }
 }
 
 function samplePath(path: Vec2[], t: number): Vec2 {

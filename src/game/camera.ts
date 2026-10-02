@@ -11,6 +11,7 @@ const TANK_TIME = 0.45 // siguiendo al tanque del turno
 const SHOT_TIME = 0.2 // siguiendo al proyectil
 const IMPACT_TIME = 0.35 // después del último impacto, mientras se asienta el tiro
 const FALL_TIME = 0.25 // acompañando a un tanque que cae al abismo (v3)
+const WATCH_TIME = 0.5 // mirando un flujo de líquido (v4): viaje tranquilo, el agua corre despacio
 const ZOOM_TIME = 0.55
 const MAX_SPEED = 4000 // px de mundo por segundo
 // El tanque queda un poco por debajo del centro: se ve más cielo para apuntar.
@@ -107,6 +108,16 @@ export class CameraController {
     this.ty = y
     this.tz = 1
     this.time = IMPACT_TIME
+  }
+
+  // v4: un flujo de líquido grande corre a la vista o cerca: la cámara lo encuadra (centro de la zona
+  // que cambia y un zoom que la entra) mientras corre, con el suavizado de después del impacto.
+  watch(x: number, y: number, zoom: number): void {
+    this.mode = 'shot'
+    this.tx = x
+    this.ty = y
+    this.tz = zoom
+    this.time = WATCH_TIME
   }
 
   // v3: un tanque cae al abismo. La cámara lo acompaña rápido y vuelve a zoom 1; clampY la frena con el
