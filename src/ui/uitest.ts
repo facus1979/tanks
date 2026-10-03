@@ -143,7 +143,12 @@ export async function mountUiTest(name: string): Promise<boolean> {
     hud.place({ x: Math.round((innerWidth - 800 * k) / 2), y: Math.round((innerHeight - 450 * k) / 2), w: 800 * k, h: 450 * k } as never)
     // ?uitest=hud usa un minimapa falso de mapa Grande; &size=medium|small lo cambia (small = sin minimapa)
     const size = (params.get('size') ?? 'large') as MapSize
-    const minimap = size in MAP_SIZES && size !== 'small' ? fakeMinimap(size) : null
+    // v2.3: el minimapa usa los mismos N tanques de las placas; &view=start|end corre la vista a una punta
+    const nTanks = Math.max(2, Math.min(8, Number(params.get('players')) || 2))
+    // &turn=ai le da el turno a P2; &turn=N (v2.3), a PN (si existe)
+    const turnRaw = params.get('turn')
+    const turnN = turnRaw === 'ai' ? 2 : Math.max(1, Math.min(nTanks, Number(turnRaw) || 1))
+    const minimap = size in MAP_SIZES && size !== 'small' ? fakeMinimap(size, nTanks, turnN - 1, params.get('view')) : null
     // v2 muerte súbita: &sd=N muestra "MUERTE SÚBITA EN N" (calmLeft = N); &sd=lava la muestra activa
     // con la banda de lava en el minimapa, 80 px de mundo sobre el fondo. &status=TEXTO prueba la convivencia.
     const sdParam = params.get('sd')
@@ -156,8 +161,8 @@ export async function mountUiTest(name: string): Promise<boolean> {
     const names = ['Bandana', 'Sargento', 'Novato', 'Desierto', 'Comando', 'Tanquista', 'Piloto', 'Coronel']
     const colors = TANK_COLORS
     const nPlayers = Math.max(2, Math.min(8, Number(params.get('players')) || 2))
-    const aiTurn = params.get('turn') === 'ai'
-    const turn = aiTurn ? 2 : 1
+    const aiTurn = turnN !== 1
+    const turn = turnN
     const side = (n: number) => ({ name: names[n - 1], tag: `P${n}`, color: colors[n - 1], crew: crews[n - 1], hp: [80, 100, 45, 20, 60, 0, 100, 35][n - 1], alive: n !== 6, active: n === turn, you: n === 1 })
     const fineAim = params.has('fine')
     const model: Parameters<Hud['update']>[0] = {
@@ -169,7 +174,7 @@ export async function mountUiTest(name: string): Promise<boolean> {
       weapon: 'heavy',
       ammo: 2,
       wind: Number(params.get('wind') ?? 4),
-      status: params.get('status') ?? (aiTurn ? 'SARGENTO PIENSA' : ''),
+      status: params.get('status') ?? (aiTurn ? `${names[turn - 1].toUpperCase()} PIENSA` : ''),
       showAim: !aiTurn,
       ammoAll: { normal: 99, heavy: 2, dirt: 3, cluster: 0, napalm: 2, digger: 2, roller: 2, nuke: 1 },
       fuel: aiTurn ? 1 : 0.7,
@@ -269,7 +274,10 @@ function fakeTerrain(w: number, h: number): Terrain {
   return { w, h, front, back: new Uint8Array(w * h) }
 }
 
-function fakeMinimap(size: MapSize): MinimapModel {
+// v2.3: los tanques son los mismos de las placas (n, el del turno y P6 muerto) repartidos a lo ancho, con la
+// vista al centro: quedan tanques fuera de vista a los dos lados. view: 'start' | 'end' corre la vista a una
+// punta para que todos los de afuera caigan del mismo lado (prueba de flechas apiladas o agrupadas).
+function fakeMinimap(size: MapSize, n: number, current: number, viewAt: string | null): MinimapModel {
   const { w, h } = MAP_SIZES[size]
   const terrain = fakeTerrain(w, h)
   const floor = (x: number) => {
@@ -278,10 +286,13 @@ function fakeMinimap(size: MapSize): MinimapModel {
     return y
   }
   const k = w / 2400
-  const colors = [0x3d8cf0, 0xe23d3d, 0xe2c13d, 0x3dbe5a, 0xa65ae0, 0xf0903a]
-  const xs = [130, 830, 1205, 1500, 1955, 2290].map((x) => Math.round(x * k))
-  const view = { x: Math.round(1060 * k), y: 0, w: 800, h: 450 }
-  const tanks = xs.map((x, id) => ({ id, x, y: floor(x), color: colors[id], alive: id !== 1, current: id === 2 }))
+  const colors = TANK_COLORS
+  // P1 (el humano) cae en la vista del centro; el resto se reparte a los dos lados
+  const all = [1300, 830, 1205, 2290, 130, 1955, 470, 2130]
+  const xs = all.slice(0, n).map((x) => Math.round(x * k))
+  const vx = viewAt === 'start' ? 0 : viewAt === 'end' ? w - 800 : Math.round(1060 * k)
+  const view = { x: vx, y: 0, w: 800, h: 450 }
+  const tanks = xs.map((x, id) => ({ id, x, y: floor(x), color: colors[id], alive: id !== 5, current: id === current }))
   return {
     terrain,
     terrainVersion: 1,

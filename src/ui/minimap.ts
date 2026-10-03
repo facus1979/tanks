@@ -199,12 +199,28 @@ export interface ArrowLimits {
   bottom: number
 }
 
+// Una flecha de borde: uno o más tanques (si hubo que agruparlos) con el de mayor prioridad al frente.
+interface EdgeArrow {
+  y: number
+  color: number
+  label: string // "P5", o "P5+2" si agrupa a otros dos
+  current: boolean // la flecha incluye al tanque del turno
+  ids: EdgeArrow[] // los tanques originales del grupo (vacío en una flecha suelta, antes de agrupar)
+}
+
+const ARROW_H = 13 // alto de la punta (7 + 6 px de contorno)
+const CURRENT_LABEL = 0xf0c040 // el dorado del HUD para el tanque del turno
+
 // Flechas en los bordes izquierdo y derecho hacia los tanques vivos fuera de la vista, a la altura del
-// tanque mapeada a pantalla, con la etiqueta Pn (n = id + 1).
-export function drawEdgeArrows(ctx: CanvasRenderingContext2D, font: PixelFont, model: MinimapModel, lim: ArrowLimits): void {
+// tanque mapeada a pantalla, con la etiqueta Pn (n = id + 1). Cada lado se apila entre su `top` (debajo de
+// las placas o ítems de ese costado) y `bottom` (arriba del tablero): primero con la separación cómoda,
+// si no entran se juntan hasta tocarse, y si ni así entran se agrupan las más cercanas en una sola flecha
+// "Pn+k" (al frente, el tanque del turno si está en el grupo). La del tanque del turno lleva la etiqueta en
+// dorado, se dibuja encima de las demás y su contorno titila con el del minimapa (blink).
+export function drawEdgeArrows(ctx: CanvasRenderingContext2D, font: PixelFont, model: MinimapModel, lim: ArrowLimits, blink = false): void {
   const v = model.view
   const sy = VIEW_H / Math.max(1, v.h)
-  const sides: { side: -1 | 1; list: { y: number; color: number; label: string }[] }[] = [
+  const sides: { side: -1 | 1; list: EdgeArrow[] }[] = [
     { side: -1, list: [] },
     { side: 1, list: [] },
   ]
@@ -212,13 +228,17 @@ export function drawEdgeArrows(ctx: CanvasRenderingContext2D, font: PixelFont, m
     if (!t.alive) continue
     const side = t.x < v.x ? 0 : t.x > v.x + v.w ? 1 : -1
     if (side < 0) continue
-    sides[side].list.push({ y: (t.y - 16 - v.y) * sy, color: t.color, label: `P${t.id + 1}` })
+    sides[side].list.push({ y: (t.y - 16 - v.y) * sy, color: t.color, label: `P${t.id + 1}`, current: t.current, ids: [] })
   }
-  const gap = Math.max(14, font.h + 8)
-  for (const { side, list } of sides) {
-    if (!list.length) continue
+  const roomy = Math.max(14, font.h + 8)
+  const tight = Math.max(ARROW_H, font.h + 2)
+  for (const { side, list: raw } of sides) {
+    if (!raw.length) continue
     const top = side < 0 ? lim.leftTop : lim.rightTop
-    list.sort((a, b) => a.y - b.y)
+    const room = Math.max(0, lim.bottom - top)
+    raw.sort((a, b) => a.y - b.y)
+    const list = groupArrows(raw, Math.floor(room / tight) + 1)
+    const gap = list.length > 1 ? Math.max(tight, Math.min(roomy, Math.floor(room / (list.length - 1)))) : roomy
     // separa las que se pisan; si se pasan del fondo, las corre hacia arriba
     let prev = -Infinity
     for (const a of list) {
@@ -226,23 +246,49 @@ export function drawEdgeArrows(ctx: CanvasRenderingContext2D, font: PixelFont, m
       prev = a.y
     }
     for (let i = list.length - 2; i >= 0; i--) list[i].y = Math.min(list[i].y, list[i + 1].y - gap)
-    for (const a of list) {
+    // la del turno al final, para que quede encima
+    const order = [...list].sort((a, b) => Number(a.current) - Number(b.current))
+    for (const a of order) {
       const x = side < 0 ? 3 : VIEW_W - 4
+      const edge = a.current && blink ? 0xffffff : OUT
       for (let k = 0; k <= 6; k++) {
         const cx = x - side * k
         if (k === 6) {
-          rect(ctx, cx, a.y - k, 1, 2 * k + 1, OUT)
+          rect(ctx, cx, a.y - k, 1, 2 * k + 1, edge)
           continue
         }
         rect(ctx, cx, a.y - k, 1, 2 * k + 1, a.color)
-        rect(ctx, cx, a.y - k, 1, 1, OUT)
-        rect(ctx, cx, a.y + k, 1, 1, OUT)
+        rect(ctx, cx, a.y - k, 1, 1, edge)
+        rect(ctx, cx, a.y + k, 1, 1, edge)
       }
       const lw = measure(font, a.label)
       const lx = side < 0 ? x + 9 : x - 9 - lw
-      drawText(ctx, font, a.label, lx, a.y - Math.floor(font.h / 2), 0xffffff)
+      drawText(ctx, font, a.label, lx, a.y - Math.floor(font.h / 2), a.current ? CURRENT_LABEL : 0xffffff)
     }
   }
+}
+
+// Junta flechas vecinas (ya ordenadas por y) hasta que queden `max` como mucho: en cada paso une el par
+// más cercano. La flecha que resulta queda en el promedio y muestra el color y el Pn del tanque del turno
+// si está en el grupo (si no, el de más arriba) con "+k" por los demás.
+function groupArrows(list: EdgeArrow[], max: number): EdgeArrow[] {
+  const out = list.map((a) => ({ ...a, ids: [a] }))
+  while (out.length > Math.max(1, max)) {
+    let best = 0
+    for (let i = 1; i < out.length - 1; i++) if (out[i + 1].y - out[i].y < out[best + 1].y - out[best].y) best = i
+    const a = out[best]
+    const b = out[best + 1]
+    const ids = [...a.ids, ...b.ids]
+    const lead = ids.find((e) => e.current) ?? ids[0]
+    out.splice(best, 2, {
+      y: (a.y * a.ids.length + b.y * b.ids.length) / ids.length,
+      color: lead.color,
+      label: `${lead.label}+${ids.length - 1}`,
+      current: ids.some((e) => e.current),
+      ids,
+    })
+  }
+  return out
 }
 
 // Punto de la pantalla lógica → mundo, si cae sobre el minimapa o su margen táctil.
