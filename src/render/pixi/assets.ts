@@ -34,7 +34,8 @@ export interface Art {
   antennaInBody: { x: number; y: number }
   crews: Record<CrewId, Texture>
   materials: (ImageData | null)[]
-  backgrounds: Record<Biome, { layers: Texture[]; fog: number; tint: number }>
+  // v2.3: wrap[i] = la capa i se repite tal cual (manifiesto repeat 'wrap'); false = copia y copia espejada
+  backgrounds: Record<Biome, { layers: Texture[]; wrap: boolean[]; fog: number; tint: number }>
   palette: Record<Biome, BiomePalette>
   props: {
     barrel: Texture
@@ -167,9 +168,20 @@ export async function loadArt(): Promise<Art> {
     Promise.all(
       BIOMES.map(async (b) => {
         const def = m.backgrounds?.[b]
-        const layers = def ? (await Promise.all(def.layers.map((f) => loadTexture(f)))).filter((x): x is Texture => !!x) : []
-        if (layers.length === 0) layers.push(tex(skyFallback(b)))
-        return [b, { layers, fog: def?.fog ?? fb.BIOME_PALETTE[b].ambient, tint: def?.tint ?? 0xffffff }] as const
+        const loaded = def ? await Promise.all(def.layers.map((f) => loadTexture(f))) : []
+        // el modo de repetición va con su capa: si una capa no carga, se descarta junto con su repeat
+        const layers: Texture[] = []
+        const wrap: boolean[] = []
+        loaded.forEach((x, i) => {
+          if (!x) return
+          layers.push(x)
+          wrap.push(def?.repeat?.[i] === 'wrap')
+        })
+        if (layers.length === 0) {
+          layers.push(tex(skyFallback(b)))
+          wrap.push(false)
+        }
+        return [b, { layers, wrap, fog: def?.fog ?? fb.BIOME_PALETTE[b].ambient, tint: def?.tint ?? 0xffffff }] as const
       }),
     ),
     (async () => {

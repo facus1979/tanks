@@ -140,7 +140,7 @@ export class PixiRenderer implements GameRenderer {
   private lampTex = new Map<string, Texture>()
   private lampKey = ''
 
-  private bgLayers: { tex: Texture; holder: Container; tiles: Sprite[] }[] = []
+  private bgLayers: { tex: Texture; wrap: boolean; holder: Container; tiles: Sprite[] }[] = []
   // Cámara aplicada en el último frame, sin sacudón: el origen del mundo cae en (camX, camY) de la pantalla lógica.
   private camX = 0
   private camY = 0
@@ -439,10 +439,10 @@ export class PixiRenderer implements GameRenderer {
     this.biome = biome
     for (const c of this.bg.removeChildren()) c.destroy({ children: true })
     const def = art.backgrounds[biome] ?? art.backgrounds.forest
-    this.bgLayers = def.layers.map((tex) => {
+    this.bgLayers = def.layers.map((tex, i) => {
       const holder = new Container()
       this.bg.addChild(holder)
-      return { tex, holder, tiles: [] }
+      return { tex, wrap: def.wrap?.[i] ?? false, holder, tiles: [] }
     })
     this.app.renderer.background.color = def.fog
     this.fx.fog = def.fog
@@ -516,7 +516,9 @@ export class PixiRenderer implements GameRenderer {
     }
   }
 
-  // Capas del fondo repetidas a lo ancho (alternando con la copia espejada, sin costuras) y con parallax:
+  // Capas del fondo repetidas a lo ancho y con parallax. Por capa (v2.3, repeat del manifiesto): 'mirror'
+  // alterna la capa con su copia espejada (sin costuras aunque la capa no sea periódica); 'wrap' pone la
+  // misma capa una al lado de la otra (la capa empalma sola). En ambos casos
   // cada capa se corre una fracción f del movimiento del terreno, se achica con el zoom en esa proporción
   // y se apoya entre el pie de la pantalla (f = 0) y el pie del mundo (f = 1).
   private placeBackground(t: Terrain): void {
@@ -547,7 +549,7 @@ export class PixiRenderer implements GameRenderer {
       L.tiles.forEach((sp, k) => {
         sp.visible = k < need
         if (k >= need) return
-        const mirrored = ((first + k) & 1) === 1
+        const mirrored = !L.wrap && ((first + k) & 1) === 1
         const x = startX + k * tw
         sp.scale.set(mirrored ? -s : s, s)
         sp.position.set(mirrored ? x + tw : x, y)
