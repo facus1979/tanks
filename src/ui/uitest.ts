@@ -1,12 +1,13 @@
 // Página de prueba de las vistas: ?uitest=online|lobby|title|menu|banner|score|final|shop|hud con modelos falsos.
 // index.html la carga solo si la query trae uitest; main.ts puede llamar mountUiTest(name) si prefiere.
-import { BEDROCK, BRICK, CREWS, DIRT, ITEM_ORDER, MAP_SIZES, SHOP, STONE, TANK_COLORS, WOOD, type MapSize, type MatchConfig, type ShopId, type Terrain } from '../sim/types'
+import { BEDROCK, BRICK, CREWS, DIRT, ITEM_ORDER, MAP_SIZES, MAX_PLAYERS_BY_SIZE, SHOP, STONE, TANK_COLORS, WOOD, type MapSize, type MatchConfig, type ShopId, type Terrain } from '../sim/types'
 import { loadUiAssets } from './assets'
 import { Hud } from './hud'
 import { refreshLabels } from './kit'
 import { createBannerView } from './banner'
 import { createLobbyView } from './lobby'
-import { createMenuView } from './menu'
+import { compactSlots, createMenuView } from './menu'
+import type { LobbySlot } from '../net/types'
 import { createOnlineMenuView } from './online'
 import { createScoreboardView } from './scoreboard'
 import { createShopView } from './shop'
@@ -105,9 +106,11 @@ export async function mountUiTest(name: string): Promise<boolean> {
         }
       : null
     createMenuView().show(initial, (c) => console.log('play', JSON.stringify(c)))
-    // &pick=small (o cualquier data-key de un botón de opción) lo toca después de abrir: prueba achicar el mapa
-    const pick = params.get('pick')
-    if (pick) document.querySelector<HTMLButtonElement>(`#menu-view [data-key="${pick}"]`)?.click()
+    // &pick=small (o cualquier data-key de un botón de opción) lo toca después de abrir: prueba achicar el mapa.
+    // v2.3: &pick=small,large toca varios en orden (achicar y volver a agrandar), y &pre=teclas manda teclas
+    // antes de tocarlos (por ejemplo, vaciar casilleros para probar la compactación con huecos).
+    pressKeys('pre')
+    for (const pick of (params.get('pick') ?? '').split(',').filter(Boolean)) document.querySelector<HTMLButtonElement>(`#menu-view [data-key="${pick}"]`)?.click()
     pressKeys()
   }
   else if (name === 'banner') {
@@ -213,13 +216,24 @@ export async function mountUiTest(name: string): Promise<boolean> {
     const model = lobbyModel(params.get('role') === 'client' ? 'client' : 'host')
     const push = (fn: (m: LobbyModel) => void) => {
       fn(model)
-      view.update({ ...model, lobby: { ...model.lobby }, canStart: model.lobby.slots.filter((s) => s.kind !== 'off').length >= 2 })
+      // copia profunda, como el anfitrión (structuredClone): la vista compara el modelo viejo con el nuevo
+      view.update({ ...structuredClone(model), canStart: model.lobby.slots.filter((s) => s.kind !== 'off').length >= 2 })
     }
-    view.show(model, {
+    view.show(structuredClone(model), {
       claim: (i) => push((m) => { m.lobby.slots[i] = { ...m.lobby.slots[i], owner: 'me', name: 'Yo', connected: true }; m.mySlot = i }),
       release: () => push((m) => { if (m.mySlot != null) m.lobby.slots[m.mySlot] = { ...m.lobby.slots[m.mySlot], owner: null, name: '' }; m.mySlot = null }),
       setSlot: (i, kind) => push((m) => { m.lobby.slots[i] = { ...m.lobby.slots[i], kind, owner: kind === 'human' ? null : null } }),
-      setOption: (key, v) => push((m) => { (m.lobby as unknown as Record<string, unknown>)[key] = v }),
+      setOption: (key, v) => push((m) => {
+        (m.lobby as unknown as Record<string, unknown>)[key] = v
+        // v2.3: al cambiar el mapa, la misma compactación que hace el anfitrión (compactSlots)
+        if (key === 'size') {
+          const mine = m.mySlot != null ? m.lobby.slots[m.mySlot] : null
+          const limit = MAX_PLAYERS_BY_SIZE[v as MapSize] ?? MAX_PLAYERS_BY_SIZE.small
+          m.lobby.slots = compactSlots(m.lobby.slots, limit, (s) => s.kind !== 'off', (crew): LobbySlot => ({ kind: 'off', name: '', crew, owner: null, connected: false })).slots
+          const at = mine ? m.lobby.slots.indexOf(mine) : -1
+          m.mySlot = at >= 0 ? at : null
+        }
+      }),
       start: () => console.log('start'),
       leave: () => console.log('leave'),
     })
@@ -229,8 +243,8 @@ export async function mountUiTest(name: string): Promise<boolean> {
 }
 
 // &keys=ArrowUp,ArrowRight,Enter… manda esas teclas (por code) al abrir la vista: prueba la navegación con teclado.
-function pressKeys(): void {
-  for (const code of (params.get('keys') ?? '').split(',').filter(Boolean)) {
+function pressKeys(param = 'keys'): void {
+  for (const code of (params.get(param) ?? '').split(',').filter(Boolean)) {
     window.dispatchEvent(new KeyboardEvent('keydown', { code, key: code === 'Space' ? ' ' : code, bubbles: true }))
   }
 }

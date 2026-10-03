@@ -1,6 +1,7 @@
 // Menú de partida: 8 casilleros (humano / IA / vacío, nombre, tripulante), rondas, dificultad, bioma y tamaño del mapa.
 // v5: los casilleros van en dos columnas de 4 (P1–P4 a la izquierda, P5–P8 a la derecha). Los que pasan el máximo
 // del mapa elegido (MAX_PLAYERS_BY_SIZE: Chico 4, Mediano 6, Grande 8) se ven bloqueados con "SOLO MAPA …".
+// v2.3: al achicar el mapa los ocupados se compactan hacia arriba conservando su configuración (compactSlots).
 import { CREWS, MAP_SIZE_ORDER, MAX_PLAYERS, MAX_PLAYERS_BY_SIZE, TANK_COLORS, type Biome, type CrewId, type Difficulty, type MapSize, type MatchConfig, type PlayerKind, type SlotConfig } from '../sim/types'
 import { DEFAULT_CONFIG, type MenuView } from './types'
 import { bindNav, button, el, label, portrait, screenRoot, setLabel, setPortrait, type Nav } from './kit'
@@ -66,6 +67,33 @@ function sizeFor(i: number): MapSize | null {
   return MAP_SIZE_ORDER.find((z) => i < MAX_PLAYERS_BY_SIZE[z]) ?? null
 }
 
+// v2.3: regla común para achicar el mapa (menú local y sala online). Si algún casillero ocupado quedó en una
+// posición >= limit, los ocupados se corren hacia arriba en su orden, conservando todo lo suyo (humano/IA,
+// nombre, tripulante y, en la sala, dueño); los primeros `limit` se quedan y el resto se descarta desde el
+// final. Detrás de los que quedan van los vacíos que había (con su tripulante) y después los descartados
+// convertidos en vacíos con su mismo tripulante, así el largo de la lista no cambia. Si ningún ocupado
+// quedó afuera no se toca nada (los huecos se respetan: el número y el color salen del orden de los
+// ocupados, así que la partida es la misma). Devuelve la lista nueva y los descartados, en orden.
+export function compactSlots<T extends { crew: CrewId }>(slots: readonly T[], limit: number, used: (s: T) => boolean, empty: (crew: CrewId) => T): { slots: T[]; dropped: T[] } {
+  if (!slots.some((s, i) => i >= limit && used(s))) return { slots: [...slots], dropped: [] }
+  const occ = slots.filter(used)
+  const kept = occ.slice(0, limit)
+  const dropped = occ.slice(limit)
+  const holes = slots.filter((s) => !used(s))
+  return { slots: [...kept, ...holes, ...dropped.map((s) => empty(s.crew))], dropped }
+}
+
+// Un casillero vacío cuyo tripulante ya usa un ocupado (u otro vacío anterior) toma el primero libre: así,
+// al ocuparlo no repite el de otro. Los ocupados y los vacíos sin choque no se tocan.
+function freeCrews(slots: Slot[]): void {
+  const taken = new Set(slots.filter((s) => s.kind !== 'empty').map((s) => s.crew))
+  for (const s of slots) {
+    if (s.kind !== 'empty') continue
+    if (taken.has(s.crew)) s.crew = CREWS.find((c) => !taken.has(c)) ?? s.crew
+    taken.add(s.crew)
+  }
+}
+
 // En táctil (html.touch) cada ajuste muestra solo el valor elegido y tocarlo pasa al siguiente.
 function isTouch(): boolean {
   return document.documentElement.classList.contains('touch')
@@ -89,8 +117,8 @@ interface SlotEls {
 
 export class MenuScreen implements MenuView {
   private slots: Slot[] = []
-  // Casilleros vaciados al achicar el mapa: si se vuelve a agrandar en esta misma pantalla, recuperan lo que eran.
-  private parked = new Map<number, SlotKind>()
+  // Casilleros descartados al achicar el mapa (en orden): si se vuelve a agrandar en esta misma pantalla, vuelven.
+  private parked: Slot[] = []
   private notice = ''
   private rounds = 3
   private difficulty: Difficulty = 'normal'
@@ -149,7 +177,7 @@ export class MenuScreen implements MenuView {
     this.biome = config.biome ?? 'rotate'
     // una config guardada antes de v2 no trae size: arranca en el tamaño por defecto
     this.size = config.size && MAP_SIZE_ORDER.includes(config.size) ? config.size : (DEFAULT_CONFIG.size ?? 'medium')
-    this.parked.clear()
+    this.parked = []
     this.notice = ''
     this.fitSize(true)
   }
@@ -193,26 +221,29 @@ export class MenuScreen implements MenuView {
     this.fitSize(false)
   }
 
-  // Ajusta los casilleros al máximo del mapa: los ocupados que quedan afuera se vacían (y se recuerdan por si
-  // se vuelve a agrandar); los recordados que vuelven a entrar se recuperan si siguen vacíos.
+  // Ajusta los casilleros al máximo del mapa (v2.3, la misma regla que el anfitrión online en src/net/host.ts):
+  // si algún ocupado queda afuera, se compactan (ver compactSlots) y los que no entran se descartan desde el
+  // final, con un aviso. Extra del menú local: los descartados se recuerdan mientras dure esta pantalla y, si
+  // se vuelve a agrandar el mapa, entran de nuevo en orden en los primeros casilleros vacíos habilitados
+  // (con su tripulante, o con uno libre si ya lo tomó otro). Tocar el tipo de un casillero los olvida.
   private fitSize(silent: boolean): void {
     const limit = this.limit()
-    let emptied = 0
-    this.slots.forEach((s, i) => {
-      if (i >= limit) {
-        if (s.kind !== 'empty') {
-          this.parked.set(i, s.kind)
-          s.kind = 'empty'
-          emptied++
-        }
-      } else {
-        const back = this.parked.get(i)
-        if (back && s.kind === 'empty') s.kind = back
-        this.parked.delete(i)
-      }
-    })
+    const { slots, dropped } = compactSlots(this.slots, limit, (s) => s.kind !== 'empty', (crew): Slot => ({ kind: 'empty', name: '', crew }))
+    this.slots = slots
+    this.parked = [...dropped, ...this.parked]
+    // recupera los descartados antes, en orden, si ahora entran
+    while (this.parked.length) {
+      const i = this.slots.findIndex((s, k) => k < limit && s.kind === 'empty')
+      if (i < 0) break
+      const back = this.parked.shift() as Slot
+      const taken = new Set(this.slots.filter((o) => o.kind !== 'empty').map((o) => o.crew))
+      const crew = taken.has(back.crew) ? (CREWS.find((c) => !taken.has(c)) ?? back.crew) : back.crew
+      this.slots[i] = { ...back, crew }
+    }
+    freeCrews(this.slots)
     if (silent) return
-    this.notice = emptied > 0 ? `${emptied === 1 ? '1 CASILLERO QUEDO VACIO' : `${emptied} CASILLEROS QUEDARON VACIOS`}: ${SIZE_NAMES[this.size]} ADMITE ${limit}` : ''
+    const n = dropped.length
+    this.notice = n > 0 ? `${n === 1 ? '1 CASILLERO QUEDO AFUERA' : `${n} CASILLEROS QUEDARON AFUERA`}: ${SIZE_NAMES[this.size]} ADMITE ${limit}` : ''
     if (this.editing && this.row < SLOT_ROWS && this.locked(this.curSlot())) this.editing = false
   }
 
@@ -393,7 +424,7 @@ export class MenuScreen implements MenuView {
         s.kind = KIND_CYCLE[(KIND_CYCLE.indexOf(s.kind) + 1) % KIND_CYCLE.length]
         this.editing = false
         this.notice = ''
-        this.parked.delete(i)
+        this.parked = []
       } else if (c === C_CREW) this.cycleCrew(i, 1)
       else if (s.kind !== 'empty') this.editing = !this.editing
       this.clampCol()
