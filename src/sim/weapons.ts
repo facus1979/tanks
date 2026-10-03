@@ -61,7 +61,7 @@ export function resolveShot(state: GameState, shooter: Player, weapon: WeaponId)
   if (flight.impact.kind === 'out' || flight.impact.kind === 'lava') return { flights, events: [] }
   const { x, y, tankId } = flight.impact
   if (w.rolls && flight.impact.kind === 'terrain') return roll(state, shooter, weapon, flight, flights)
-  const blast = blastFor(weapon, x, y, flight.time, tankId)
+  const blast = blastFor(weapon, x, y, flight.time, tankId, flight.vel.x)
   if (w.terrain === 'dig') return { flights, events: resolveBlast(state, blast, (ev) => tunnel(state, flight, ev)) }
   if (w.burn) return { flights, events: resolveBlast(state, blast, (ev) => napalm(state, x, y, flight.time, w.burn!, ev)) }
   return { flights, events: resolveBlast(state, blast) }
@@ -74,7 +74,7 @@ function cluster(state: GameState, shooter: Player, weapon: WeaponId, main: Flig
   const flights = [toFlight(main, 0)]
   if (!main.apex) {
     if (main.impact.kind === 'out' || main.impact.kind === 'lava') return { flights, events: [] }
-    const b = blastFor(weapon, main.impact.x, main.impact.y, main.time, main.impact.tankId)
+    const b = blastFor(weapon, main.impact.x, main.impact.y, main.time, main.impact.tankId, main.vel.x)
     return { flights, events: resolveBlast(state, b) }
   }
   const n = w.split ?? 1
@@ -104,7 +104,7 @@ function cluster(state: GameState, shooter: Player, weapon: WeaponId, main: Flig
     flights.push(toFlight(f, main.time))
     if (f.impact.kind === 'out' || f.impact.kind === 'lava') continue
     const tankId = f.impact.tankId !== undefined && state.players[f.impact.tankId]?.alive ? f.impact.tankId : undefined
-    events.push(...resolveBlast(state, blastFor(weapon, f.impact.x, f.impact.y, main.time + f.time, tankId)))
+    events.push(...resolveBlast(state, blastFor(weapon, f.impact.x, f.impact.y, main.time + f.time, tankId, f.vel.x)))
   }
   return { flights, events }
 }
@@ -335,5 +335,5 @@ function roll(state: GameState, shooter: Player, weapon: WeaponId, flight: Fligh
   path.push({ x, y })
   push(hit ? { kind: 'tank', x, y, tankId: hit.id } : { kind: 'terrain', x, y })
   const endT = flight.time + (path.length - 1) * PATH_DT
-  return { flights, events: resolveBlast(state, blastFor(weapon, x, y, endT, hit?.id)) }
+  return { flights, events: resolveBlast(state, blastFor(weapon, x, y, endT, hit?.id, vx)) }
 }

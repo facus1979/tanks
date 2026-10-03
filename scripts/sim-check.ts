@@ -13,6 +13,7 @@ import {
   STONE,
   TANK_H,
   TANK_HALF_W,
+  TANK_W,
   WOOD,
   WATER,
   LAVA,
@@ -78,10 +79,10 @@ import {
 } from '../src/sim'
 import { tankTilt } from '../src/sim/tilt'
 import { propSupported, resolveBlast, blastFor } from '../src/sim/physics'
-import { lavaRisk } from '../src/sim/ai'
+import { aiStats, lavaRisk } from '../src/sim/ai'
 import { LAVA_DELAY } from '../src/sim/game'
 import { skylineOf } from '../src/sim/ballistics'
-import { generate, padBounds, SPAWN_PIT_GAP, SPAWN_GAP_CROWD, spawnStats, type Generated } from '../src/sim/gen'
+import { generate, padBounds, SPAWN_PIT_GAP, SPAWN_GAP_CROWD, spawnStats, CORNICE_CRUST, CORNICE_LEN, CORNICE_SPAWN_FLAT, CORNICE_SPILL, type Generated } from '../src/sim/gen'
 import { Rng } from '../src/sim/rng'
 import { cloneTerrain, columnGround, createTerrain, deform, fillRect, hasLiquid } from '../src/sim/terrain'
 import { applyPatch, flowLiquids, liquidVolume } from '../src/sim/flow'
@@ -188,9 +189,30 @@ let abyssCount = 0
 let basinCount = 0
 // Por qué un spawn en x no sirve (null si sirve): abismo a menos de SPAWN_PIT_GAP de la caja del
 // tanque o adentro de una cuenca (con 20 px de margen).
+// v2.3: createMatch reparte los lugares de generate entre los jugadores en un orden sorteado: mismos
+// lugares, en cualquier orden.
+function sameSpawns(g: Generated, s: GameState): boolean {
+  const a = g.spawns.slice().sort((p, q) => p - q)
+  const b = s.players.map((p) => p.x).sort((p, q) => p - q)
+  return a.length === b.length && a.every((x, i) => x === b[i])
+}
+
+// v2.3: la distancia se mide hasta la boca (g.mouth); sobre una cornisa (columnas de abismo con costra)
+// puede nacer, pero con costra bajo todo el pad y piso parejo (no se vuelca ni resbala solo).
 function spawnProblem(g: Generated, x: number): string | null {
   const t = g.terrain
-  for (let i = Math.max(0, x - TANK_HALF_W - SPAWN_PIT_GAP); i <= Math.min(t.w - 1, x + TANK_HALF_W + SPAWN_PIT_GAP); i++) if (t.pits?.[i]) return 'abismo cerca'
+  const open = g.mouth ?? t.pits
+  for (let i = Math.max(0, x - TANK_HALF_W - SPAWN_PIT_GAP); i <= Math.min(t.w - 1, x + TANK_HALF_W + SPAWN_PIT_GAP); i++) if (open?.[i]) return 'abismo cerca'
+  const [px0, px1] = padBounds(x)
+  let lo = Infinity
+  let hi = -Infinity
+  let pit = false
+  for (let i = px0; i <= px1; i++) {
+    if (t.pits?.[i]) pit = true
+    lo = Math.min(lo, columnGround(t, i))
+    hi = Math.max(hi, columnGround(t, i))
+  }
+  if (pit && (hi >= t.h || hi - lo > CORNICE_SPAWN_FLAT + 1)) return 'cornisa que no lo sostiene'
   for (const q of g.basins ?? []) if (x + TANK_HALF_W + 20 > q.x0 && x - TANK_HALF_W - 20 < q.x1) return 'en una cuenca'
   return null
 }
@@ -254,9 +276,14 @@ function tramoChecks(g: Generated, biome: Biome, size: MapSize, seed: number): v
   const abysses = segs.filter((q) => q.kind === 'abyss')
   abyssCount += runs.length
   check(runs.length === abysses.length, `abismos: ${runs.length} tiras de pits para ${abysses.length} tramos ${tag}`)
+  // v2.3: abajo el abismo es más ancho que la boca (los labios están socavados) y el socavón de una
+  // cornisa larga puede meterse hasta CORNICE_SPILL px bajo el tramo vecino
   for (const [a, b] of runs) {
-    check(b - a + 1 >= 44 && b - a + 1 <= 150, `abismo de ${b - a + 1} px ${tag}`)
-    check(abysses.some((q) => a >= q.x0 && b < q.x1), `abismo fuera de su tramo ${tag}`)
+    let mouth = 0
+    for (let x = a; x <= b; x++) if (g.mouth?.[x]) mouth++
+    check(mouth >= 44 && mouth <= 150, `boca del abismo de ${mouth} px ${tag}`)
+    check(b - a + 1 <= 150 + 2 * (CORNICE_LEN[1] + 8), `abismo de ${b - a + 1} px ${tag}`)
+    check(abysses.some((q) => a >= q.x0 - CORNICE_SPILL && b < q.x1 + CORNICE_SPILL), `abismo fuera de su tramo ${tag}`)
     check(a > 40 && b < W - 40, `abismo contra el borde ${tag}`)
   }
   let bad = 0
@@ -411,7 +438,7 @@ for (const size of MAP_SIZE_ORDER) for (const biome of BIOMES) {
       // v3: los tramos (empalmes, abismos, cuencas y spawns: ver tramoChecks)
       if (size !== 'small' && bots === 3) {
         const g = generate(biome, new Rng(roundSeed(seed, 1)), s.players.length, W, H)
-        check(g.terrain.front.every((m, i) => m === t.front[i]) && g.spawns.every((x, i) => x === s.players[i].x), `generate no coincide con createMatch ${tag}`)
+        check(g.terrain.front.every((m, i) => m === t.front[i]) && sameSpawns(g, s), `generate no coincide con createMatch ${tag}`)
         tramoChecks(g, biome, size, seed)
         liquidChecks(g, `${size}/${biome}/seed ${seed}`)
       }
@@ -503,7 +530,7 @@ for (const size of MAP_SIZE_ORDER) {
         check(s.players.length === n, `v5: cantidad de jugadores ${tag}`)
         tankChecks(s, tag)
         const g = generate(biome, new Rng(roundSeed(seed, 1)), n, s.width, s.height)
-        check(g.spawns.every((x, i) => x === s.players[i].x), `v5: generate no coincide con createMatch ${tag}`)
+        check(sameSpawns(g, s), `v5: generate no coincide con createMatch ${tag}`)
         for (const x of g.spawns) check(spawnProblem(g, x) === null, `v5: spawn en x=${x}: ${spawnProblem(g, x)} ${tag}`)
         for (const p of s.players) check(!hasLiquid(s.terrain, WATER, p.x - TANK_HALF_W, p.y - TANK_H, p.x + TANK_HALF_W, p.y + 1) && !hasLiquid(s.terrain, LAVA, p.x - TANK_HALF_W, p.y - TANK_H, p.x + TANK_HALF_W, p.y + 1), `v5: tanque nace en un líquido ${tag} p${p.id}`)
         const xs = s.players.map((p) => p.x).sort((a, b) => a - b)
@@ -2379,7 +2406,8 @@ function pushAt(weapon: WeaponId, x: number, y = 270, prep?: (s: GameState) => v
           const r = applyCommand(m, { type: 'move', playerId: p.id, dir })
           if (r.state === m || r.state.current !== p.id) break
           rampSteps++
-          rampSlides += slidesOf(r.events).length
+          // v2.3: al borde de un abismo el tanque se puede volcar (vuelco al abismo): eso no es la rampa
+          rampSlides += slidesOf(r.events).filter((e) => !r.state.terrain.pits?.some((v, x) => v === 1 && Math.abs(x - e.path[0].x) <= TANK_W)).length
           m = r.state
         }
       }
@@ -2777,8 +2805,8 @@ function targetOf(s: GameState, ammo?: Partial<Record<WeaponId, number>>): numbe
   }
   check(a.phase === 'gameover' && a.round === 2 && a.players.length === 8, `v5: partida de 8 en Grande sin terminar (${a.phase}, ronda ${a.round})`)
   check(diverged === 0 && netHash(a) === netHash(b), `v5: réplicas con 8: ${diverged} pasos distintos`)
-  // la segunda ronda la abre el jugador 1 ((ronda - 1) % jugadores), igual que con 4
-  check(opener === 1, `v5: la ronda 2 la abre el jugador ${opener}`)
+  // v2.3: el primer turno de cada ronda se sortea con la seed (ver 18); acá alcanza con que la ronda 2 arranque
+  check(opener >= 0 && opener < 8, `v5: la ronda 2 no arrancó (${opener})`)
   console.log(`v5 réplicas con 8: ${steps} comandos, ${(encodeState(a).length / 1024).toFixed(0)} KB por snapshot`)
 }
 {
@@ -2804,9 +2832,11 @@ function targetOf(s: GameState, ammo?: Partial<Record<WeaponId, number>>): numbe
   console.log(`v5 IA peor caso: ${Object.entries(worst).map(([k, v]) => `${k} ${v.toFixed(0)} ms`).join(', ')}`)
 }
 {
-  // balance con 6 IA en Mediano y 8 en Grande (10 partidas; con --balance, 20)
-  const games = process.argv.includes('--balance') ? 20 : 10
+  // balance con 6 IA en Mediano y 8 en Grande (10 partidas; con --balance, 20). v2.3: Mediano con 6 juega
+  // POS_GAMES partidas para medir el reparto de victorias por posición: ninguna gana más del 30%
+  const POS_GAMES = 60
   for (const [size, n] of [['medium', 6], ['large', 8]] as [MapSize, number][]) {
+    const games = size === 'medium' ? POS_GAMES : process.argv.includes('--balance') ? 20 : 10
     const t0 = performance.now()
     const res: MatchStats[] = []
     for (let seed = 1; seed <= games; seed++) res.push(match(n - 1, 100 + seed, size))
@@ -2832,8 +2862,263 @@ function targetOf(s: GameState, ammo?: Partial<Record<WeaponId, number>>): numbe
     // v2.2: sin tope de calma (cada daño a otro frena la lava) las partidas de 6 y 8 se alargan
     // máximo de 8 tanques: 70 (con la inclinación del casco una de 20 partidas llegó a 67; la media es lo que importa)
     check(avg <= (n === 8 ? 50 : 44) && Math.max(...shots) <= (n === 8 ? 70 : 60), `v5: balance ${size} ${n} tanques: ${avg.toFixed(1)} tiros/partida, máximo ${Math.max(...shots)}`)
-    check(Math.max(...ranks) <= games * 0.6, `v5: una posición gana demasiado (${ranks.join('/')}) ${size} ${n}`)
+    // v2.3: con el sorteo de lugares y de primer turno, ninguna posición gana más del 30% (6 en Mediano)
+    check(Math.max(...ranks) <= games * (n === 6 ? 0.3 : 0.6), `v5: una posición gana demasiado (${ranks.join('/')}) ${size} ${n}`)
   }
+}
+// ---------- 18. v2.3: abismo que mata, sorteo de lugares y de turno, puentes de Tierra ----------
+{
+  // cornisas, labios y puentes generados (Mediano y Grande, 30 seeds × 3 biomas)
+  let abysses = 0
+  let withCornice = 0
+  let cornices = 0
+  let bridges = 0
+  let bad = 0
+  let cols = 0
+  let badSize = 0
+  for (const size of ['medium', 'large'] as MapSize[]) {
+    for (const biome of BIOMES) {
+      for (let seed = 1; seed <= 30; seed++) {
+        const g = generate(biome, new Rng(roundSeed(seed, 1)), 4, MAP_SIZES[size].w, MAP_SIZES[size].h)
+        const t = g.terrain
+        const segs = (g.segments ?? []).filter((q) => q.kind === 'abyss')
+        abysses += segs.length
+        for (const q of segs) if ((g.ledges ?? []).some((l) => l.kind === 'cornice' && l.x1 > q.x0 - CORNICE_SPILL && l.x0 < q.x1 + CORNICE_SPILL)) withCornice++
+        for (const l of g.ledges ?? []) {
+          if (l.kind === 'cornice') {
+            cornices++
+            if (l.thick < CORNICE_CRUST[0] || l.thick > CORNICE_CRUST[1] || l.x1 - l.x0 < 16 || l.x1 - l.x0 > CORNICE_LEN[1] + 16) badSize++
+          } else bridges++
+          // la mitad del medio: columnas de abismo con piso arriba (la costra o el puente, fino; la viga del
+          // castillete de encima no cuenta) y debajo, por lo menos 40 px de aire (el socavón o el pozo: el
+          // que la rompe cae al vacío; más abajo la pared serpentea y puede asomar)
+          // (de la cornisa, la mitad de la punta: hacia la raíz el techo del socavón baja en arco)
+          const w = l.x1 - l.x0
+          const tipRight = l.kind === 'cornice' && !!g.mouth?.[l.x1]
+          const xa = l.kind === 'bridge' ? l.x0 + (w >> 2) : tipRight ? l.x0 + (w >> 1) : l.x0 + 2
+          const xb = l.kind === 'bridge' ? l.x1 - (w >> 2) : tipRight ? l.x1 - 2 : l.x1 - (w >> 1)
+          // desde un poco arriba de la superficie de los costados (la viga del castillete queda más arriba)
+          const y0 = Math.min(columnGround(t, l.x0 - 30), columnGround(t, l.x1 + 30)) - 12
+          for (let x = xa; x < xb; x++) {
+            let top = y0
+            // la costra de la cornisa es tierra (encima puede haber una losa de piedra de la jungla)
+            while (top < t.h && !(l.kind === 'cornice' ? t.front[top * t.w + x] === DIRT : isSolid(t, x, top))) top++
+            let y = top
+            while (y < t.h && isSolid(t, x, y)) y++
+            const thick = y - top
+            const under = Math.min(t.h, columnGround(t, x, y)) - y
+            cols++
+            if (!t.pits?.[x] || top >= t.h || thick > l.thick + 14 || under < 40) bad++
+          }
+        }
+      }
+    }
+  }
+  console.log(`v2.3 abismos: ${abysses} abismos, ${withCornice} con cornisa, ${cornices} cornisas, ${bridges} puentes; ${bad} de ${cols} columnas fuera de forma`)
+  // la pared serpentea ±8 px por fila: unas pocas columnas de la punta salen algo más gruesas o con pared abajo
+  check(bad <= cols * 0.05, `v2.3: ${bad} de ${cols} columnas de cornisa o puente mal formadas`)
+  check(badSize === 0, `v2.3: ${badSize} cornisas con medidas fuera de rango`)
+  check(withCornice >= abysses * 0.7 && bridges > 0, `v2.3: pocas cornisas (${withCornice}/${abysses}) o ningún puente (${bridges})`)
+}
+// Mapa llano de Mediano con un abismo [CM0, CM1] abierto desde la superficie y una cornisa de 8 px de
+// costra a su izquierda ([CC0, CM0), con el vacío debajo). Tanque 0 lejos, tanque 1 en x1.
+const CM0 = 700
+const CM1 = 779
+const CC0 = 650
+function corniceMap(x1: number): GameState {
+  const s = pitMap()
+  const t = s.terrain
+  fillRect(t, CC0, 308, CM0 - 1, t.h - 1, AIR, 'front')
+  fillRect(t, CM0, 300, CM1, 307, AIR, 'front')
+  for (let x = CC0; x <= CM1; x++) t.pits![x] = 1
+  s.players[1].x = x1
+  s.players[1].y = 300
+  return s
+}
+const abyssDeath = (ev: GameEvent[], id: number) => ev.some((e) => e.type === 'death' && e.playerId === id && e.cause === 'abyss')
+{
+  // vuelco: con el centro sobre el vacío y apoyado de un solo lado, cae (antes hacía equilibrio sobre 3 columnas)
+  const tip = corniceMap(CM0 + 6)
+  const ev = resolveBlast(tip, blastFor('normal', 100, 299, 0))
+  check(abyssDeath(ev, 1) && ev.some((e) => e.type === 'slide' && e.playerId === 1 && e.cause === 'slope'), 'v2.3: con el centro sobre el vacío se vuelca al abismo')
+  // fuera de un abismo no cambia: el mismo borde sobre un pozo con fondo no lo vuelca
+  const pit = flat()
+  fillRect(pit.terrain, 600, 300, 700, 340, AIR)
+  pit.players[1].x = 594
+  const ev2 = resolveBlast(pit, blastFor('normal', 100, 299, 0))
+  check(pit.players[1].x === 594 && !ev2.some((e) => e.type === 'slide'), 'v2.3: sin abismo, el borde de un pozo no vuelca')
+  // sobre la cornisa entera se sostiene; un tiro que rompe la costra debajo lo tira al vacío
+  const on = corniceMap(CC0 + 24)
+  const ev3 = resolveBlast(on, blastFor('normal', 100, 299, 0))
+  check(on.players[1].alive && on.players[1].x === CC0 + 24 && on.players[1].y === 300, 'v2.3: la cornisa sostiene al tanque')
+  const broke = corniceMap(CC0 + 24)
+  const ev4 = resolveBlast(broke, blastFor('normal', CC0 + 24, 304, 0))
+  check(abyssDeath(ev4, 1), 'v2.3: romper la costra bajo el tanque lo tira al abismo')
+  void ev3
+}
+{
+  // el impacto directo empuja en el sentido en que venía el proyectil: de frente, al abismo de atrás
+  const x1 = CM0 - TANK_HALF_W - 10
+  const from = corniceMap(x1)
+  const ev = resolveBlast(from, blastFor('normal', x1 - 6, 286, 0, 1, 80))
+  check(abyssDeath(ev, 1), 'v2.3: un impacto directo desde el otro lado lo empuja al abismo')
+  const back = corniceMap(x1)
+  const ev2 = resolveBlast(back, blastFor('normal', x1 + 6, 286, 0, 1, -80))
+  check(!abyssDeath(ev2, 1) && back.players[1].x < x1, `v2.3: el impacto que viene del abismo lo aleja (${x1} → ${back.players[1].x})`)
+  // casi vertical: como antes, desde el punto del impacto
+  const drop = corniceMap(x1)
+  resolveBlast(drop, blastFor('normal', x1 + 6, 286, 0, 1, 1))
+  check(drop.players[1].x < x1, 'v2.3: un impacto directo casi vertical empuja desde el punto del impacto')
+  // la IA lo aprovecha: con el rival al borde, le tira de frente (sin error, tres vientos)
+  let pushed = 0
+  for (const wind of [-5, 0, 5]) {
+    const s = corniceMap(x1)
+    s.wind = wind
+    const plan = chooseShot(s, 'hard', () => 0.5)
+    if (abyssDeath(shoot(s, plan.weapon, plan.angle, plan.power).events, 1)) pushed++
+  }
+  console.log(`v2.3 IA: tira al rival de la cornisa al abismo ${pushed}/3`)
+  check(pushed >= 2, `v2.3: la IA no aprovecha la cornisa (${pushed}/3)`)
+  // en los mapas generados: un tanque que nace al borde (a SPAWN_PIT_GAP + 2 px de una boca abierta, sin puente),
+  // con un impacto directo desde el otro lado (normal: empuja KNOCKBACK_MAX), cae
+  let tries = 0
+  let falls = 0
+  for (const size of ['medium', 'large'] as MapSize[]) {
+    for (let seed = 1; seed <= 120; seed++) {
+      const s = createMatch(mk(3, 'normal', BIOMES[seed % 3], seed, 1, 0, size))
+      const g = generate(BIOMES[seed % 3], new Rng(roundSeed(seed, 1)), 4, s.width, s.height)
+      for (const p of s.players) {
+        let side = 0
+        const open = (x: number) => !!g.mouth?.[x] && columnGround(s.terrain, x, p.y - 2 * TANK_H) >= s.height
+        for (let d = 0; d <= SPAWN_PIT_GAP + 2 && !side; d++) {
+          if (open(p.x + TANK_HALF_W + d)) side = 1
+          else if (open(p.x - TANK_HALF_W - 1 - d)) side = -1
+        }
+        if (!side) continue
+        const c = cloneState(s)
+        tries++
+        if (abyssDeath(resolveBlast(c, blastFor('normal', p.x - side * 6, p.y - 14, 0, p.id, side * 80)), p.id)) falls++
+      }
+    }
+  }
+  console.log(`v2.3 empuje: tanques al borde de un abismo al nacer ${tries}, caen con un impacto directo ${falls}`)
+  check(tries >= 10 && falls >= tries * 0.7, `v2.3: el empuje no tira al abismo (${falls}/${tries})`)
+}
+{
+  // sorteo de lugares y de primer turno: determinista, pero repartido (Chico no cambia de terreno: ver 2d)
+  const opens = new Array(6).fill(0)
+  const p0rank = new Array(6).fill(0)
+  let same = 0
+  for (let seed = 1; seed <= 60; seed++) {
+    const cfg = mk(5, 'normal', BIOMES[seed % 3], seed, 2, 0, 'medium')
+    const a = createMatch(cfg)
+    const b = createMatch(cfg)
+    if (a.current === b.current && a.players.every((p, i) => p.x === b.players[i].x)) same++
+    opens[a.current]++
+    p0rank[a.players.map((p) => p.x).sort((x, y) => x - y).indexOf(a.players[0].x)]++
+  }
+  console.log(`v2.3 sorteo: abre ${opens.join('/')}, lugar del jugador 0 desde la izquierda ${p0rank.join('/')}`)
+  check(same === 60, 'v2.3: el sorteo de lugares y de turno no es determinista')
+  check(opens.every((n) => n >= 3) && p0rank.every((n) => n >= 3), `v2.3: el sorteo no se reparte (abre ${opens.join('/')}, jugador 0 ${p0rank.join('/')})`)
+  // cada ronda sortea de nuevo: la ronda 2 no la abre siempre el mismo
+  const second = new Set<number>()
+  for (let seed = 1; seed <= 12; seed++) {
+    // todas IA: la tienda se cierra sola y arranca la ronda 2
+    const s = cloneState(createMatch(mk(3, 'normal', 'forest', seed, 2, 0, 'small')))
+    s.phase = 'roundover'
+    const r = applyCommand(s, { type: 'nextRound' }).state
+    if (r.round === 2 && r.phase === 'aiming') second.add(r.current)
+  }
+  check(second.size >= 3, `v2.3: la ronda 2 la abre siempre el mismo (${[...second].join(',')})`)
+}
+{
+  // puente de Tierra: la IA sin tiro y con un pozo de lava entre ella y el rival (que está bajo un techo de
+  // roca madre) tira Tierra a la lava; turno a turno lo cruza
+  const scene = (difficulty: Difficulty): GameState => {
+    const s = cloneState(createMatch({ slots: [{ kind: 'ai' }, { kind: 'ai' }], rounds: 1, difficulty, biome: 'industrial', seed: 3, size: 'medium' }))
+    const t = s.terrain
+    t.front.fill(AIR)
+    t.back.fill(AIR)
+    t.pits = new Uint8Array(t.w)
+    fillRect(t, 0, 300, t.w - 1, t.h - 1, DIRT, 'both')
+    fillRect(t, 0, t.h - 3, t.w - 1, t.h - 1, BEDROCK, 'both')
+    fillRect(t, 500, 300, 700, 340, AIR)
+    fillRect(t, 498, 340, 702, 344, STONE)
+    fillRect(t, 500, 300, 700, 339, LAVA)
+    fillRect(t, 1040, 250, 1160, 256, BEDROCK)
+    fillRect(t, 1040, 256, 1046, 299, BEDROCK)
+    fillRect(t, 1154, 256, 1160, 299, BEDROCK)
+    s.props = []
+    s.players[0].x = 300
+    s.players[1].x = 1100
+    for (const p of s.players) p.y = 300
+    for (const id of WEAPON_ORDER) s.players[0].ammo[id] = 0
+    s.players[0].ammo.normal = 99
+    s.players[0].ammo.dirt = 9
+    s.current = 0
+    s.wind = 0
+    return s
+  }
+  const stone = (s: GameState) => {
+    let n = 0
+    for (let x = 500; x <= 700; x++) for (let y = 260; y < 340; y++) if (s.terrain.front[y * s.terrain.w + x] === STONE) n++
+    return n
+  }
+  for (const difficulty of ['normal', 'hard'] as Difficulty[]) {
+    let s = scene(difficulty)
+    const before = aiStats.bridges
+    let dirtShots = 0
+    let turns = 0
+    for (; turns < 12 && s.players[0].x < 700; turns++) {
+      s = cloneState(s)
+      s.current = 0
+      s.phase = 'aiming'
+      s.players[0].fuel = fuelFor(s.width)
+      const r = aiTurn(s, difficulty)
+      if (r.plan.weapon === 'dirt') dirtShots++
+      s = r.state
+    }
+    console.log(`v2.3 puente (${difficulty}): ${dirtShots} tiros de Tierra, ${aiStats.bridges - before} tramos, piedra ${stone(s)} px, cruza en ${turns} turnos (x ${s.players[0].x})`)
+    check(dirtShots >= 2 && stone(s) > 300, `v2.3: la IA no tiende el puente de Tierra (${difficulty})`)
+    check(s.players[0].x > 700 && s.players[0].alive && s.players[0].hp === 100, `v2.3: la IA no cruza la lava por el puente (${difficulty}, x ${s.players[0].x}, vida ${s.players[0].hp})`)
+  }
+}
+{
+  // balance en mapas con abismo (Mediano y Grande, 4 y 6 tanques, 15 partidas de cada uno): al menos 1 de
+  // cada 20 muertes es por abismo; y cuántas veces la IA tendió un puente de Tierra
+  const t0 = performance.now()
+  let deaths = 0
+  let abyss = 0
+  let games = 0
+  let shots = 0
+  const bridges0 = aiStats.bridges
+  const crossings0 = aiStats.crossings
+  for (const size of ['medium', 'large'] as MapSize[]) {
+    for (const n of [4, 6]) {
+      let found = 0
+      for (let seed = 1; found < 15 && seed < 1000; seed++) {
+        const biome = BIOMES[seed % 3]
+        if (!(generate(biome, new Rng(roundSeed(seed, 1)), n, MAP_SIZES[size].w, MAP_SIZES[size].h).segments ?? []).some((q) => q.kind === 'abyss')) continue
+        found++
+        games++
+        let s = createMatch(mk(n - 1, 'normal', biome, seed, 1, 0, size))
+        for (let k = 0; s.phase === 'aiming' && k < 150; k++) {
+          const r = aiTurn(s, 'normal')
+          if (r.flights) shots++
+          for (const e of r.events) {
+            if (e.type !== 'death') continue
+            deaths++
+            if (e.cause === 'abyss') abyss++
+          }
+          s = r.state
+        }
+      }
+    }
+  }
+  console.log(
+    `v2.3 balance con abismo: ${games} partidas, ${(shots / games).toFixed(1)} tiros/partida, ${deaths} muertes, ${abyss} por abismo (${((100 * abyss) / deaths).toFixed(1)}%), puentes de Tierra ${aiStats.bridges - bridges0} (cruces ${aiStats.crossings - crossings0}); ${((performance.now() - t0) / 1000).toFixed(1)} s`,
+  )
+  check(abyss * 20 >= deaths, `v2.3: pocas muertes por abismo (${abyss}/${deaths})`)
 }
 console.log(`IA peor caso: ${worstMs.toFixed(0)} ms`)
 console.log(`${checks - failures}/${checks} chequeos OK`)
