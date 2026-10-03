@@ -21,7 +21,7 @@ const SLOW = 0.2
 // Separación entre los botones y el tablero, y ancho reservado arriba a la derecha para los rivales del
 // HUD (px lógicos de la pantalla de 800×450).
 const BAR_GAP = 6
-const RIVALS_W = 80
+const RIVALS_W = 110 // v2.3: las placas de rivales de la derecha ocupan ~107 px lógicos
 
 export interface TouchAim {
   angle: number
