@@ -1,4 +1,5 @@
 import { columnTop, isSolid, liquidAt } from './terrain'
+import { tankTilt, type Tilt } from './tilt'
 import {
   BARREL_LEN,
   LAVA,
@@ -23,14 +24,25 @@ const PATH_EVERY = 4
 export const PATH_DT = SUBSTEP * PATH_EVERY
 const OUT_MARGIN = 40
 
-// Boca del cañón dibujado. ground es el piso del tanque (y hacia abajo).
-export function muzzle(x: number, ground: number, angleDeg: number): Vec2 {
+// Boca del cañón dibujado. ground es el piso del tanque (y hacia abajo). tilt: inclinación de reposo del
+// casco (tankTilt); el pivote del cañón gira con el casco sobre el punto de apoyo, el cañón apunta al ángulo
+// absoluto del jugador (el dibujo lo compensa). Sin tilt, el tanque derecho de siempre.
+export function muzzle(x: number, ground: number, angleDeg: number, tilt?: Tilt | null): Vec2 {
   const rad = (angleDeg * Math.PI) / 180
   const facing = angleDeg > 90 ? -1 : 1
-  return {
-    x: x + facing * PIVOT_X + Math.cos(rad) * BARREL_LEN,
-    y: ground - PIVOT_Y - Math.sin(rad) * BARREL_LEN,
+  let px = x + facing * PIVOT_X
+  let py = ground - PIVOT_Y
+  if (tilt) {
+    const cx = tilt.x
+    const cy = Math.round(ground)
+    const dx = Math.round(x) + facing * PIVOT_X - cx
+    const dy = -PIVOT_Y
+    const c = Math.cos(tilt.angle)
+    const s = Math.sin(tilt.angle)
+    px = cx + dx * c - dy * s
+    py = cy + dx * s + dy * c
   }
+  return { x: px + Math.cos(rad) * BARREL_LEN, y: py - Math.sin(rad) * BARREL_LEN }
 }
 
 export interface FlightResult extends Flight {
@@ -83,7 +95,7 @@ function inTank(p: Player, x: number, y: number): boolean {
 export function fly(opts: FlyOptions): FlightResult {
   const { terrain, players, ownerId } = opts
   const owner = players.find((p) => p.id === ownerId)
-  const origin = opts.origin ?? (owner ? muzzle(owner.x, owner.y, opts.angle) : { x: 0, y: 0 })
+  const origin = opts.origin ?? (owner ? muzzle(owner.x, owner.y, opts.angle, tankTilt(terrain, owner.x, owner.y)) : { x: 0, y: 0 })
   const rad = (opts.angle * Math.PI) / 180
   // v2: gravedad, escala de potencia y viento dependen del ancho del mapa (con 800, los de v1)
   const phys = physicsFor(terrain.w)

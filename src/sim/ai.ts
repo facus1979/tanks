@@ -1,4 +1,5 @@
 import { fly, muzzle, skylineOf } from './ballistics'
+import { tankTilt } from './tilt'
 import { applyCommand } from './game'
 import { flowLiquids } from './flow'
 import { blastDamage, inLava, submerged } from './physics'
@@ -412,7 +413,7 @@ function estimate(
   // fuera del mapa o derretido en la lava: no sirve
   if (flight.impact.kind === 'out' || flight.impact.kind === 'lava') return { list: [{ angle, power, weapon: weapons[0], score: -1e6 }], blocked: false }
   const { x, y } = flight.impact
-  const m = muzzle(actor.x, actor.y, angle)
+  const m = muzzle(actor.x, actor.y, angle, tankTilt(state.terrain, actor.x, actor.y))
   const blocked = Math.hypot(x - m.x, y - m.y) < 30
   let near = Infinity
   for (const t of targets) near = Math.min(near, Math.hypot(t.x - x, t.y - TANK_H / 2 - y))

@@ -2,7 +2,7 @@
 import { Container, Graphics, Sprite, Texture } from 'pixi.js'
 import type { Player, Prop, Terrain } from '../../sim/types'
 import { TANK_H, TANK_W } from '../../sim/types'
-import { solidCell } from './liquids'
+import { tankTilt } from '../../sim/tilt'
 import type { Art, Font } from './assets'
 import { GLYPHS, OUT } from './fallback'
 import { mul } from './raster'
@@ -30,39 +30,9 @@ const BUBBLE_SPOTS: [number, number][] = (() => {
 export const SLIDE_TAIL = 0.2 // s de más después del último punto del path (el tanque se asienta)
 const SLIDE_JOLT = 0.24 // s del sacudón al empezar un deslizamiento por explosión
 const SLIDE_TILT = 0.3 // inclinación máxima por pendiente (rad, ~17°)
-const MAX_TILT = 0.35 // ~20°: más que eso el cañón del sim y el dibujo se separan demasiado
-const TILT_REACH = 24
-
-// Inclinación de reposo del tanque sobre la grilla: gira sobre el borde de apoyo más cercano al centro
-// hasta que el otro lado toca el piso. null si el apoyo abarca el centro (queda derecho).
-export function restTilt(t: Terrain, x0: number, floor: number): { angle: number; x: number } | null {
-  const g: number[] = []
-  for (let i = 0; i < TANK_W; i++) {
-    const x = x0 + i
-    let y = floor + TILT_REACH
-    if (x >= 0 && x < t.w) {
-      for (let yy = floor - 2; yy < floor + TILT_REACH && yy < t.h; yy++) {
-        if (yy >= 0 && solidCell(t.front[yy * t.w + x])) {
-          y = Math.max(floor, yy)
-          break
-        }
-      }
-    }
-    g.push(y)
-  }
-  const first = g.indexOf(floor)
-  const last = g.lastIndexOf(floor)
-  if (first < 0) return null
-  const mid = (TANK_W - 1) / 2
-  if (first <= mid && last >= mid) return null
-  let best = MAX_TILT
-  if (last < mid) {
-    for (let i = last + 1; i < TANK_W; i++) best = Math.min(best, Math.atan2(g[i] - floor, i - last))
-    return best > 0.02 ? { angle: best, x: x0 + last + 1 } : null
-  }
-  for (let i = first - 1; i >= 0; i--) best = Math.min(best, Math.atan2(g[i] - floor, first - i))
-  return best > 0.02 ? { angle: -best, x: x0 + first } : null
-}
+// Tiempo (s) que tarda el casco en llegar a la inclinación del piso: al empezar a subir se va inclinando
+// y después queda alineado con la pendiente.
+const TILT_TIME = 0.12
 
 export type Blocked = (x: number, y: number, w: number, h: number) => boolean
 
@@ -153,7 +123,7 @@ export class TankView {
     this.overlay.destroy({ children: true })
   }
 
-  update(art: Art, p: Player, current: boolean, time: number, wind: number, blocked?: Blocked, terrain?: Terrain): void {
+  update(art: Art, p: Player, current: boolean, time: number, wind: number, blocked?: Blocked, terrain?: Terrain, dt = 1 / 60): void {
     const facing = p.angle > 90 ? -1 : 1
     const x0 = Math.round(p.x) - TANK_W / 2
     const swing = this.dropOff > 0 ? Math.sin(time * 3.2) : 0
@@ -161,8 +131,9 @@ export class TankView {
     const root = this.root
     root.visible = true
     root.scale.x = facing
-    // El sim apoya el tanque derecho sobre su punto más alto; acá se inclina hasta tocar la pendiente.
-    const lean = p.alive && terrain ? restTilt(terrain, x0, Math.round(p.y)) : null
+    // El sim apoya el tanque derecho sobre su punto más alto; acá se inclina hasta tocar la pendiente, con
+    // la misma inclinación que usa el sim para sacar el tiro (tankTilt), así el proyectil sale del cañón.
+    const lean = p.alive && terrain ? tankTilt(terrain, p.x, p.y) : null
     // deslizándose: si el apoyo no da una inclinación, el casco sigue la pendiente que recorre
     const sdx = this.lastX === null ? 0 : p.x - this.lastX
     const sdy = this.lastX === null ? 0 : p.y - this.lastY
@@ -171,7 +142,8 @@ export class TankView {
       this.slope += (a - this.slope) * 0.4
     } else if (this.slideLeft <= 0) this.slope = 0
     const target = lean ? lean.angle : this.slideLeft > 0 ? this.slope : 0
-    this.tilt = this.lastX === null ? target : this.tilt + (target - this.tilt) * 0.35
+    const follow = 1 - Math.exp(-dt / TILT_TIME)
+    this.tilt = this.lastX === null ? target : this.tilt + (target - this.tilt) * follow
     if (Math.abs(this.tilt - target) < 0.004) this.tilt = target
     const px = lean ? lean.x : x0 + TANK_W / 2
     root.pivot.set(facing > 0 ? px - x0 : x0 + TANK_W - px, TANK_H)

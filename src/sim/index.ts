@@ -1,6 +1,7 @@
 export * from './types'
 export { chooseItems, chooseShot } from './ai'
 export type { ShotPlan } from './ai'
+export { MAX_TILT, tankTilt, type Tilt } from './tilt'
 export { fly, muzzle, PATH_DT } from './ballistics'
 export type { FlightResult, FlyOptions } from './ballistics'
 export { CREW_NAMES, abyssAhead, applyCommand, biomeFor, cloneState, createMatch, currentPlayer, roundSeed } from './game'

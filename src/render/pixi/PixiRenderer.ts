@@ -1,7 +1,7 @@
 import { Application, Container, Graphics, Sprite, Texture, TextureStyle } from 'pixi.js'
 import type { Biome, GameEvent, Player, Prop, Vec2, WeaponId } from '../../sim/types'
-import { PATH_DT } from '../../sim'
-import { BARREL_LEN, PIVOT_X, PIVOT_Y, TANK_H, TANK_W, WEAPONS } from '../../sim/types'
+import { PATH_DT, muzzle, tankTilt } from '../../sim'
+import { TANK_H, TANK_W, WEAPONS } from '../../sim/types'
 import type { Terrain } from '../../sim/types'
 import type { GameRenderer, RenderFrame, Viewport } from '../types'
 import { VIEW_H, VIEW_W } from '../types'
@@ -817,13 +817,12 @@ export class PixiRenderer implements GameRenderer {
       const p = frame.players.find((q) => q.id === shooter)
       if (p) {
         this.view(p.id).recoil = RECOIL_TIME
-        const facing = p.angle > 90 ? -1 : 1
-        const px = Math.round(p.x) + facing * PIVOT_X
-        const py = Math.round(p.y) - PIVOT_Y
+        // la boca del cañón inclinado, la misma de donde sale el tiro en el sim
+        const m = muzzle(p.x, p.y, p.angle, tankTilt(frame.terrain, p.x, p.y))
         const rad = (p.angle * Math.PI) / 180
         const dx = Math.cos(rad)
         const dy = -Math.sin(rad)
-        this.fx.muzzle(px + dx * (BARREL_LEN + 1), py + dy * (BARREL_LEN + 1), dx, dy)
+        this.fx.muzzle(m.x + dx, m.y + dy, dx, dy)
       }
       this.near.clear()
       this.hitThisShot.clear()
@@ -929,7 +928,7 @@ export class PixiRenderer implements GameRenderer {
         continue
       }
       if (p.alive && p.y < frame.terrain.h) this.lastAlive.set(p.id, { x: p.x, y: p.y })
-      v.update(art, p, p.id === currentId, this.time, frame.wind, this.blocked, frame.terrain)
+      v.update(art, p, p.id === currentId, this.time, frame.wind, this.blocked, frame.terrain, dt)
       // polvo de las orugas: una bocanada cada pocos pixels, desde la cola del tanque
       if (v.moved !== 0 && dt > 0) {
         v.dustAcc += Math.abs(v.moved)
