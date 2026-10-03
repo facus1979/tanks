@@ -158,6 +158,8 @@ const SETTLE = 0.9
 const MOVE_SPEED = 36
 const SLOW_SCALE = 0.3
 const SLOW_TIME = 1.2
+// v2.3: cuánto dura el globo "!" después del último intento contra el tope del borde del abismo.
+const ALERT_TIME = 1.2
 const LATE = new Set<GameEvent['type']>(['turn', 'wind', 'gameover', 'roundover', 'round', 'shop'])
 // Anticipación de la cámara sobre el proyectil (segundos de vuelo hacia adelante).
 const LOOKAHEAD = 0.35
@@ -262,6 +264,9 @@ export class Session {
   private lost = new Set<number>()
   private edge: { key: string; dir: -1 | 1; x: number; armed: boolean } | null = null
   private edgeNews = false // frenó en un borde y main.ts todavía no lo levantó (sonido de aviso)
+  // v2.3: globo "!" (RenderFrame.alerts): segundos que le quedan a cada jugador. Hoy lo prende solo el
+  // tope del borde del abismo, mientras el humano está frenado ahí (y ALERT_TIME después del último intento).
+  private alertT = new Map<number, number>()
   // v4 líquidos: salpicaduras de proyectiles que entraron al agua desde la última llamada a
   // pullSplashes, impactos con el centro bajo el agua y lo que movió cada flujo (para el audio)
   private splashes: Vec2[] = []
@@ -545,17 +550,27 @@ export class Session {
     const e = this.edge
     const same = !!e && e.key === key && e.dir === dir && e.x === p.x
     if (same && e.armed) {
+      // pasa y cae: el globo se apaga (la caída se ve sola)
       this.edge = null
+      this.alertT.delete(p.id)
       return false
     }
-    if (same) return true // sigue apretando desde el tope
+    if (same) {
+      // sigue apretando desde el tope: el globo sigue prendido mientras esté frenado
+      this.alertT.set(p.id, ALERT_TIME)
+      return true
+    }
     if (!this.stepFallsIntoAbyss(s, p, dir)) {
-      // se alejó del borde o cambió de turno: el tope se olvida
-      if (e && (e.key !== key || e.x !== p.x)) this.edge = null
+      // se alejó del borde o cambió de turno: el tope (y su globo) se olvida
+      if (e && (e.key !== key || e.x !== p.x)) {
+        this.edge = null
+        this.alertT.delete(p.id)
+      }
       return false
     }
     this.edge = { key, dir, x: p.x, armed: false }
     this.edgeNews = true
+    this.alertT.set(p.id, ALERT_TIME)
     this.flash('Abismo! Apreta otra vez')
     return true
   }
@@ -754,7 +769,13 @@ export class Session {
   }
 
   update(dt: number): void {
-    if (!this.frozen) this.windNotice = Math.max(0, this.windNotice - dt)
+    if (!this.frozen) {
+      this.windNotice = Math.max(0, this.windNotice - dt)
+      for (const [id, t] of this.alertT) {
+        if (t - dt <= 0) this.alertT.delete(id)
+        else this.alertT.set(id, t - dt)
+      }
+    }
     this.step(dt)
     if (!this.frozen) this.updateCamera(dt)
   }
@@ -879,7 +900,16 @@ export class Session {
       aimPreviewShort: aim ? aim.short : undefined,
       camera: this.cam.camera,
       lava: this.lavaView(),
+      alerts: this.alerts(s),
     }
+  }
+
+  // v2.3: ids con globo "!" ahora (solo entre tiros: con un tiro en reproducción no hay ninguno). Un
+  // jugador muerto o que ya no está no lo muestra aunque le quede tiempo.
+  private alerts(s: GameState): number[] | undefined {
+    if (!this.alertT.size) return undefined
+    const ids = [...this.alertT.keys()].filter((id) => s.players.some((p) => p.id === id && p.alive))
+    return ids.length ? ids : undefined
   }
 
   // ---------- muerte súbita (v2) ----------
@@ -1362,6 +1392,8 @@ export class Session {
 
   private startPlayback(before: GameState, after: GameState, events: GameEvent[], flights: Flight[], shooterId: number): void {
     if (events.some((e) => e.type === 'empty')) this.flash('Sin municion')
+    // v2.3: un tiro o una caída apagan el globo "!" del borde
+    this.alertT.clear()
     const timed = flights.map((flight) => ({
       flight,
       start: flight.startT ?? 0,
@@ -1777,6 +1809,7 @@ export class Session {
   private resetAbyss(): void {
     this.lost.clear()
     this.edge = null
+    this.alertT.clear()
     this.edgeNews = false
   }
 
