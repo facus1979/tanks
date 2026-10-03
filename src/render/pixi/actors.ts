@@ -12,6 +12,11 @@ export const BUBBLE_TIME = 1.2
 export const CHUTE_SPEED = 42 // px/s de bajada colgado del paracaídas
 const CHUTE_FOLD = 0.3
 export const BUBBLE_HOLD = 3 // máximo que un globo espera oculto a que se despeje el fuego
+// v2.3: aparición del globo: sube desde abajo con un rebote chico, en pixels enteros (un escalón cada
+// BUBBLE_POP_STEP s). Vale para "!" y "?", vengan de un evento o de RenderFrame.alerts.
+const BUBBLE_POP = [4, 2, -1, 0]
+const BUBBLE_POP_STEP = 0.04
+const BUBBLE_POP_END = BUBBLE_POP.length * BUBBLE_POP_STEP
 // Lugares candidatos para el globo, de más cerca a más lejos: primero arriba, después al costado.
 const BUBBLE_SPOTS: [number, number][] = (() => {
   const spots: [number, number][] = []
@@ -47,6 +52,8 @@ export class TankView {
   private tag = new Sprite()
   private bubble = new Sprite()
   private tagKey = ''
+  private bubbleTex: Texture | null = null // globo que se mostró en el frame anterior (null = ninguno)
+  private bubbleAge = 0 // segundos desde que apareció (o cambió) el globo
   recoil = 0
   alert = 0
   ask = 0
@@ -219,6 +226,12 @@ export class TankView {
     const b = this.alert > 0 ? art.alert : this.ask > 0 ? art.ask : null
     this.held = false
     this.bubble.visible = b !== null && alive
+    // globo nuevo (o "?" que pasa a "!"): arranca la aparición; congelado (dt 0, modo demo) va directo al final
+    const shown = b && alive ? b : null
+    if (shown !== this.bubbleTex) this.bubbleAge = 0
+    this.bubbleTex = shown
+    this.bubbleAge = dt > 0 ? this.bubbleAge + dt : BUBBLE_POP_END
+    const pop = BUBBLE_POP[Math.min(BUBBLE_POP.length - 1, Math.floor(this.bubbleAge / BUBBLE_POP_STEP))]
     if (b && alive) {
       this.bubble.texture = b
       // Nunca encima del fuego o el humo: busca un lugar libre arriba o al costado; si no hay, espera.
@@ -232,10 +245,11 @@ export class TankView {
       const spot = BUBBLE_SPOTS.find(([dx, dy]) => fits(dx, dy))
       if (spot) {
         this.bubble.x = bx + spot[0]
-        this.bubble.y = by + spot[1]
+        this.bubble.y = by + spot[1] + pop
       } else {
         this.bubble.visible = false
         this.held = true
+        this.bubbleAge = 0 // cuando se despeje, aparece con su animación
       }
     }
   }
