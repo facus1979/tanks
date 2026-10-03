@@ -2,7 +2,7 @@
 import { Rng, hashSeed } from './rng'
 import { SHOP, WEAPONS, type Difficulty, type ItemId, type Player, type ShopEntry, type ShopId, type WeaponId } from './types'
 
-export const SELL_RATE = 0.5
+export const SELL_RATE = 1 // v2.2: vender devuelve lo pagado
 
 export function shopEntry(id: ShopId): ShopEntry | undefined {
   return SHOP.find((e) => e.id === id)

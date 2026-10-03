@@ -134,6 +134,7 @@ export function createMatch(config: MatchConfig): GameState {
     earnings: {},
     calm: 0,
     lava: null,
+    windLeft: 0,
   }
   setupRound(state)
   return state
@@ -165,6 +166,7 @@ function setupRound(state: GameState): void {
   const wind = irange(rng.state, -10, 10)
   state.wind = wind.value
   state.rng = wind.state
+  state.windLeft = state.players.length
   state.current = (state.round - 1) % state.players.length
   state.phase = 'aiming'
   state.roundWinnerId = null
@@ -266,6 +268,7 @@ function useItem(state: GameState, item: ItemId): StepResult {
 // pendiente es cuesta abajo, después del paso se desliza (evento 'slide' con cause 'slope', sin t) y,
 // si eso lo deja sin piso, cae. Los primeros MOVE_FREE_FALL px de una caída caminando no hacen daño.
 export const MOVE_FREE_FALL = 12
+export const CLIMB_FUEL = 0.6
 function move(state: GameState, dir: -1 | 1): StepResult {
   const actor = state.players[state.current]
   if (actor.fuel <= 0 || (dir !== 1 && dir !== -1)) return { state, events: [] }
@@ -276,14 +279,16 @@ function move(state: GameState, dir: -1 | 1): StepResult {
   const next = shallow(state)
   const p = next.players[next.current]
   const events: GameEvent[] = []
+  // v2.2: subir gasta más: 1 por paso más CLIMB_FUEL por unidad de pendiente cuesta arriba (a 75°, ~3,2)
+  const uphill = step.air ? 0 : Math.max(0, slopeAt(state, step.x, step.floor) * -dir, (actor.y - step.floor) / 2)
   p.x = step.x
   p.y = step.floor
-  p.fuel -= 1
+  p.fuel = Math.max(0, p.fuel - (1 + CLIMB_FUEL * uphill))
   // v3: si caminó (o se deslizó) hasta el abismo se cae (la sesión frena antes al que no lo hace a
   // propósito, ver abyssAhead; la IA nunca camina hacia un abismo). v4: al agua, sin daño ni paracaídas.
   settleTank(next, p, events, undefined, undefined, MOVE_FREE_FALL)
   // se mató cayendo: termina el turno como un tiro que dañó a un tanque
-  if (!p.alive) return endTurn(next, events, [], true)
+  if (!p.alive) return endTurn(next, events, [], false)
   return { state: next, events }
 }
 
@@ -307,12 +312,13 @@ function fire(state: GameState, actor: Player): StepResult {
   for (const e of events) if (e.type === 'death' && e.cause === 'abyss') abyss.add(e.playerId)
   // plata de la ronda: daño a otros, kills y autodaño
   let earned = 0
-  let damaged = abyss.size > 0
+  // v2.2: solo el daño a OTRO tanque (o tirarlo al abismo) reinicia la calma; el autodaño no
+  let damaged = [...abyss].some((id) => id !== shooter.id)
   for (const p of next.players) {
     const b = before[p.id]
     if (!b.alive) continue
     const dmg = abyss.has(p.id) ? hitBeforeFall(events, p.id) : b.hp - (p.hp + p.shield)
-    if (dmg > 0) damaged = true // el escudo cuenta: lo que absorbió también es daño
+    if (dmg > 0 && p.id !== shooter.id) damaged = true // el escudo cuenta: lo que absorbió también es daño
     if (p.id === shooter.id) earned += dmg * EARN.selfDamage
     else {
       earned += dmg * EARN.perDamage
@@ -404,26 +410,15 @@ export function abyssAhead(state: GameState, dir: -1 | 1, steps = 1): boolean {
 // Segundos entre el último impacto del tiro y la subida de la lava (el playback la muestra después).
 export const LAVA_DELAY = 0.4
 
-// v5: tope de la ronda. Con 6 u 8 tanques siempre hay alguien a tiro y la calma se reiniciaba una y
-// otra vez: la ronda se estiraba hasta 60 tiros. Desde el turno calmLockTurn (CALM_LOCK_PER_PLAYER por
-// tanque de la partida, nunca antes de CALM_LOCK_MIN) los tiros con daño ya no reinician la calma. Con
-// 2 a 4 tanques el tope queda en CALM_LOCK_MIN = 30 turnos, más que casi todas las rondas (no cambia el
-// ritmo); con 8 queda en 32.
-export const CALM_LOCK_MIN = 30
-export const CALM_LOCK_PER_PLAYER = 4
-export function calmLockTurn(players: number): number {
-  return Math.max(CALM_LOCK_MIN, CALM_LOCK_PER_PLAYER * players)
-}
-
-// La muerte súbita ya empezó: la lava sube en cada turno hasta el fin de la ronda.
+// La muerte súbita está activa: la lava sube en cada turno, hasta que un tanque le pegue a otro (v2.2).
 export function suddenDeath(state: GameState): boolean {
   return state.calm >= SUDDEN_DEATH_CALM
 }
 
 // Cierra el turno que termina con este fire (o pase sin munición, o muerte por caída al moverse):
-// 1. cuenta de calma: sin daño a ningún tanque suma 1, con daño vuelve a 0 (salvo muerte súbita ya
-//    empezada, donde queda fija en SUDDEN_DEATH_CALM; v5: ni desde el turno calmLockTurn, donde sube
-//    igual). Emite 'calm' si cambió lo que falta.
+// 1. cuenta de calma: sin daño a otro tanque suma 1; con daño a otro vuelve a 0, también con la muerte
+//    súbita activa (v2.2): la lava se frena donde está y hacen falta SUDDEN_DEATH_CALM tiros sin daño
+//    para que vuelva a subir. Emite 'calm' si cambió lo que falta.
 // 2. si la muerte súbita está activa y la ronda sigue (2+ vivos), empieza el turno siguiente: la lava
 //    aparece en el fondo (la primera vez) o sube LAVA_RISE, y quema LAVA_DAMAGE a cada tanque vivo con
 //    el piso por debajo de la superficie. Esos eventos van al final, LAVA_DELAY s después del último
@@ -431,11 +426,8 @@ export function suddenDeath(state: GameState): boolean {
 // 3. advance: fin de ronda si queda uno o ninguno (todos quemados → empate), si no pasa el turno.
 // La lava no da ni quita plata: el daño no es de nadie y una muerte por lava no cuenta como kill.
 function endTurn(state: GameState, events: GameEvent[], flights: Flight[], damaged: boolean): StepResult {
-  const leftBefore = SUDDEN_DEATH_CALM - state.calm
-  // v5: pasado calmLockTurn, el daño ya no reinicia la calma: la muerte súbita llega a lo sumo
-  // SUDDEN_DEATH_CALM turnos después, con la cuenta regresiva de siempre (eventos 'calm').
-  const locked = state.turn >= calmLockTurn(state.players.length)
-  if (!suddenDeath(state)) state.calm = damaged && !locked ? 0 : state.calm + 1
+  const leftBefore = Math.max(0, SUDDEN_DEATH_CALM - state.calm)
+  state.calm = damaged ? 0 : Math.min(SUDDEN_DEATH_CALM, state.calm + 1)
   const left = Math.max(0, SUDDEN_DEATH_CALM - state.calm)
   if (left !== leftBefore) events.push({ type: 'calm', left })
   if (state.players.filter((p) => p.alive).length > 1) {
@@ -476,7 +468,8 @@ function riseLava(state: GameState, events: GameEvent[]): void {
 // últimos suelen terminar en la misma meseta y la lava se los llevaba juntos: 1 de cada 4 rondas de 8
 // terminaba en empate.
 function burnInLava(state: GameState, events: GameEvent[], t: number): void {
-  const band = suddenDeath(state) ? state.lava : null
+  // v2.2: la banda queda aunque la muerte súbita se haya frenado
+  const band = state.lava
   const victims = state.players.filter((p) => p.alive && ((band !== null && p.y > band) || inLava(state.terrain, p)))
   victims.sort((a, b) => b.y - a.y || a.hp + a.shield - (b.hp + b.shield) || a.id - b.id)
   let fallen: { y: number; life: number } | null = null // el último que mató esta quemadura (vida previa)
@@ -510,13 +503,19 @@ function advance(state: GameState, events: GameEvent[]): StepResult {
       break
     }
   }
-  const wind = irange(state.rng, -10, 10)
-  state.wind = wind.value
-  state.rng = wind.state
+  // v2.2: el viento cambia por vuelta, cuando todos los vivos dispararon una vez
+  state.windLeft -= 1
+  const windChanged = state.windLeft <= 0
+  if (windChanged) {
+    const wind = irange(state.rng, -10, 10)
+    state.wind = wind.value
+    state.rng = wind.state
+    state.windLeft = alive.length
+  }
   state.turn += 1
   state.players[state.current].fuel = fuelFor(state.width)
   events.push({ type: 'turn', playerId: state.players[state.current].id })
-  events.push({ type: 'wind', value: state.wind })
+  if (windChanged) events.push({ type: 'wind', value: state.wind })
   return { state, events }
 }
 

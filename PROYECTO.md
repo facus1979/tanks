@@ -28,12 +28,12 @@ Broforce: pixel art moderno, personajes con personalidad, explosiones exageradas
 ## Reglas
 
 - Vida 100. Gana el último tanque en pie; si no queda ninguno, empate. (V5: la lava no mata al último en pie; ver V5.)
-- Viento nuevo cada turno, visible antes de apuntar. Rango -10 a 10.
+- Viento nuevo por vuelta (v2.2: cambia cuando todos los vivos dispararon una vez; antes, cada turno), visible antes de apuntar, con aviso "Cambia el viento". Rango -10 a 10.
 - Ángulo 0 a 180: 0 es horizontal a la derecha, 90 arriba y 180 horizontal a la izquierda. Potencia 0 a 100.
 - El tanque se apoya en el terreno. Si el piso desaparece, cae y recibe daño de caída. Si la tierra lo tapa, aplasta.
 - Un tiro puede dañar al que dispara. Los barriles explotan en cadena.
 - La IA usa la misma física, en una copia del estado, y le mete error según la dificultad.
-- F6: combustible por turno (`FUEL_PER_TURN`). El tanque sube escalones de hasta `MAX_CLIMB`.
+- F6: combustible por turno (`fuelFor(width)`). v2.2: el tanque sube escalones de hasta `MAX_CLIMB` = 10 px y pendientes de hasta ~75° (`SLIDE_SLOPE` 3,75); subir gasta más (1 + `CLIMB_FUEL` 0,6 por unidad de pendiente por paso). Por encima de 75° resbala.
 
 ### Armas
 
@@ -54,7 +54,7 @@ La IA: error normal ±7° y ±8 de potencia (V5; antes ±6° y ±7). Si no tiene
 
 ### Rondas y tienda (F10)
 
-Valores de `SHOP`, `EARN`, `START_MONEY` (600), `SHIELD_HP` (30) y `REPAIR_HP` (25). Cada jugador arranca con el kit de `WEAPONS.ammo`; la munición y los ítems se conservan entre rondas (la normal vuelve a 99). Vender devuelve el 50%. La plata nunca queda negativa.
+Valores de `SHOP`, `EARN`, `START_MONEY` (600), `SHIELD_HP` (30) y `REPAIR_HP` (25). Cada jugador arranca con el kit de `WEAPONS.ammo`; la munición y los ítems se conservan entre rondas (la normal vuelve a 99). Vender devuelve el 100% de lo pagado (v2.2; antes 50%). La plata nunca queda negativa.
 
 | Artículo | Precio | Paquete | Máx |
 |---|---|---|---|
@@ -194,7 +194,7 @@ Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 
 
 - **Tamaño por partida**, elegido en el menú: Chico 800×450 (el mapa de v1), Mediano 1600×450, Grande 2400×450. Alto fijo. El tamaño viaja en el estado (`terrain.w/h`); `WORLD_W/WORLD_H` dejan de usarse fuera de la pantalla.
 - **Alcance**: potencia 100 llega siempre de punta a punta. `POWER_SCALE` y `GRAVITY` se derivan del ancho del mapa de modo que un tiro de lado a lado a 45° dure ~3 s; con 800 dan los valores de v1. `WIND_ACCEL` escala igual. Shift ajusta ángulo y potencia a 1/5 de velocidad.
-- **Muerte súbita**: tras 5 tiros seguidos sin daño a tanques, la lava sube 18 px desde el fondo en cada turno y quema 20 por turno a los tanques sumergidos; los proyectiles que la tocan se derriten sin explotar. La lava no da ni quita plata ni cuenta como kill. Toda ronda termina. V5: desde el turno `calmLockTurn` (4 por tanque, nunca antes del 30) el daño ya no reinicia la calma.
+- **Muerte súbita**: tras 5 tiros seguidos sin daño a tanques, la lava sube 18 px desde el fondo en cada turno y quema 20 por turno a los tanques sumergidos; los proyectiles que la tocan se derriten sin explotar. La lava no da ni quita plata ni cuenta como kill. v2.2 (pedido del usuario): cuando un tanque le pega a otro (el autodaño no cuenta), la cuenta vuelve a 0 aunque la muerte súbita esté activa: la lava se frena donde está, sigue quemando a los hundidos y hacen falta otros 5 tiros sin daño para que vuelva a subir. Se sacó el tope de calma de V5, así que una ronda con mucho daño puede alargarse.
 - **Hasta 8 jugadores**: 4 colores y 4 tripulantes nuevos; HUD rediseñado para 5-8 placas. Spawns repartidos a lo ancho.
 - **Líquidos que fluyen**: agua y lava son materiales de la grilla. Se asientan con un autómata celular determinista al final de cada `fire`, con tope de iteraciones; los cambios salen como evento para que el render los anime.
 
@@ -286,6 +286,10 @@ En la rama `v2-8jugadores` (sale de `v2-pulido`). `sim-check` 38308/38308; `net-
 - Antes de V5 la IA tenía un sesgo de posición (la punta izquierda ganaba 2 de cada 3 rondas): desempataba por el menor ángulo. Se arregló con un desempate simétrico (`flatTie`); el error de la IA normal subió a ±7° / ±8 para mantener el ritmo.
 - Reglas nuevas: tope de calma `máx(30, 4 · tanques)` (desde ese turno el daño no reinicia la calma) y la lava quema primero al más hundido y, a igual altura, al de menos vida, para que no termine en empate cuando quedan pocos.
 - Pendientes: en el menú local los casilleros que no entran al achicar el mapa se vacían y en la sala online se reacomodan (unificar); la prueba de la IA sobre la montaña bajó a 4/6, justo en el mínimo; el jugador 0 gana ~40% en Mediano con 6 a 1 ronda porque nace en la punta y abre la ronda; con 8 tanques las flechas de borde y las 7 placas de rivales llenan el costado derecho; snapshot de red de ~2,1 MB con 8 en Grande.
+
+### v2.2 (2026-10-03)
+
+Sugerencias del usuario: el "−" de la tienda devuelve el 100%; la muerte súbita se frena y reinicia su cuenta cuando un tanque le pega a otro (sin tope); escalones de 10 px y pendientes hasta 75° con más gasto al subir; viento por vuelta con aviso en el HUD. `SLOPE_CAP` pasó a 6·`TANK_W` para que un tanque colgando de un borde siga resbalando con el umbral nuevo. `sim-check` 38311/38311. Balance con IA normal: 6 en Mediano 39,0 tiros (máx 53), 8 en Grande 44,9 (máx 55), contra 27,7 / 34,1 con el tope; los topes del chequeo subieron a 44 / 60 y 50 / 66.
 
 ## Cómo se agrega algo
 

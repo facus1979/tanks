@@ -71,9 +71,9 @@ export function fuelFor(width: number): number {
 // abajo hasta quedar estable. Los dos pueden terminar en una caída (al vacío, al agua o al abismo).
 // El paracaídas solo se abre (y se gasta) si la caída haría al menos PARACHUTE_MIN_DAMAGE de daño.
 export const KNOCKBACK_MAX = 24
-export const SLIDE_SLOPE = 2.2
+export const SLIDE_SLOPE = 3.75 // v2.2: ~75° (tan 75° = 3,73); hasta ahí trepa y se queda parado
 export const PARACHUTE_MIN_DAMAGE = 10
-export const MAX_CLIMB = 3 // escalón máximo que sube sin frenarse
+export const MAX_CLIMB = 10 // escalón máximo que sube sin frenarse (v2.2: 10, antes 3)
 
 export const ANGLE_SPEED = 70
 export const POWER_SPEED = 45
@@ -339,8 +339,9 @@ export interface GameState {
   difficulty: Difficulty
   biomeMode: Biome | 'random' | 'rotate'
   earnings: Record<number, number> // plata ganada en la última ronda, por id de jugador
-  calm: number // v2: tiros seguidos sin daño a ningún tanque en la ronda
+  calm: number // v2: tiros seguidos sin daño a otro tanque en la ronda (v2.2: el daño a otro la reinicia siempre)
   lava: number | null // v2: y de la superficie de la lava de muerte súbita; null = todavía no apareció
+  windLeft: number // v2.2: turnos que faltan para que cambie el viento (cambia por vuelta: una vez por tanque vivo)
 }
 
 export type Command =
