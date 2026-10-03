@@ -257,7 +257,14 @@
         "bg/forest-4.png"
       ],
       "fog": 15785928,
-      "tint": 16773858
+      "tint": 16773858,
+      "repeat": [
+        "mirror",
+        "wrap",
+        "wrap",
+        "wrap",
+        "wrap"
+      ]
     },
     "jungle": {
       "layers": [
@@ -268,7 +275,14 @@
         "bg/jungle-4.png"
       ],
       "fog": 13625062,
-      "tint": 15398655
+      "tint": 15398655,
+      "repeat": [
+        "mirror",
+        "wrap",
+        "wrap",
+        "wrap",
+        "wrap"
+      ]
     },
     "industrial": {
       "layers": [
@@ -279,7 +293,14 @@
         "bg/industrial-4.png"
       ],
       "fog": 15771752,
-      "tint": 16764056
+      "tint": 16764056,
+      "repeat": [
+        "mirror",
+        "wrap",
+        "wrap",
+        "wrap",
+        "wrap"
+      ]
     }
   },
   "biomePalette": {

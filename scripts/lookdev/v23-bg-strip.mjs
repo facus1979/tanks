@@ -1,10 +1,13 @@
-// Tira de verificación de fondos repetibles (V3). Descartable: no es código del juego.
-// Lee public/assets/bg/<bioma>-0..4.png y compone cada bioma a lo ancho de 2400 px como lo hace el
-// renderer (cada capa repetida alternando copia y copia espejada: normal, espejo, normal), sin parallax,
-// para ver las uniones en x = 800 (borde derecho contra sí mismo) y x = 1600 (borde izquierdo contra sí mismo).
-// Uso: node scripts/lookdev/v3-bg-strip.mjs [--layers]
-//   → preview/v3-bg-<bioma>.png (2400×450, con marquitas rojas arriba en las uniones)
-//   → con --layers, además preview/v3-bg-<bioma>-layers.png (cada capa sola sobre gris, una debajo de otra)
+// Tira de verificación de fondos v2.3 (repeat por capa). Descartable: no es código del juego.
+// Reemplaza a v3-bg-strip.mjs, que siempre espejaba.
+// Lee public/assets/manifest.json y public/assets/bg/<bioma>-0..4.png y compone cada bioma a lo ancho de
+// 2400 px respetando backgrounds[bioma].repeat: 'wrap' = la capa tal cual una al lado de la otra, 'mirror' (o
+// sin repeat) = alternando copia y copia espejada como en v2. Sin parallax: las uniones de todas las capas
+// caen juntas en x = 800 y x = 1600, que es el peor caso para mirarlas.
+// Uso: node scripts/lookdev/v23-bg-strip.mjs [--layers] [--chico]
+//   → preview/v23-bg-<bioma>.png (2400×450, con marquitas rojas arriba en las uniones)
+//   → con --layers, además preview/v23-bg-<bioma>-layers.png (cada capa sola sobre gris, una debajo de otra)
+//   → con --chico, además preview/v23-chico-<bioma>.png (la pantalla de Chico: las capas de 0 a 800 compuestas)
 import fs from 'node:fs'
 import path from 'node:path'
 import zlib from 'node:zlib'
@@ -12,13 +15,14 @@ import { fileURLToPath } from 'node:url'
 import { Canvas } from './pixel.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
-const bgDir = path.join(root, 'public', 'assets', 'bg')
+const assets = path.join(root, 'public', 'assets')
 const outDir = path.join(root, 'preview')
 fs.mkdirSync(outDir, { recursive: true })
 
 const STRIP_W = 2400
-const BIOMES = ['forest', 'jungle', 'industrial']
+const manifest = JSON.parse(fs.readFileSync(path.join(assets, 'manifest.json'), 'utf8'))
 const withLayers = process.argv.includes('--layers')
+const withChico = process.argv.includes('--chico')
 
 // Decodificador mínimo: solo PNG RGBA de 8 bits sin entrelazado (lo que escribe encodePng), con los 5 filtros.
 function decodePng(file) {
@@ -69,25 +73,33 @@ function decodePng(file) {
   return cv
 }
 
-// Copia la capa repetida a lo ancho como el renderer: el tile k va espejado si k es impar.
-function tileInto(dst, L, y0 = 0) {
-  for (let k = 0; k * L.w < dst.w; k++) dst.blit(L, k * L.w, y0, (k & 1) === 1)
+// Copia la capa repetida a lo ancho como el renderer: con 'wrap' todas las copias derechas; con 'mirror' el
+// tile k va espejado si k es impar.
+function tileInto(dst, L, mode, y0 = 0) {
+  for (let k = 0; k * L.w < dst.w; k++) dst.blit(L, k * L.w, y0, mode !== 'wrap' && (k & 1) === 1)
 }
 
-for (const biome of BIOMES) {
-  const layers = [0, 1, 2, 3, 4].map((i) => decodePng(path.join(bgDir, `${biome}-${i}.png`)))
+for (const [biome, bg] of Object.entries(manifest.backgrounds)) {
+  const layers = bg.layers.map((f) => decodePng(path.join(assets, f)))
+  const modes = layers.map((_, i) => bg.repeat?.[i] ?? 'mirror')
   const H = layers[0].h
   const strip = new Canvas(STRIP_W, H)
-  for (const L of layers) tileInto(strip, L)
+  layers.forEach((L, i) => tileInto(strip, L, modes[i]))
   // marquitas en las uniones (solo 4 px arriba, para no tapar nada)
   for (let x = layers[0].w; x < STRIP_W; x += layers[0].w) for (let y = 0; y < 4; y++) strip.put(x - 1, y, 0xff0000), strip.put(x, y, 0xff0000)
-  fs.writeFileSync(path.join(outDir, `v3-bg-${biome}.png`), strip.png())
-  console.log(`preview/v3-bg-${biome}.png`)
+  fs.writeFileSync(path.join(outDir, `v23-bg-${biome}.png`), strip.png())
+  console.log(`preview/v23-bg-${biome}.png  repeat: ${modes.join(' ')}`)
   if (withLayers) {
     const sheet = new Canvas(STRIP_W, H * layers.length)
     sheet.rect(0, 0, STRIP_W, H * layers.length, 0x808080)
-    layers.forEach((L, i) => tileInto(sheet, L, i * H))
-    fs.writeFileSync(path.join(outDir, `v3-bg-${biome}-layers.png`), sheet.png())
-    console.log(`preview/v3-bg-${biome}-layers.png`)
+    layers.forEach((L, i) => tileInto(sheet, L, modes[i], i * H))
+    fs.writeFileSync(path.join(outDir, `v23-bg-${biome}-layers.png`), sheet.png())
+    console.log(`preview/v23-bg-${biome}-layers.png`)
+  }
+  if (withChico) {
+    const chico = new Canvas(layers[0].w, H)
+    for (const L of layers) chico.blit(L, 0, 0)
+    fs.writeFileSync(path.join(outDir, `v23-chico-${biome}.png`), chico.png())
+    console.log(`preview/v23-chico-${biome}.png`)
   }
 }
