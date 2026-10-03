@@ -24,21 +24,27 @@ const GUIDE_STEP = 5
 // HUD C (pulido v2): arco graduado alrededor del cañón del tanque del turno mientras un humano apunta.
 const ARC_R = 22
 const ARC_BRONZE = 0xc8964e
-const ARC_ANGLES = ((): number[] => {
-  // pixels del arco 0..180 (sin repetir), como ángulos en grados con su (dx, dy) redondeado
-  const seen = new Set<string>()
-  const out: number[] = []
+// pixels de un arco 0..180 de radio r (sin repetir): ternas (dx, dy, grados), sin los que ya estén en skip
+function arcPixels(r: number, skip?: Set<string>): { pts: number[]; keys: Set<string> } {
+  const keys = new Set<string>()
+  const pts: number[] = []
   for (let a = 0; a <= 180; a += 0.5) {
-    const r = (a * Math.PI) / 180
-    const dx = Math.round(Math.cos(r) * ARC_R)
-    const dy = -Math.round(Math.sin(r) * ARC_R)
+    const t = (a * Math.PI) / 180
+    const dx = Math.round(Math.cos(t) * r)
+    const dy = -Math.round(Math.sin(t) * r)
     const k = `${dx},${dy}`
-    if (seen.has(k)) continue
-    seen.add(k)
-    out.push(dx, dy)
+    if (keys.has(k) || skip?.has(k)) continue
+    keys.add(k)
+    pts.push(dx, dy, a)
   }
-  return out
-})()
+  return { pts, keys }
+}
+const ARC_MAIN = arcPixels(ARC_R)
+const ARC_ANGLES = ARC_MAIN.pts
+// v2.3: contorno oscuro de 1 px por dentro del arco (del lado del tanque, pero a ARC_R - 1 de radio no lo
+// toca): da contraste sobre cielos claros; el arco claro encima se lee sobre los oscuros.
+const ARC_INNER = arcPixels(ARC_R - 1, ARC_MAIN.keys).pts
+const ARC_SHADE = 0x14121c
 const GUIDE_FADE = [1, 1, 0.85, 0.7, 0.55, 0.42, 0.3, 0.2] // alfa por tramo (del comienzo al final)
 
 interface ShieldState {
@@ -400,9 +406,11 @@ export class Extras {
   }
 
   // HUD C: arco de 0 a 180° de radio ARC_R centrado en el pivote del cañón (el del sim, que es el que manda
-  // el tiro), de 1 px y alfa baja en el color del jugador mezclado con bronce; marcas de 2 px hacia afuera
-  // cada 15° (las de 0, 90 y 180 un poco más marcadas) y una marca de 4 px más clara en el ángulo actual.
-  // Sin número. Todo en pixels enteros del mundo (pixel perfect con zoom 1).
+  // el tiro), de 1 px en el color del jugador mezclado con bronce; marcas de 2 px hacia afuera cada 15° (las
+  // de 0, 90 y 180 un poco más marcadas) y una marca de 4 px más clara en el ángulo actual. Sin número.
+  // v2.3: legible sobre cielos claros y oscuros. Contorno oscuro de 1 px por dentro del arco y sombra de 1 px
+  // abajo a la derecha de cada marca; la parte activa (lo barrido desde la horizontal del lado al que mira
+  // hasta el ángulo actual) va más clara y opaca que el resto. Todo en pixels enteros del mundo.
   private drawArc(p: Player | null): void {
     if (!p || !p.alive) return
     const g = this.aimArc
@@ -410,12 +418,23 @@ export class Extras {
     const px = Math.round(p.x) + facing * PIVOT_X
     const py = Math.round(p.y) - PIVOT_Y
     const col = mix(p.color, ARC_BRONZE, 0.5)
+    const lit = mix(col, 0xfff3c0, 0.35)
+    const ang = Math.max(0, Math.min(180, p.angle))
+    // ¿el ángulo a está en el tramo barrido? (de 0 a ang mirando a la derecha, de ang a 180 a la izquierda)
+    const active = (a: number): boolean => (facing > 0 ? a <= ang : a >= ang)
+    const inn = ARC_INNER
+    for (let i = 0; i < inn.length; i += 3)
+      g.rect(px + inn[i], py + inn[i + 1], 1, 1).fill({ color: ARC_SHADE, alpha: active(inn[i + 2]) ? 0.6 : 0.4 })
     const pts = ARC_ANGLES
-    for (let i = 0; i < pts.length; i += 2) g.rect(px + pts[i], py + pts[i + 1], 1, 1).fill({ color: col, alpha: 0.3 })
+    for (let i = 0; i < pts.length; i += 3) {
+      const on = active(pts[i + 2])
+      g.rect(px + pts[i], py + pts[i + 1], 1, 1).fill({ color: on ? lit : col, alpha: on ? 0.9 : 0.55 })
+    }
     const tick = (deg: number, r0: number, r1: number, color: number, alpha: number): void => {
       const r = (deg * Math.PI) / 180
       const c = Math.cos(r)
       const s = Math.sin(r)
+      const cells: number[] = []
       let lx = NaN
       let ly = NaN
       for (let k = r0; k <= r1; k += 0.5) {
@@ -424,12 +443,14 @@ export class Extras {
         if (x === lx && y === ly) continue
         lx = x
         ly = y
-        g.rect(x, y, 1, 1).fill({ color, alpha })
+        cells.push(x, y)
       }
+      // sombra primero (abajo a la derecha), después la marca encima
+      for (let j = 0; j < cells.length; j += 2) g.rect(cells[j] + 1, cells[j + 1] + 1, 1, 1).fill({ color: ARC_SHADE, alpha: alpha * 0.5 })
+      for (let j = 0; j < cells.length; j += 2) g.rect(cells[j], cells[j + 1], 1, 1).fill({ color, alpha })
     }
-    for (let a = 0; a <= 180; a += 15) tick(a, ARC_R + 1, ARC_R + 2, col, a % 90 === 0 ? 0.7 : 0.5)
-    const ang = Math.max(0, Math.min(180, p.angle))
-    tick(ang, ARC_R - 2, ARC_R + 2, mix(col, 0xfff3c0, 0.6), 0.9)
+    for (let a = 0; a <= 180; a += 15) tick(a, ARC_R + 1, ARC_R + 2, active(a) ? lit : col, a % 90 === 0 ? 0.85 : 0.65)
+    tick(ang, ARC_R - 2, ARC_R + 2, mix(col, 0xfff3c0, 0.7), 1)
   }
 
   // Pulido v2: guía corta. Puntos de 2×2 cada GUIDE_STEP px sobre el comienzo del vuelo, con sombra de
