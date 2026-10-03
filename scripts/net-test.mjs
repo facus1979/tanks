@@ -357,7 +357,9 @@ async function layerTest() {
 // ---------- snapshot con la sim real (v2.3: formato comprimido) ----------
 
 // Código común de las pestañas: importa la sim y juega turnos de IA como sim-check.
-const SIM_HELPERS = `
+// (función y no const: el main de arriba corre antes de que se evalúe un const de acá)
+function simHelpers() {
+  return `
   const sim = await import('/src/sim/index.ts')
   const aiTurn = (s, send) => {
     const p = s.players[s.current]
@@ -371,6 +373,7 @@ const SIM_HELPERS = `
     }
     return s
   }`
+}
 
 async function snapshotTest() {
   const a = await openTab(`${base}/src/net/types.ts`, 'SA')
@@ -396,7 +399,7 @@ async function snapshotTest() {
   const sizes = await evaluate(
     a,
     `(async () => {
-      ${SIM_HELPERS}
+      ${simHelpers()}
       const util = await import('/src/net/util.ts')
       const out = []
       for (const [size, n] of [['small', 4], ['medium', 6], ['large', 8]]) for (const biome of ['forest', 'jungle', 'industrial']) {
@@ -412,16 +415,11 @@ async function snapshotTest() {
         if (terrain.pits) old.set(terrain.pits, 4 + head.length + 2 * terrain.front.length)
         const h = sim.hashState(s)
         if (sim.hashState(sim.decodeState(old)) !== h) return 'v1 no decodifica igual: ' + size + '/' + biome
-        let bytes
-        for (let i = 0; i < 3; i++) bytes = sim.encodeState(s) // calentar
-        let t = performance.now()
-        for (let i = 0; i < 5; i++) bytes = sim.encodeState(s)
-        const enc = (performance.now() - t) / 5
-        let back
-        for (let i = 0; i < 3; i++) back = sim.decodeState(bytes)
-        t = performance.now()
-        for (let i = 0; i < 5; i++) back = sim.decodeState(bytes)
-        const dec = (performance.now() - t) / 5
+        // mediana de 15 (la primera vuelta incluye compilar y la máquina tiene picos de GC)
+        const med = (f) => { const ts = []; for (let i = 0; i < 15; i++) { const t = performance.now(); f(); ts.push(performance.now() - t) } return ts.sort((x, y) => x - y)[7] }
+        let bytes, back
+        const enc = med(() => (bytes = sim.encodeState(s)))
+        const dec = med(() => (back = sim.decodeState(bytes)))
         if (bytes[0] !== 0x54 || bytes[1] !== 0x4b || bytes[2] !== 2) return 'sin cabecera TK 2: ' + size
         if (sim.hashState(back) !== h) return 'v2 no decodifica igual: ' + size + '/' + biome
         const wire = (await util.compress(bytes)).length
@@ -437,7 +435,7 @@ async function snapshotTest() {
     log(
       `snapshot ${r.size.padEnd(6)} ${r.biome.padEnd(10)} ${r.n} tanques, turno ${String(r.turn).padStart(2)}, líquido ${String(r.liquid).padStart(6)} px:` +
         ` v1 ${(r.v1 / 1024).toFixed(0)} KB → v2 ${(r.v2 / 1024).toFixed(1)} KB (deflate+base64 ${(r.wire / 1024).toFixed(1)} KB);` +
-        ` encode ${r.enc} ms, decode ${r.dec} ms`,
+        ` encode ${r.enc} ms, decode ${r.dec} ms (medianas)`,
     )
   const big = sizes.filter((r) => r.size === 'large')
   if (big.some((r) => r.v2 >= 150 * 1024)) throw new Error('snapshot de Grande ≥ 150 KB')
@@ -450,7 +448,7 @@ async function snapshotTest() {
   const code2 = await evaluate(
     a,
     `(async () => {
-      ${SIM_HELPERS}
+      ${simHelpers()}
       const net = await import('/src/net/index.ts')
       const S = (window.__S = { st: null })
       const room = new net.HostRoom(net.createTransport('local'), {

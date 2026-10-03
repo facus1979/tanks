@@ -117,20 +117,36 @@ class Writer {
     this.buf.set(a, this.pos)
     this.pos += a.length
   }
-  // Corridas de la grilla entera. Reserva el peor caso de una vez (valor + varint de 5 por corrida
-  // sería 6·n, pero una corrida de largo < 128 ocupa 2 bytes y una más larga cubre ≥ 128 celdas:
-  // 2·n alcanza siempre) para que el lazo no tenga chequeos de capacidad.
+  // Corridas de la grilla entera. Se reserva espacio por corrida (valor + varint ≤ 6 bytes) y no
+  // de una vez por el peor caso (2·n), que en Grande obligaba a pedir ~2 MB por grilla en cada
+  // snapshot: las corridas son pocas (miles) y el chequeo por corrida no se nota.
   rle(a: Uint8Array): void {
     const n = a.length
-    if (n === 0) return
-    this.need(2 * n + 8)
-    const buf = this.buf
+    let buf = this.buf
     let pos = this.pos
+    // Las corridas son largas (cientos de celdas en promedio): con la grilla alineada se comparan
+    // de a 4 bytes. Las grillas del estado siempre lo están (offset 0); si no, byte a byte.
+    const words = a.byteOffset % 4 === 0 ? new Uint32Array(a.buffer, a.byteOffset, n >> 2) : null
+    const nw = words ? (n >> 2) << 2 : 0
     let i = 0
     while (i < n) {
       const v = a[i]
       let j = i + 1
+      if (words) {
+        while (j < n && j & 3 && a[j] === v) j++
+        if (j < nw && !(j & 3) && a[j] === v) {
+          const rep = Math.imul(v, 0x01010101) >>> 0
+          let k = j >> 2
+          while (k < words.length && words[k] === rep) k++
+          j = k << 2
+        }
+      }
       while (j < n && a[j] === v) j++
+      if (pos + 6 > buf.length) {
+        this.pos = pos
+        this.need(6)
+        buf = this.buf
+      }
       buf[pos++] = v
       let len = j - i
       while (len >= 0x80) {
