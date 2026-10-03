@@ -73,6 +73,35 @@ export function slopeAt(state: GameState, x: number, y: number): number {
   return (right - left) / TANK_W
 }
 
+// v2.3: vuelco al abismo. Un tanque con el centro sobre un abismo (columnas de abismo) y apoyado solo de
+// un lado (ninguna columna del centro ni del otro lado tiene piso en la fila de las orugas o TIP_DEPTH px
+// más abajo), con abismo también bajo el borde que cuelga, se vuelca hacia el vacío: se desliza hacia ese
+// lado hasta quedar sin piso y cae. Antes se quedaba haciendo equilibrio con 3 columnas sobre la punta de
+// una cornisa o sobre el borde redondeado de un labio. Fuera de los abismos no cambia nada.
+// Devuelve el lado hacia el que se vuelca, o null.
+export function tipDir(state: GameState, p: Player): -1 | 1 | null {
+  const t = state.terrain
+  if (!t.pits) return null
+  const cx = Math.round(p.x)
+  if (!t.pits[cx - 1] || !t.pits[cx]) return null
+  // apoyo: columnas con piso en la fila de las orugas o hasta TIP_DEPTH más abajo (un labio redondeado)
+  let left = 0
+  let right = 0
+  for (let ix = cx - TANK_HALF_W; ix < cx + TANK_HALF_W; ix++) {
+    let solid = false
+    for (let y = p.y; y <= p.y + TIP_DEPTH && !solid; y++) solid = isSolid(t, ix, y)
+    if (!solid) continue
+    if (ix < cx - 1) left++
+    else if (ix > cx) right++
+    else return null // el centro está apoyado
+  }
+  // hacia el lado sin apoyo tiene que haber abismo bajo el borde de las orugas
+  if (left > 0 && right === 0 && t.pits[cx + TANK_HALF_W - 1]) return 1
+  if (right > 0 && left === 0 && t.pits[cx - TANK_HALF_W]) return -1
+  return null
+}
+const TIP_DEPTH = 2
+
 // Recorre hasta `dist` px hacia dir paso a paso. Devuelve el path (piso cada `per` px, empezando por
 // la posición inicial) o null si no se movió. Muta p.x / p.y. Para por pared, tanque, borde del mapa,
 // al pasar un borde (queda sin piso: el último paso no cambia la y) o, si stopWhenFlat, cuando la
@@ -135,9 +164,11 @@ export function slideDown(
 ): number | null {
   if (!p.alive || p.y >= state.terrain.h) return null
   const s = slopeAt(state, p.x, p.y)
-  if (Math.abs(s) <= SLIDE_SLOPE) return null
-  const dir: -1 | 1 = s > 0 ? 1 : -1
-  const path = travel(state, p, dir, SLIDE_MAX, SLOPE_STEP, tankFloorFn, true)
+  // v2.3: vuelco al abismo (ver tipDir): el tanque se va hacia el vacío hasta quedar sin piso
+  const tip = tipDir(state, p)
+  if (Math.abs(s) <= SLIDE_SLOPE && !tip) return null
+  const dir: -1 | 1 = tip ?? (s > 0 ? 1 : -1)
+  const path = travel(state, p, dir, SLIDE_MAX, SLOPE_STEP, tankFloorFn, !tip)
   if (!path) return null
   const e: GameEvent = { type: 'slide', playerId: p.id, cause: 'slope', path }
   if (t !== undefined) e.t = t
