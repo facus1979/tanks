@@ -15,6 +15,11 @@ import { bayer, mix, rnd } from './raster'
 export const ABYSS_BLACK = 0x050407
 const FEATHER = 18 // px fuera del abismo en los que la oscuridad se desvanece sobre las paredes vecinas
 const GRAVITY = 260
+// v2.3: cuánto más arriba del fondo del mundo pasa todo lo visible de la caída (desvanecido, destello y humo).
+// La cámara apoya el fondo del abismo justo sobre el tablero inferior del HUD; sin esto el final quedaba
+// pegado al tablero y casi tapado. Solo mueve lo visible: la física de la caída y el momento en que el objeto
+// se da por perdido (y sale el destello) no cambian, porque la sesión copia esos tiempos.
+const LIFT = 28
 
 // Ruido de valor suave (bilineal sobre una grilla de sx × sy), 0..1.
 export function vnoise(x: number, y: number, sx: number, sy: number, seed: number): number {
@@ -246,10 +251,12 @@ export class AbyssFalls {
       // se tiñe con la oscuridad del abismo y se desvanece en los últimos pixels
       const k = this.pits()?.dark(f.x, f.y, H) ?? 0
       const tint = mix(0xffffff, 0x000000, Math.min(1, k * 1.15))
-      const a = Math.max(0, Math.min(1, (H + 6 - f.y) / 30))
+      // se desvanece entre H - 24 - LIFT y H + 6 - LIFT (antes, sin LIFT, terminaba 6 px bajo el fondo)
+      const a = Math.max(0, Math.min(1, (H + 6 - LIFT - f.y) / 30))
       for (const s of f.sprites) s.tint = tint
       f.node.alpha = a
-      if (a <= 0 || f.y > H + 20) {
+      f.node.visible = a > 0 // ya invisible, sigue cayendo hasta el mismo umbral de antes (tiempos de la sesión)
+      if (f.y >= H + 6) {
         if (f.big) this.bottom(f.x, H)
         f.node.destroy({ children: true })
       } else live.push(f)
@@ -260,7 +267,7 @@ export class AbyssFalls {
   // Llegó al fondo: un destello lejano y, un rato después, una columna de humo que sube.
   private bottom(x: number, H: number): void {
     const at = this.time
-    this.later.push({ at: at + 0.25, run: () => this.fx.abyssFlash(x, H - 10) })
-    this.later.push({ at: at + 1.1, run: () => this.fx.abyssSmoke(x, H - 6, 3.2) })
+    this.later.push({ at: at + 0.25, run: () => this.fx.abyssFlash(x, H - 10 - LIFT) })
+    this.later.push({ at: at + 1.1, run: () => this.fx.abyssSmoke(x, H - 6 - LIFT, 3.2) })
   }
 }
