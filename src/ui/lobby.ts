@@ -1,6 +1,8 @@
 // Sala online: código y link, 8 casilleros con retrato (dos columnas de 4), ajustes de partida (anfitrión) y empezar / salir.
 // v5: los casilleros que pasan MAX_PLAYERS_BY_SIZE[lobby.size] se ven bloqueados con "SOLO MAPA …" y no se pueden
 // tomar ni configurar (el anfitrión, en src/net, tampoco deja ocuparlos).
+// v2.3: al achicar el mapa el anfitrión compacta los casilleros con la misma regla que el menú local
+// (compactSlots en ./menu); esta vista solo muestra lo que llega y el cursor sigue al mismo elemento.
 import { CREWS, MAP_SIZE_ORDER, MAX_PLAYERS, MAX_PLAYERS_BY_SIZE, TANK_COLORS, type CrewId, type MapSize } from '../sim/types'
 import type { LobbySlot } from '../net/types'
 import { bindNav, el, label, portrait, screenRoot, setLabel, setPortrait, type Nav } from './kit'
