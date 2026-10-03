@@ -50,6 +50,8 @@ export class CameraController {
   private ty = VIEW_H / 2
   private tz = 1
   private time = TANK_TIME
+  // v2.3: acompañando una caída al abismo (followFall). Se apaga con cualquier otro seguimiento.
+  private falling = false
   // Filas de abajo de la pantalla que tapa el tablero del HUD (px lógicos). Lo fija la sesión al empezar.
   bar = HUD_BAR_H
 
@@ -86,6 +88,7 @@ export class CameraController {
     this.w = Math.max(1, w)
     this.h = Math.max(1, h)
     this.mode = 'tank'
+    this.falling = false
     this.zoom = this.tz = 1
     this.vx = this.vy = this.vz = 0
     this.time = TANK_TIME
@@ -97,6 +100,7 @@ export class CameraController {
 
   // Apuntando: sigue al tanque, salvo que el jugador haya paneado.
   followTank(x: number, y: number): void {
+    this.falling = false
     if (this.mode === 'manual') {
       this.tz = 1
       this.time = TANK_TIME
@@ -111,6 +115,7 @@ export class CameraController {
 
   // Tiro en vuelo: centro del grupo (ya con anticipación) y el zoom del tiro.
   followShot(x: number, y: number, zoom: number): void {
+    this.falling = false
     this.mode = 'shot'
     this.tx = x
     this.ty = y
@@ -120,12 +125,14 @@ export class CameraController {
 
   // Entre vuelos (racimo, rodadora) se queda donde está.
   holdShot(zoom: number): void {
+    this.falling = false
     this.mode = 'shot'
     this.tz = zoom
   }
 
   // Tiro terminado, mientras se asientan las explosiones: mira el último impacto y vuelve a zoom 1.
   settleAt(x: number, y: number): void {
+    this.falling = false
     this.mode = 'shot'
     this.tx = x
     this.ty = y
@@ -136,6 +143,7 @@ export class CameraController {
   // v4: un flujo de líquido grande corre a la vista o cerca: la cámara lo encuadra (centro de la zona
   // que cambia y un zoom que la entra) mientras corre, con el suavizado de después del impacto.
   watch(x: number, y: number, zoom: number): void {
+    this.falling = false
     this.mode = 'shot'
     this.tx = x
     this.ty = y
@@ -145,17 +153,26 @@ export class CameraController {
 
   // v3: un tanque cae al abismo. La cámara lo acompaña rápido y vuelve a zoom 1; clampY la frena con el
   // borde de abajo del mundo apoyado sobre el tablero del HUD (nunca muestra lo que hay debajo).
+  // v2.3: el encuadre de la caída se arma con el tablero en cuenta: el objetivo es el fondo del abismo
+  // (y = h) apoyado justo encima del tablero (fila VIEW_H − bar), o sea el piso de floorY, salvo que el
+  // tanque arranque tan alto que no entraría con el fondo (entonces sube lo justo, como clampY con un
+  // objetivo alto). Mientras dura, el fondo que ya se ve no vuelve a meterse detrás del tablero (ver
+  // update): así el tanque se pierde en la oscuridad por encima del tablero y se ven el destello y el humo.
   followFall(x: number, y: number): void {
     this.mode = 'shot'
     this.tx = x
-    this.ty = y
+    // el tanque (su piso en y, el cuerpo TANK_LIFT arriba) entra con el fondo apoyado: ir directo al fondo
+    const top = y - TANK_LIFT
+    this.ty = top >= this.h - this.usableH + TOP_SAFE ? this.h : y
     this.tz = 1
     this.time = FALL_TIME
+    this.falling = true
   }
 
   // Pulido v2: un tanque se desliza (empuje o pendiente). La cámara lo acompaña con suavizado y vuelve a
   // zoom 1, sin saltos.
   followSlide(x: number, y: number): void {
+    this.falling = false
     this.mode = 'shot'
     this.tx = x
     this.ty = y
@@ -167,6 +184,7 @@ export class CameraController {
   pan(dx: number, dy = 0): void {
     if (this.fixed || (dx === 0 && dy === 0)) return
     this.mode = 'manual'
+    this.falling = false
     this.cx = this.tx = this.clampX(this.cx + dx, this.zoom)
     this.cy = this.ty = this.clampY(this.cy + dy, this.zoom)
     this.vx = this.vy = 0
@@ -191,6 +209,8 @@ export class CameraController {
 
   update(dt: number): void {
     if (this.fixed || dt <= 0) return
+    // v2.3: cuánto del fondo del mundo tapa hoy el tablero (0 = el fondo apoyado justo encima)
+    const hidden = this.floorY(this.zoom) - this.cy
     ;[this.zoom, this.vz] = smoothDamp(this.zoom, clamp(this.tz, MIN_ZOOM, 1), this.vz, ZOOM_TIME, dt, 4)
     this.zoom = clamp(this.zoom, MIN_ZOOM, 1)
     ;[this.cx, this.vx] = smoothDamp(this.cx, this.clampX(this.tx, this.zoom), this.vx, this.time, dt, MAX_SPEED)
@@ -198,6 +218,10 @@ export class CameraController {
     // el zoom cambia los límites: nunca mostrar fuera del mapa en x ni debajo del piso
     this.cx = this.clampX(this.cx, this.zoom)
     this.cy = this.clampY(this.cy, this.zoom)
+    // v2.3: en una caída al abismo, al volver a zoom 1 el piso de floorY baja y el suavizado quedaba
+    // atrás: el fondo se metía detrás del tablero justo cuando el tanque llegaba. Mientras se acompaña la
+    // caída, lo que tapa el tablero nunca crece.
+    if (this.falling && this.bar > 0) this.cy = Math.min(this.floorY(this.zoom), Math.max(this.cy, this.floorY(this.zoom) - Math.max(0, hidden)))
     if (this.mode === 'manual') {
       // el objetivo manual también queda dentro de los límites del zoom actual
       this.tx = this.clampX(this.tx, this.zoom)
