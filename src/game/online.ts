@@ -85,7 +85,15 @@ export class Online {
             else if (s === 'open') this.status = this.started ? '' : 'ELEGI UN CASILLERO'
             this.events.lobby()
           },
-          onReject: (reason) => console.warn('online:', reason),
+          // v2.3: el anfitrión rechaza algo (por ejemplo, el mapa se achicó y quedaste sin casillero):
+          // se muestra en la sala, no solo en la consola
+          onReject: (reason) => {
+            console.warn('online:', reason)
+            if (!this.started) {
+              this.status = reason.toUpperCase()
+              this.events.lobby()
+            }
+          },
           onDesync: (seq) => console.warn('online: desincronizado en', seq),
           onEnd: (reason) => this.finish(reason),
         },
