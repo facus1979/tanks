@@ -263,7 +263,7 @@ Decidido el 2026-10-01. Reemplaza a "una sola pantalla, sin cámara" y "máximo 
     - Reglas: tope de calma `calmLockTurn` = máx(30, 4 · tanques): desde ese turno el daño no reinicia la calma (con 2-4 tanques casi nunca llega; con 8 corta las rondas de hasta 60 tiros). La lava quema del más hundido al menos hundido y no mata al último en pie (gana el que aguantó más; empate solo si está igual de hundido y con la misma vida que el último que murió): con 8 tanques 1 de cada 4 rondas terminaba en empate. Economía, orden de turnos y ronda inicial no cambian (plata media por ronda: 4 tanques ~610-690, 8 tanques ~560-580).
     - `sim-check` 38308/38308. Tiros por partida (10-20 partidas): 2 / 4 tanques Chico 10,7 / 17,7, Mediano 10,5 / 21,0, Grande 11,5 / 20,6; Mediano 6: 27,7 (máx 38); Grande 8: 34,1 (máx 41). Con 40 rondas: Mediano 6 29,1 (máx 42), Grande 8 34,6 (máx 42), empates 0; con 3 rondas y tienda, Grande 8 38,6 tiros por ronda y el ganador repartido entre posiciones e ids. Muerte súbita: Mediano 6 en ~70% de las rondas, Grande 8 en ~95%.
     - Pendientes: `session.ts` sigue recortando a 4 casilleros y mostrando `SUDDEN_DEATH_CALM - calm` (correcto: el tope de calma usa la misma cuenta); con 6 en Mediano y 1 ronda el jugador 0 (punta y primer turno) gana ~40% (con 3 rondas se reparte).
-      - Revisado (2026-10-03): recorte a 4 casilleros en `session.ts` y ventaja del jugador 0 → v2.3 (flujo y sim).
+      - Revisado (2026-10-03): el recorte a 4 casilleros ya no existe (V5 usa `MAX_PLAYERS_BY_SIZE`) y `SUDDEN_DEATH_CALM - calm` es correcto; ventaja del jugador 0 → v2.3 (sim).
 
 ### Pulido v2 (2026-10-02)
 
