@@ -291,6 +291,19 @@ En la rama `v2-8jugadores` (sale de `v2-pulido`). `sim-check` 38308/38308; `net-
 
 Sugerencias del usuario: el "−" de la tienda devuelve el 100%; la muerte súbita se frena y reinicia su cuenta cuando un tanque le pega a otro (sin tope); escalones de 10 px y pendientes hasta 75° con más gasto al subir; viento por vuelta con aviso en el HUD. `SLOPE_CAP` pasó a 6·`TANK_W` para que un tanque colgando de un borde siga resbalando con el umbral nuevo. `sim-check` 38311/38311. Balance con IA normal: 6 en Mediano 39,0 tiros (máx 53), 8 en Grande 44,9 (máx 55), contra 27,7 / 34,1 con el tope; los topes del chequeo subieron a 44 / 60 y 50 / 66.
 
+## v2.3: pendientes de v2 (2026-10-03)
+
+Rama `v2.3-pendientes`. Seis agentes en paralelo (sim, red, render, vistas, flujo, arte).
+
+- **Abismo que mata**: el generador deja cornisas y labios finos junto a los abismos, el empuje de las explosiones puede tirar tanques al abismo y la IA lo aprovecha. Criterio: en el balance de mapas con abismo hay muertes por abismo (al menos 1 de cada 20 muertes).
+- **Ventaja del jugador 0**: el primer turno de cada ronda se sortea con la seed y los spawns se mezclan incluyendo al jugador 0 (no nace siempre en la punta). Criterio: con 6 jugadores en Mediano a 1 ronda ninguna posición gana más del 30%.
+- **IA y líquidos**: la IA usa el arma Tierra para hacer un puente sobre agua o lava cuando le corta el camino hacia un tiro.
+- **Red**: snapshot comprimido (grillas con RLE o similar, formato versionado). Criterio: < 150 KB con 8 tanques en Grande; `net-test` OK.
+- **Presentación**: la cámara de la caída al abismo tiene en cuenta el tablero inferior; arco del cañón visible sobre cielo claro; sin vetas verticales marcadas en la lava honda; globo "!" con `RenderFrame.alerts` (tope en el borde del abismo); HUD con 8 tanques sin amontonar flechas y placas en el costado derecho.
+- **Menú**: al achicar el mapa, el menú local y la sala online hacen lo mismo con los casilleros que no entran (se compactan conservando la configuración de los que quedan).
+- **Fondos**: capas periódicas con `repeat: 'wrap'` en el manifiesto (contrato en `src/render/manifest.ts`), sin espejo en las uniones.
+- Contratos v2.3: `BackgroundDef.repeat` (`'mirror' | 'wrap'` por capa) en el manifiesto, `RenderFrame.alerts` (ids con globo "!").
+
 ## Cómo se agrega algo
 
 - Arma nueva: un registro en `WEAPONS` y, si el efecto es nuevo, un modo de terreno en `sim` y un `BlastStyle` en el renderer.
