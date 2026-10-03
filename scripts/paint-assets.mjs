@@ -4,10 +4,10 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Canvas, OUT, mix, makeRand, flatTarget, paintForestBackground, TANK_W, TANK_H, PIVOT, CREW_X, antenna, STRIPES, bayer, rnd, TREAD_H, HULLS } from './lookdev/pixel.mjs'
+import { Canvas, WrapCanvas, OUT, mix, makeRand, flatTarget, paintForestBackground, TANK_W, TANK_H, PIVOT, CREW_X, antenna, STRIPES, bayer, rnd, TREAD_H, HULLS } from './lookdev/pixel.mjs'
 import { tankBody, tankWreck, barrelGeometry, barrelStrip, treadStrip, crewSprite, portrait, BARREL_FRAMES, TREAD_FRAMES } from './lookdev/characters.mjs'
 import * as TX from './lookdev/textures.mjs'
-import { BIOME_PAINTERS, BIOME_BG, BIOME_PALETTE, BG_W, BG_H } from './lookdev/biomes.mjs'
+import { BIOME_PAINTERS, BIOME_BG, BIOME_REPEAT, BIOME_PALETTE, BG_W, BG_H } from './lookdev/biomes.mjs'
 import * as UI from './lookdev/ui.mjs'
 import * as F10 from './lookdev/f10.mjs'
 
@@ -113,6 +113,7 @@ for (const [name, id] of Object.entries(MATERIAL_IDS)) {
 // ---------- fondos ----------
 
 const backgrounds = {}
+const seams = []
 const bgLayers = {}
 for (const biome of BIOMES) {
   const layers = BIOME_PAINTERS[biome]()
@@ -120,7 +121,44 @@ for (const biome of BIOMES) {
   // la capa 0 es opaca
   for (let i = 3; i < layers[0].px.length; i += 4) if (layers[0].px[i] !== 255) throw new Error(`${biome}: el cielo tiene alfa`)
   bgLayers[biome] = layers
-  backgrounds[biome] = { layers: layers.map((L, i) => save(`bg/${biome}-${i}.png`, L)), ...BIOME_BG[biome] }
+  const repeat = BIOME_REPEAT[biome]
+  if (repeat.length !== layers.length) throw new Error(`${biome}: repeat tiene ${repeat.length} entradas para ${layers.length} capas`)
+  // v2.3: las capas 'wrap' tienen que empalmar consigo mismas (columna 799 contra columna 0). Se pintan sobre
+  // WrapCanvas, así que lo son por construcción; esto es una alarma gruesa por si alguien agrega algo que
+  // recorre [0, 800) con un ruido no periódico o pinta con un Canvas común: la diferencia entre las columnas
+  // 799 y 0 no puede pasar el percentil 99 de las diferencias entre columnas vecinas de la misma capa (color y
+  // alfa premultiplicados). Con las capas espejadas de v2 envueltas daba de 6 a 30 veces la media; las
+  // periódicas dan menos de 2,5.
+  repeat.forEach((mode, i) => {
+    if (mode !== 'wrap') return
+    const { seam, p99 } = seamStats(layers[i])
+    if (seam > p99) throw new Error(`${biome} capa ${i}: la unión no empalma (costura ${seam.toFixed(2)}× la diferencia media entre columnas, percentil 99 ${p99.toFixed(2)}×)`)
+    seams.push(`${biome}-${i} ${seam.toFixed(2)}`)
+  })
+  backgrounds[biome] = { layers: layers.map((L, i) => save(`bg/${biome}-${i}.png`, L)), ...BIOME_BG[biome], repeat }
+}
+
+// diferencia de la unión y percentil 99 de las diferencias entre columnas vecinas, en veces la media
+function seamStats(L) {
+  const col = (x, y) => {
+    const i = (y * L.w + x) * 4
+    const a = L.px[i + 3] / 255
+    return [L.px[i] * a, L.px[i + 1] * a, L.px[i + 2] * a, L.px[i + 3]]
+  }
+  const diff = (x0, x1) => {
+    let d = 0
+    for (let y = 0; y < L.h; y++) {
+      const p = col(x0, y)
+      const q = col(x1, y)
+      for (let k = 0; k < 4; k++) d += Math.abs(p[k] - q[k])
+    }
+    return d
+  }
+  const ds = []
+  for (let x = 0; x < L.w - 1; x++) ds.push(diff(x, x + 1))
+  const mean = ds.reduce((t, d) => t + d, 0) / ds.length || 1
+  ds.sort((p, q) => p - q)
+  return { seam: diff(L.w - 1, 0) / mean, p99: ds[Math.floor(ds.length * 0.99)] / mean }
 }
 
 function composite(layers) {
@@ -129,12 +167,14 @@ function composite(layers) {
   return cv
 }
 
-// El bosque tiene que ser el fondo de la referencia pixel por pixel, en su variante repetible (v2: los pinos
-// de los bordes centrados en el borde o metidos enteros y la torre de agua en x = 60; ver paintForestBackground).
+// El bosque tiene que ser el fondo de la referencia (paintForestBackground, el mismo de look-test) pixel por
+// pixel, en su variante periódica (v2.3: pinos repartidos en 800 justo, el gigante a GIANT_X, lo que cruza un
+// borde entra por el otro; ver paintForestBackground). Así la composición del juego y la de la referencia
+// salen de una sola receta.
 {
-  const flat = new Canvas(BG_W, BG_H)
+  const flat = new WrapCanvas(BG_W, BG_H)
   const R = makeRand(42)
-  paintForestBackground(flatTarget(flat), R.next, { tileable: true })
+  paintForestBackground(flatTarget(flat), R.next, { periodic: true })
   const comp = composite(bgLayers.forest)
   let diff = 0
   for (let i = 0; i < flat.px.length; i++) if (Math.abs(flat.px[i] - comp.px[i]) > 1) diff++
@@ -374,3 +414,4 @@ sheetUi()
 sheetF10()
 
 console.log(`assets: ${written.length} archivos en public/assets, manifest v2; cañón ${geo.cell.w}×${geo.cell.h} pivote ${geo.pivot.x},${geo.pivot.y}`)
+console.log(`fondos 'wrap', costura / diferencia media entre columnas: ${seams.join(', ')}`)
