@@ -67,20 +67,18 @@ function sizeFor(i: number): MapSize | null {
   return MAP_SIZE_ORDER.find((z) => i < MAX_PLAYERS_BY_SIZE[z]) ?? null
 }
 
-// v2.3: regla común para achicar el mapa (menú local y sala online). Si algún casillero ocupado quedó en una
-// posición >= limit, los ocupados se corren hacia arriba en su orden, conservando todo lo suyo (humano/IA,
-// nombre, tripulante y, en la sala, dueño); los primeros `limit` se quedan y el resto se descarta desde el
-// final. Detrás de los que quedan van los vacíos que había (con su tripulante) y después los descartados
-// convertidos en vacíos con su mismo tripulante, así el largo de la lista no cambia. Si ningún ocupado
-// quedó afuera no se toca nada (los huecos se respetan: el número y el color salen del orden de los
-// ocupados, así que la partida es la misma). Devuelve la lista nueva y los descartados, en orden.
+// v2.3: regla común para achicar el mapa, la misma de fitSlots del anfitrión online (src/net/host.ts):
+// 1. si todos los ocupados ya entran (índice < limit), no se toca nada y los huecos quedan donde estaban;
+// 2. si no, los ocupados se corren hacia arriba en su orden, sin huecos, cada uno con todo lo suyo (humano/IA,
+//    nombre, tripulante); los vacíos van detrás en su orden (los tripulantes siguen siendo una permutación);
+// 3. los que quedan con índice >= limit pasan a vacíos: pierden el nombre y conservan el tripulante.
+// (En online además el anfitrión nunca se descarta y un remoto sin lugar queda de espectador; eso lo hace
+// host.ts.) Devuelve la lista nueva y los descartados (como eran antes), en orden.
 export function compactSlots<T extends { crew: CrewId }>(slots: readonly T[], limit: number, used: (s: T) => boolean, empty: (crew: CrewId) => T): { slots: T[]; dropped: T[] } {
   if (!slots.some((s, i) => i >= limit && used(s))) return { slots: [...slots], dropped: [] }
-  const occ = slots.filter(used)
-  const kept = occ.slice(0, limit)
-  const dropped = occ.slice(limit)
-  const holes = slots.filter((s) => !used(s))
-  return { slots: [...kept, ...holes, ...dropped.map((s) => empty(s.crew))], dropped }
+  const order = [...slots.filter(used), ...slots.filter((s) => !used(s))]
+  const dropped = order.filter((s, i) => i >= limit && used(s))
+  return { slots: order.map((s, i) => (i >= limit && used(s) ? empty(s.crew) : s)), dropped }
 }
 
 // Un casillero vacío cuyo tripulante ya usa un ocupado (u otro vacío anterior) toma el primero libre: así,
@@ -117,8 +115,6 @@ interface SlotEls {
 
 export class MenuScreen implements MenuView {
   private slots: Slot[] = []
-  // Casilleros descartados al achicar el mapa (en orden): si se vuelve a agrandar en esta misma pantalla, vuelven.
-  private parked: Slot[] = []
   private notice = ''
   private rounds = 3
   private difficulty: Difficulty = 'normal'
@@ -177,7 +173,6 @@ export class MenuScreen implements MenuView {
     this.biome = config.biome ?? 'rotate'
     // una config guardada antes de v2 no trae size: arranca en el tamaño por defecto
     this.size = config.size && MAP_SIZE_ORDER.includes(config.size) ? config.size : (DEFAULT_CONFIG.size ?? 'medium')
-    this.parked = []
     this.notice = ''
     this.fitSize(true)
   }
@@ -221,25 +216,12 @@ export class MenuScreen implements MenuView {
     this.fitSize(false)
   }
 
-  // Ajusta los casilleros al máximo del mapa (v2.3, la misma regla que el anfitrión online en src/net/host.ts):
-  // si algún ocupado queda afuera, se compactan (ver compactSlots) y los que no entran se descartan desde el
-  // final, con un aviso. Extra del menú local: los descartados se recuerdan mientras dure esta pantalla y, si
-  // se vuelve a agrandar el mapa, entran de nuevo en orden en los primeros casilleros vacíos habilitados
-  // (con su tripulante, o con uno libre si ya lo tomó otro). Tocar el tipo de un casillero los olvida.
+  // Ajusta los casilleros al máximo del mapa con la regla común (compactSlots): si algún ocupado queda afuera,
+  // se compactan hacia arriba y los que no entran se descartan desde el final, con un aviso.
   private fitSize(silent: boolean): void {
     const limit = this.limit()
     const { slots, dropped } = compactSlots(this.slots, limit, (s) => s.kind !== 'empty', (crew): Slot => ({ kind: 'empty', name: '', crew }))
     this.slots = slots
-    this.parked = [...dropped, ...this.parked]
-    // recupera los descartados antes, en orden, si ahora entran
-    while (this.parked.length) {
-      const i = this.slots.findIndex((s, k) => k < limit && s.kind === 'empty')
-      if (i < 0) break
-      const back = this.parked.shift() as Slot
-      const taken = new Set(this.slots.filter((o) => o.kind !== 'empty').map((o) => o.crew))
-      const crew = taken.has(back.crew) ? (CREWS.find((c) => !taken.has(c)) ?? back.crew) : back.crew
-      this.slots[i] = { ...back, crew }
-    }
     freeCrews(this.slots)
     if (silent) return
     const n = dropped.length
@@ -424,8 +406,7 @@ export class MenuScreen implements MenuView {
         s.kind = KIND_CYCLE[(KIND_CYCLE.indexOf(s.kind) + 1) % KIND_CYCLE.length]
         this.editing = false
         this.notice = ''
-        this.parked = []
-      } else if (c === C_CREW) this.cycleCrew(i, 1)
+          } else if (c === C_CREW) this.cycleCrew(i, 1)
       else if (s.kind !== 'empty') this.editing = !this.editing
       this.clampCol()
     } else if (this.row === ROW_PLAY) {
