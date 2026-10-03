@@ -74,6 +74,10 @@ interface Playback {
   reveal: Map<GameEvent, Int32Array> // pixels que cambia cada impact/burn
   pending: number // pixels todavía sin mostrar
   finisher: GameEvent | null // la muerte que cierra la ronda: arranca la cámara lenta
+  // v2.3: si la que cierra la ronda es una caída al abismo, la cámara lenta arranca al empezar la caída
+  // (no cuando llega la muerte, que es con el tanque ya perdido) y dura hasta que se pierde
+  finisherDrop: Drop | null
+  slowDone: boolean
   flightsEnd: number // fin del último vuelo
   zoom: number // zoom de la cámara durante el vuelo (shotZoom)
   // v2: punto donde se asienta la cámara al terminar los vuelos (último impacto o fin del último vuelo)
@@ -131,13 +135,16 @@ export interface FlowInfo {
 }
 
 // v3 abismo: caída animada de un tanque que se pierde por debajo del mapa. Arranca con el evento fall
-// (t0) y la muerte llega cuando el tanque ya salió por abajo (t0 + dur).
+// (t0) y la muerte llega cuando el tanque ya se perdió de vista (t0 + lost; v2.3, antes t0 + dur).
 interface Drop {
   playerId: number
   from: number // y del piso al empezar a caer
   to: number // y final, con el tanque entero por debajo del mapa
   t0: number
   dur: number
+  // v2.3: cuándo (desde t0) se pierde de vista el tanque que dibuja el renderer (ver abyssLostAt); el
+  // destello y el humo del fondo salen después de esto. Es >= dur.
+  lost: number
   follow: boolean | null // la cámara lo acompaña (se decide al empezar la caída)
 }
 
@@ -176,8 +183,22 @@ const WIND_NOTICE = 2.5 // v2.2: segundos del aviso de cambio de viento
 const ABYSS_G = 700
 const ABYSS_MIN = 0.5
 const ABYSS_MAX = 1.6
-const ABYSS_HOLD = 1.5
-const ABYSS_TAIL = 1.7
+// v2.3: la cámara y el turno se cuentan desde que el tanque se pierde de vista (Drop.lost), no desde el
+// fin de la caída de la sesión: el renderer lo suelta con su propia física, más lenta, y el destello del
+// fondo sale 0,25 s después de perderse y el humo 1,1 s después. Con 1,8 s se ve el destello y el humo
+// empezando a subir (antes la cámara se iba justo cuando arrancaba el humo, o antes en caídas largas).
+const ABYSS_HOLD = 1.8
+const ABYSS_TAIL = 2.0
+// Física con la que el renderer suelta al tanque en el abismo (AbyssFalls en src/render/pixi/abyss.ts):
+// gravedad, velocidad inicial (hacia arriba) y dónde termina de desvanecerse (debajo del piso del mapa).
+// Solo se usa para saber cuándo se pierde de vista; si el renderer cambia su caída, actualizar acá.
+const RENDER_ABYSS_G = 260
+const RENDER_ABYSS_VY = -20
+const RENDER_ABYSS_GONE = 6
+// v2.3: cámara lenta de una caída al abismo que cierra la ronda. Cubre toda la caída hasta que se pierde
+// (más un respiro); si eso en SLOW_SCALE pasaría de SLOW_ABYSS_MAX segundos reales, se frena menos.
+const SLOW_ABYSS_TAIL = 0.2
+const SLOW_ABYSS_MAX = 3.2
 // Pixels debajo del mapa donde termina la caída: el tanque, el tripulante y el cartel ya no se ven.
 const ABYSS_BELOW = TANK_H + 30
 // v4 líquidos. El turno siguiente espera FLOW_TAIL después del último parche; lo que llega después
@@ -215,6 +236,17 @@ export function abyssDrop(from: number, h: number): { to: number; dur: number } 
   return { to, dur }
 }
 
+// v2.3: segundos desde que empieza la caída hasta que el tanque que dibuja el renderer se pierde de vista
+// (su centro arranca TANK_H/2 arriba del piso y se termina de desvanecer RENDER_ABYSS_GONE px debajo del
+// mapa). Nunca menos que la caída de la sesión (dur), que es cuando llega la muerte.
+export function abyssLostAt(from: number, h: number): number {
+  const dist = Math.max(0, h + RENDER_ABYSS_GONE - (from - TANK_H / 2))
+  const a = RENDER_ABYSS_G / 2
+  const b = RENDER_ABYSS_VY
+  const t = (-b + Math.sqrt(b * b + 4 * a * dist)) / (2 * a)
+  return Math.max(abyssDrop(from, h).dur, t)
+}
+
 // Un fall que termina por debajo del mapa: el tanque cayó a un abismo (contrato v3).
 export function isAbyssFall(event: GameEvent, h: number): boolean {
   return event.type === 'fall' && event.to > h
@@ -245,6 +277,7 @@ export class Session {
   private phaseT = 0
   private movedT = 0
   private slow = 0
+  private slowScale = SLOW_SCALE
   private scale = 1
   private lastHumanId: number | null = null // último humano que tuvo el turno (hot-seat)
   // guía de apuntado: se recalcula solo si cambia la clave (ángulo, potencia, arma, posición, viento...)
@@ -789,7 +822,7 @@ export class Session {
       if (this.messageT <= 0) this.message = ''
     }
     if (this.slow > 0) {
-      this.scale = SLOW_SCALE
+      this.scale = this.slowScale
       this.slow = Math.max(0, this.slow - dt)
     }
     if (this.awaitFire > 0) this.awaitFire = Math.max(0, this.awaitFire - dt)
@@ -1451,7 +1484,7 @@ export class Session {
     timeline.sort((a, b) => a.t - b.t)
     if (!Number.isFinite(firstImpact)) firstImpact = flightsEnd
     // el turno siguiente espera a que el tanque se pierda y la cámara mire un momento el fondo
-    const dropsEnd = drops.reduce((m, d) => Math.max(m, d.t0 + d.dur + ABYSS_TAIL), 0)
+    const dropsEnd = drops.reduce((m, d) => Math.max(m, d.t0 + d.lost + ABYSS_TAIL), 0)
     const eventsEnd = timeline.reduce((m, e) => (Number.isFinite(e.t) ? Math.max(m, e.t) : m), 0)
     const hasShot = flights.length > 0 || timeline.some((e) => e.event.type === 'impact')
     const settle = hasShot ? SETTLE + (bigBlast ? 0.5 : 0) : 0
@@ -1468,6 +1501,7 @@ export class Session {
     if (after.phase !== 'aiming' && !this.demo?.freeze) {
       for (const e of timeline) if (e.event.type === 'death' && Number.isFinite(e.t)) finisher = e.event
     }
+    const finisherDrop = finisher?.type === 'death' ? drops.find((d) => d.playerId === finisher.playerId) ?? null : null
     this.playback = {
       t: 0,
       end: Math.max(Math.max(flightsEnd, eventsEnd) + settle, lavaEnd, dropsEnd, flowsEnd, slidesEnd),
@@ -1486,6 +1520,8 @@ export class Session {
       reveal,
       pending,
       finisher,
+      finisherDrop,
+      slowDone: false,
       flightsEnd,
       zoom: shotZoom(
         flights.map((f) => f.path),
@@ -1521,6 +1557,7 @@ export class Session {
     this.stepFlows(pb)
     this.stepSplashes(pb)
     this.stepDrops(pb)
+    this.slowDrop(pb)
     if (this.demo?.freeze && this.demo.shotDone && pb.t >= pb.firstImpact + 0.35) {
       this.frozen = true
       return
@@ -1566,7 +1603,7 @@ export class Session {
     if (event.type === 'wind') this.windNotice = WIND_NOTICE
     this.fx.push(event)
     this.noteEvent(event, pb)
-    if (event === pb.finisher) this.slow = SLOW_TIME
+    if (event === pb.finisher && !pb.finisherDrop) this.startSlow(SLOW_TIME, SLOW_SCALE)
     const pixels = pb.reveal.get(event)
     if (pixels && pixels.length) {
       const { front, back } = pb.target
@@ -1711,14 +1748,36 @@ export class Session {
       const id = event.playerId
       if (drops.some((d) => d.playerId === id)) continue
       const { to, dur } = abyssDrop(from, h)
-      drops.push({ playerId: id, from, to, t0: t, dur, follow: null })
+      const lost = abyssLostAt(from, h)
+      drops.push({ playerId: id, from, to, t0: t, dur, lost, follow: null })
+      // v2.3: la muerte (y el golpe lejano) llega cuando el tanque que dibuja el renderer se pierde de
+      // vista, no al final de la caída de la sesión (que es más rápida)
       for (let j = i; j < timeline.length; j++) {
         const e = timeline[j]
         if ((e.event.type === 'death' || e.event.type === 'damage') && e.event.playerId === id && Number.isFinite(e.t)) {
-          e.t = Math.max(e.t, t + dur)
+          e.t = Math.max(e.t, t + lost)
         }
       }
     }
+  }
+
+  // v2.3: la caída al abismo que cierra la ronda va en cámara lenta desde que empieza hasta que el tanque
+  // se pierde de vista (más SLOW_ABYSS_TAIL), en tiempo del tiro. Si eso en SLOW_SCALE dura más de
+  // SLOW_ABYSS_MAX segundos reales (caídas muy largas), se frena un poco menos para no hacerla eterna.
+  private slowDrop(pb: Playback): void {
+    const d = pb.finisherDrop
+    if (!d || pb.slowDone || pb.t < d.t0) return
+    pb.slowDone = true
+    const span = Math.max(0, d.t0 + d.lost + SLOW_ABYSS_TAIL - pb.t)
+    if (span <= 0) return
+    const scale = Math.max(SLOW_SCALE, span / SLOW_ABYSS_MAX)
+    this.startSlow(span / scale, scale)
+  }
+
+  // Cámara lenta: seconds son segundos reales (no de tiro) a escala scale.
+  private startSlow(seconds: number, scale: number): void {
+    this.slow = seconds
+    this.slowScale = scale
   }
 
   // Posición de los tanques que caen: aceleración constante desde el piso hasta debajo del mapa,
@@ -1739,7 +1798,7 @@ export class Session {
     const currentId = pb.before.players[pb.before.current]?.id
     const h = pb.terrain.h
     for (const d of pb.drops) {
-      if (pb.t < d.t0 || pb.t > d.t0 + d.dur + ABYSS_HOLD) continue
+      if (pb.t < d.t0 || pb.t > d.t0 + d.lost + ABYSS_HOLD) continue
       const p = pb.players.find((q) => q.id === d.playerId)
       if (!p) continue
       if (d.follow === null) {
