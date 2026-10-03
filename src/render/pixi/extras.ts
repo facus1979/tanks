@@ -417,18 +417,18 @@ export class Extras {
     const facing = p.angle > 90 ? -1 : 1
     const px = Math.round(p.x) + facing * PIVOT_X
     const py = Math.round(p.y) - PIVOT_Y
-    const col = mix(p.color, ARC_BRONZE, 0.5)
-    const lit = mix(col, 0xfff3c0, 0.35)
+    const col = mix(p.color, ARC_BRONZE, 0.6)
+    const lit = mix(col, 0xfff3c0, 0.55)
     const ang = Math.max(0, Math.min(180, p.angle))
     // ¿el ángulo a está en el tramo barrido? (de 0 a ang mirando a la derecha, de ang a 180 a la izquierda)
     const active = (a: number): boolean => (facing > 0 ? a <= ang : a >= ang)
     const inn = ARC_INNER
     for (let i = 0; i < inn.length; i += 3)
-      g.rect(px + inn[i], py + inn[i + 1], 1, 1).fill({ color: ARC_SHADE, alpha: active(inn[i + 2]) ? 0.6 : 0.4 })
+      g.rect(px + inn[i], py + inn[i + 1], 1, 1).fill({ color: ARC_SHADE, alpha: active(inn[i + 2]) ? 0.75 : 0.5 })
     const pts = ARC_ANGLES
     for (let i = 0; i < pts.length; i += 3) {
       const on = active(pts[i + 2])
-      g.rect(px + pts[i], py + pts[i + 1], 1, 1).fill({ color: on ? lit : col, alpha: on ? 0.9 : 0.55 })
+      g.rect(px + pts[i], py + pts[i + 1], 1, 1).fill({ color: on ? lit : col, alpha: on ? 1 : 0.7 })
     }
     const tick = (deg: number, r0: number, r1: number, color: number, alpha: number): void => {
       const r = (deg * Math.PI) / 180
