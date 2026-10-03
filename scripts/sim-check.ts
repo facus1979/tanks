@@ -78,7 +78,7 @@ import {
 } from '../src/sim'
 import { propSupported, resolveBlast, blastFor } from '../src/sim/physics'
 import { lavaRisk } from '../src/sim/ai'
-import { LAVA_DELAY, calmLockTurn, CALM_LOCK_MIN } from '../src/sim/game'
+import { LAVA_DELAY } from '../src/sim/game'
 import { skylineOf } from '../src/sim/ballistics'
 import { generate, padBounds, SPAWN_PIT_GAP, SPAWN_GAP_CROWD, spawnStats, type Generated } from '../src/sim/gen'
 import { Rng } from '../src/sim/rng'
@@ -756,10 +756,16 @@ check(WEAPON_ORDER.length === 8, 'WEAPON_ORDER tiene las 8 armas')
 // moverse: escalón alto frena, caída hace daño, combustible se repone
 {
   const s = flat()
-  fillRect(s.terrain, 216, 290, 240, 299, DIRT)
+  fillRect(s.terrain, 216, 286, 240, 299, DIRT)
   let a = s
   for (let i = 0; i < 10; i++) a = applyCommand(a, { type: 'move', playerId: 0, dir: 1 }).state
-  check(a.players[0].x === 201 || a.players[0].x === 202, `move: un escalón de 10 px frena (x ${a.players[0].x})`)
+  check(a.players[0].x === 201 || a.players[0].x === 202, `move: un escalón de 14 px frena (x ${a.players[0].x})`)
+  // v2.2: uno de 10 px (MAX_CLIMB) se sube
+  const s10 = flat()
+  fillRect(s10.terrain, 216, 300 - MAX_CLIMB, 240, 299, DIRT)
+  let a10 = s10
+  for (let i = 0; i < 10; i++) a10 = applyCommand(a10, { type: 'move', playerId: 0, dir: 1 }).state
+  check(a10.players[0].y === 300 - MAX_CLIMB, `move: sube un escalón de ${MAX_CLIMB} px (y ${a10.players[0].y})`)
   const b = flat()
   fillRect(b.terrain, 150, 250, 214, 299, DIRT)
   fillRect(b.terrain, 186, 300, 260, 360, AIR)
@@ -1018,7 +1024,7 @@ function toRoundover(): GameState {
   full.players[0].ammo.heavy = heavy.max - heavy.qty + 1
   check(applyCommand(full, { type: 'buy', playerId: 0, id: 'heavy' }).state === full, 'compra: respeta max')
   const sold = applyCommand(bought, { type: 'sell', playerId: 0, id: 'heavy' }).state
-  check(sold.players[0].money === 5000 - heavy.price + Math.floor(heavy.price / 2) && sold.players[0].ammo.heavy === ammo0, 'venta al 50%')
+  check(sold.players[0].money === 5000 && sold.players[0].ammo.heavy === ammo0, 'venta al 100% (v2.2)')
   check(applyCommand(rich, { type: 'sell', playerId: 0, id: 'shield' }).state === rich, 'no se vende lo que no hay')
   const withShield = applyCommand(bought, { type: 'buy', playerId: 0, id: 'shield' }).state
   check(withShield.players[0].items.shield === 1, 'compra de ítem')
@@ -1282,16 +1288,24 @@ function lavaKill(events: GameEvent[]): boolean {
   check(r.flights![0].impact.kind === 'out' && r.state.players.every((p) => p.hp === 100), 'calma: el tiro de prueba sale del mapa sin daño')
   s = miss(r.state).state
   check(s.calm === 2, 'calma: dos tiros sin daño')
-  r = shoot(s, 'normal', 90, 1) // cae encima del que tira: autodaño
-  check(r.events.some((e) => e.type === 'damage'), 'calma: el tiro vertical hace daño')
+  // v2.2: solo vale el daño a otro: el tiro vertical cae entre el que tira y el tanque 1, pegado
+  const near = (st: GameState) => {
+    st.players[1].x = st.players[0].x + 24
+    st.players[1].y = st.players[0].y
+    return st
+  }
+  const self = shoot(cloneState(s), 'normal', 90, 1)
+  check(self.state.calm === 3, `calma: el autodaño no la reinicia (calm ${self.state.calm})`)
+  r = shoot(near(cloneState(s)), 'normal', 90, 1)
+  check(r.events.some((e) => e.type === 'damage' && e.playerId === 1), 'calma: el tiro vertical daña al de al lado')
   check(r.state.calm === 0 && calmEvents(r).some((e) => e.left === SUDDEN_DEATH_CALM), `calma: el daño la vuelve a 0 (calm ${r.state.calm})`)
   // el escudo cuenta como daño
-  const sh = cloneState(s)
-  sh.players[0].shield = 100
+  const sh = near(cloneState(s))
+  sh.players[1].shield = 100
   const rs = shoot(sh, 'normal', 90, 1)
-  check(rs.events.some((e) => e.type === 'shield') && !rs.events.some((e) => e.type === 'damage') && rs.state.calm === 0, 'calma: lo que absorbe el escudo cuenta como daño')
+  check(rs.events.some((e) => e.type === 'shield' && e.playerId === 1) && !rs.events.some((e) => e.type === 'damage' && e.playerId === 1) && rs.state.calm === 0, 'calma: lo que absorbe el escudo del otro cuenta como daño')
   // un tiro sin cambio en la cuenta no emite 'calm'
-  const z = cloneState(flat())
+  const z = near(cloneState(flat()))
   const rz = shoot(z, 'normal', 90, 1)
   check(rz.state.calm === 0 && calmEvents(rz).length === 0, 'calma: si no cambia lo que falta, no hay evento calm')
 
@@ -2250,8 +2264,8 @@ function pushAt(weapon: WeaponId, x: number, y = 270, prep?: (s: GameState) => v
   // escalones: sube los de MAX_CLIMB, frena en uno más alto
   const st = pushAt('heavy', 590, 270, (s) => fillRect(s.terrain, 616, 300 - MAX_CLIMB, 700, 299, DIRT, 'both'))
   check(st.s.players[1].y === 300 - MAX_CLIMB && st.s.players[1].x > 610, `empuje: sube un escalón de ${MAX_CLIMB} px (x ${st.s.players[1].x}, y ${st.s.players[1].y})`)
-  const hi = pushAt('heavy', 590, 270, (s) => fillRect(s.terrain, 616, 290, 700, 299, DIRT, 'both'))
-  check(hi.s.players[1].y === 300 && hi.s.players[1].x + TANK_HALF_W <= 616, `empuje: frena en un escalón de 10 px (x ${hi.s.players[1].x})`)
+  const hi = pushAt('heavy', 590, 270, (s) => fillRect(s.terrain, 616, 286, 700, 299, DIRT, 'both'))
+  check(hi.s.players[1].y === 300 && hi.s.players[1].x + TANK_HALF_W <= 616, `empuje: frena en un escalón de 14 px (x ${hi.s.players[1].x})`)
   // barril en cadena: también empuja (con el t de esa explosión)
   const b = pushAt('normal', 565, 299, (s) => {
     s.props = [{ id: 0, kind: 'barrel', x: 570, y: 288, w: 10, h: 12, alive: true }]
@@ -2358,15 +2372,25 @@ function pushAt(weapon: WeaponId, x: number, y = 270, prep?: (s: GameState) => v
   h2.players[1].x = 540
   h2.players[1].y = tankFloor(h2.terrain, 540, 0)
   check(slidesOf(resolveBlast(h2, blastFor('normal', 5, 5, 1))).length === 0, `deslizamiento: una pendiente 2:1 no resbala (${slopeAt(h2, 540, h2.players[1].y).toFixed(2)})`)
-  const r2 = ramp(1 / 3)
-  r2.players[1].x = 520
-  r2.players[1].y = tankFloor(r2.terrain, 520, 0)
+  // v2.2: hasta ~75° (3,75) no resbala; para medir más hace falta una rampa más alta que el tanque
+  const tall = (run: number) => {
+    const s = flat()
+    for (let x = 500; x < 700; x++) fillRect(s.terrain, x, Math.max(150, 300 - Math.floor((x - 500) / run)), x, 299, DIRT, 'both')
+    return s
+  }
+  const r3 = ramp(1 / 3)
+  r3.players[1].x = 520
+  r3.players[1].y = tankFloor(r3.terrain, 520, 0)
+  check(slidesOf(resolveBlast(r3, blastFor('normal', 5, 5, 1))).length === 0, `deslizamiento: una pendiente 3:1 no resbala (v2.2)`)
+  const r2 = tall(1 / 6)
+  r2.players[1].x = 514 // el borde izquierdo al pie de la rampa, el derecho sobre la meseta
+  r2.players[1].y = tankFloor(r2.terrain, 514, 0)
   const y0 = r2.players[1].y
   const ev2 = resolveBlast(r2, blastFor('normal', 5, 5, 1))
-  check(slidesOf(ev2, 1, 'slope').length === 1 && r2.players[1].x < 520 && r2.players[1].y > y0, `deslizamiento: una pendiente 3:1 resbala cuesta abajo (x ${r2.players[1].x}, y ${y0} → ${r2.players[1].y})`)
+  check(slidesOf(ev2, 1, 'slope').length === 1 && r2.players[1].x < 514 && r2.players[1].y > y0, `deslizamiento: una pendiente 6:1 resbala cuesta abajo (x ${r2.players[1].x}, y ${y0} → ${r2.players[1].y})`)
   // borde de cráter: un cráter hondo al costado del tanque lo hace resbalar adentro y queda estable
   const c = flat()
-  for (const y of [300, 330, 360]) deform(c.terrain, 628, y, 26, 'destroy')
+  for (const y of [300, 330, 360, 390]) deform(c.terrain, 628, y, 26, 'destroy')
   const cy0 = c.players[1].y
   const cev = resolveBlast(c, blastFor('normal', 5, 5, 1))
   const cs = slidesOf(cev, 1, 'slope')
@@ -2375,23 +2399,32 @@ function pushAt(weapon: WeaponId, x: number, y = 270, prep?: (s: GameState) => v
   check(Math.abs(slopeAt(c, cp.x, cp.y)) <= SLIDE_SLOPE, `deslizamiento: termina estable (pendiente ${slopeAt(c, cp.x, cp.y).toFixed(2)})`)
   if (cs[0]) check(cs[0].t !== undefined && cs[0].path.every((q, i) => i === 0 || q.x >= cs[0].path[i - 1].x), 'deslizamiento: con t y cuesta abajo')
   // move: caminar cuesta abajo por una pendiente 3:1 desliza; cuesta arriba no puede subir
-  const d = ramp(1 / 3)
+  const d = tall(1 / 6)
   d.players[0].x = 560
   d.players[0].y = tankFloor(d.terrain, 560, 0)
   let down = d
   const dev: GameEvent[] = []
-  const ok = d.players[0].y === 200 && Math.abs(slopeAt(d, 560, d.players[0].y)) <= SLIDE_SLOPE
-  for (let i = 0; i < 40; i++) {
+  const ok = d.players[0].y === 150 && Math.abs(slopeAt(d, 560, d.players[0].y)) <= SLIDE_SLOPE
+  for (let i = 0; i < 60; i++) {
     const r = applyCommand(down, { type: 'move', playerId: 0, dir: -1 })
     dev.push(...r.events)
     down = r.state
   }
-  check(ok && slidesOf(dev, 0, 'slope').length >= 1 && down.players[0].y > 240 && down.players[0].x < 520, `move: bajar una pendiente 3:1 desliza hasta donde apoya estable (x ${down.players[0].x}, y ${down.players[0].y})`)
+  check(ok && slidesOf(dev, 0, 'slope').length >= 1 && down.players[0].y > 240 && down.players[0].x < 520, `move: bajar una pendiente 6:1 desliza hasta donde apoya estable (x ${down.players[0].x}, y ${down.players[0].y})`)
   const fuelUsed = d.players[0].fuel - down.players[0].fuel
   check(560 - down.players[0].x > fuelUsed + 10, `move: el deslizamiento no gasta combustible (${fuelUsed} para ${560 - down.players[0].x} px)`)
   let up = down
   for (let i = 0; i < 40; i++) up = applyCommand(up, { type: 'move', playerId: 0, dir: 1 }).state
-  check(up.players[0].y >= down.players[0].y - 6, `move: no sube una pendiente 3:1 (y ${down.players[0].y} → ${up.players[0].y})`)
+  check(up.players[0].y >= down.players[0].y - 6, `move: no sube una pendiente 6:1 (y ${down.players[0].y} → ${up.players[0].y})`)
+  // v2.2: una 3:1 (~72°) sí se sube, gastando más combustible que en llano
+  const u3 = ramp(1 / 3)
+  u3.players[0].x = 470
+  u3.players[0].y = 300
+  u3.players[0].fuel = 300 // subir gasta más: que no se quede sin combustible a mitad de la rampa
+  let c3 = u3
+  for (let i = 0; i < 60; i++) c3 = applyCommand(c3, { type: 'move', playerId: 0, dir: 1 }).state
+  const used3 = u3.players[0].fuel - c3.players[0].fuel
+  check(c3.players[0].y <= 220 && used3 > c3.players[0].x - 470, `move: sube una pendiente 3:1 gastando más (y ${c3.players[0].y}, ${used3.toFixed(0)} de combustible para ${c3.players[0].x - 470} px)`)
   const u1 = ramp(1)
   u1.players[0].x = 470
   u1.players[0].y = 300
@@ -2666,16 +2699,16 @@ function targetOf(s: GameState, ammo?: Partial<Record<WeaponId, number>>): numbe
   check(same >= total * 0.8, `v5: la IA no es simétrica (${same}/${total} tiros espejados)`)
 }
 {
-  // tope de calma: desde calmLockTurn el daño ya no reinicia la calma
-  check(calmLockTurn(2) === CALM_LOCK_MIN && calmLockTurn(4) === CALM_LOCK_MIN && calmLockTurn(8) === 32, `v5: calmLockTurn ${calmLockTurn(2)}/${calmLockTurn(4)}/${calmLockTurn(8)}`)
+  // v2.2: el daño a otro reinicia la calma siempre, también con la muerte súbita activa (sin tope)
   const s = flat()
-  s.calm = 2
-  s.turn = calmLockTurn(2) - 1
-  const before = shoot(s, 'normal', 90, 1)
-  check(before.events.some((e) => e.type === 'damage') && before.state.calm === 0, `v5: antes del tope el daño reinicia la calma (calm ${before.state.calm})`)
-  s.turn = calmLockTurn(2)
-  const after = shoot(s, 'normal', 90, 1)
-  check(after.events.some((e) => e.type === 'damage') && after.state.calm === 3 && calmEvents(after).some((e) => e.left === SUDDEN_DEATH_CALM - 3), `v5: desde el tope el daño ya no reinicia la calma (calm ${after.state.calm})`)
+  s.calm = SUDDEN_DEATH_CALM
+  s.lava = 440
+  s.turn = 60
+  s.players[1].x = s.players[0].x + 24
+  s.players[1].y = s.players[0].y
+  const hit = shoot(s, 'normal', 90, 1)
+  check(hit.events.some((e) => e.type === 'damage') && hit.state.calm === 0 && !hit.events.some((e) => e.type === 'lava') && hit.state.lava === 440, `v2.2: con daño a otro la lava se frena y la calma vuelve a 0 (calm ${hit.state.calm}, lava ${hit.state.lava})`)
+  check(calmEvents(hit).some((e) => e.left === SUDDEN_DEATH_CALM), 'v2.2: evento calm con la cuenta de nuevo completa')
 }
 {
   // réplicas y determinismo con 8 tanques en Grande: el log aplicado en otra réplica, con snapshot a mitad
@@ -2766,7 +2799,8 @@ function targetOf(s: GameState, ammo?: Partial<Record<WeaponId, number>>): numbe
     check(shots.every((x) => x < 120), `v5: partida de ${n} sin terminar (${size})`)
     check(lavaMs < AI_BUDGET_MS, `v5: la IA con lava tardó ${lavaMs.toFixed(0)} ms (${size} ${n})`)
     // objetivo: ~40 tiros con 8 (el tope de calma corta las rondas largas)
-    check(avg <= (n === 8 ? 40 : 34) && Math.max(...shots) <= (n === 8 ? 52 : 46), `v5: balance ${size} ${n} tanques: ${avg.toFixed(1)} tiros/partida, máximo ${Math.max(...shots)}`)
+    // v2.2: sin tope de calma (cada daño a otro frena la lava) las partidas de 6 y 8 se alargan
+    check(avg <= (n === 8 ? 50 : 44) && Math.max(...shots) <= (n === 8 ? 66 : 60), `v5: balance ${size} ${n} tanques: ${avg.toFixed(1)} tiros/partida, máximo ${Math.max(...shots)}`)
     check(Math.max(...ranks) <= games * 0.6, `v5: una posición gana demasiado (${ranks.join('/')}) ${size} ${n}`)
   }
 }

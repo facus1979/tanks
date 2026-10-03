@@ -170,6 +170,7 @@ const LAVA_HIT = 0.5
 const LAVA_TAIL = 0.4
 // v3 abismo. Gravedad de la caída (px/s²; más que la del tiro para que se sienta pesada), cuánto se queda
 // la cámara mirando el fondo después de que el tanque se perdió y cuánto espera el turno siguiente.
+const WIND_NOTICE = 2.5 // v2.2: segundos del aviso de cambio de viento
 const ABYSS_G = 700
 const ABYSS_MIN = 0.5
 const ABYSS_MAX = 1.6
@@ -252,6 +253,7 @@ export class Session {
   private lastImpacts = new Map<number, Vec2>() // último impacto de cada jugador en la ronda
   // v2 muerte súbita: subida de la lava en curso (presentación) y avisos para el audio
   private lavaAnim: { from: number; to: number; t: number } | null = null
+  private windNotice = 0 // v2.2: segundos que queda el aviso de cambio de viento
   private suddenDeathSaid = false // ya se avisó en esta ronda que empezó la muerte súbita
   private suddenDeathNews = false // se avisó y main.ts todavía no lo levantó (sonido y vibración)
   private melts: Vec2[] = [] // proyectiles derretidos en la lava desde la última llamada a pullMelts
@@ -752,6 +754,7 @@ export class Session {
   }
 
   update(dt: number): void {
+    if (!this.frozen) this.windNotice = Math.max(0, this.windNotice - dt)
     this.step(dt)
     if (!this.frozen) this.updateCamera(dt)
   }
@@ -930,7 +933,8 @@ export class Session {
   private suddenDeathModel(s: GameState): HudExtras['suddenDeath'] {
     const pb = this.playback
     const calmLeft = pb ? pb.calmLeft : Math.max(0, SUDDEN_DEATH_CALM - (s.calm ?? 0))
-    return { active: this.lavaView() !== null, calmLeft }
+    // v2.2: la lava puede quedar frenada (alguien le pegó a otro): activa solo con la cuenta en cero
+    return { active: this.lavaView() !== null && calmLeft <= 0, calmLeft }
   }
 
   // ---------- cámara (v2) ----------
@@ -1156,6 +1160,7 @@ export class Session {
     if (s.phase === 'gameover' && !this.playback) return this.resultText()
     if (s.phase !== 'aiming' && !this.playback) return 'Fin de ronda'
     if (this.playback || !current) return ''
+    if (this.windNotice > 0) return 'Cambia el viento'
     if (this.controlledHere(current)) {
       return s.players.filter((p) => this.isLocal(p)).length > 1 ? `Turno de ${current.name}` : 'Tu turno'
     }
@@ -1525,6 +1530,8 @@ export class Session {
     // v4: explosión con el centro bajo el agua (se mira antes de mostrar su cráter)
     if (event.type === 'impact' && underwater(pb.terrain, event.x, event.y)) this.submerged.add(event)
     if (event.type === 'flow') this.startFlow(pb, event)
+    // v2.2: el viento cambia por vuelta; se avisa unos segundos al cambiar
+    if (event.type === 'wind') this.windNotice = WIND_NOTICE
     this.fx.push(event)
     this.noteEvent(event, pb)
     if (event === pb.finisher) this.slow = SLOW_TIME

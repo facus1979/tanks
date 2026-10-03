@@ -17,7 +17,7 @@ export const SLIDE_MAX = 160
 // Columnas de cada borde de las orugas que se miran para medir la pendiente.
 const EDGE_COLS = 3
 // Hasta cuánto por debajo del piso se mira el borde bajo (una caída más honda cuenta como esta).
-export const SLOPE_CAP = 3 * TANK_W
+export const SLOPE_CAP = 6 * TANK_W // v2.2: por encima de SLIDE_SLOPE (3,75), así un tanque colgando de un borde siempre resbala
 
 // Resultado de intentar un paso de 1 px: null si algo lo frena; si no, la y del piso nuevo
 // (air = true si no hay piso a menos de MAX_CLIMB: el tanque sigue a su altura, por el aire).
