@@ -92,6 +92,28 @@ try {
     })`,
   })
   const { dts, touch } = r.result.value
+  // --profile: 8 s de perfil de CPU y las funciones con más tiempo propio
+  if (args.includes('--profile')) {
+    await s('Profiler.enable', {})
+    await s('Profiler.setSamplingInterval', { interval: 500 })
+    await s('Profiler.start', {})
+    await sleep(8000)
+    const { profile } = await s('Profiler.stop', {})
+    const self = new Map()
+    const byId = new Map(profile.nodes.map((n) => [n.id, n]))
+    const counts = new Map()
+    for (const id of profile.samples) counts.set(id, (counts.get(id) ?? 0) + 1)
+    let total = 0
+    for (const [id, c] of counts) {
+      const n = byId.get(id)
+      const f = n.callFrame
+      const key = `${f.functionName || '(anónima)'}  ${f.url.split('/').pop()}:${f.lineNumber + 1}`
+      self.set(key, (self.get(key) ?? 0) + c)
+      total += c
+    }
+    console.log('CPU propio (top 15):')
+    for (const [k, c] of [...self].sort((a, b) => b[1] - a[1]).slice(0, 15)) console.log(`  ${((100 * c) / total).toFixed(1).padStart(5)}%  ${k}`)
+  }
   dts.sort((a, b) => a - b)
   const mean = dts.reduce((a, b) => a + b, 0) / dts.length
   const p = (q) => dts[Math.min(dts.length - 1, Math.floor(q * dts.length))]
