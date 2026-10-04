@@ -933,7 +933,13 @@ function match(bots: number, seed: number, size: MapSize = 'small'): MatchStats 
       check(lavaMs < AI_BUDGET_MS, `la IA con lava tardó ${lavaMs.toFixed(0)} ms (${size})`)
       // v2: con la muerte súbita ningún tamaño se estira (objetivo ~15 con 2 tanques y ~25 con 4)
       if (bots === 1) check(avg >= 8 && avg <= (size === 'small' ? 15 : 16), `balance ${size} 2 tanques fuera de rango (${avg.toFixed(1)})`)
-      else check(avg <= 27, `balance ${size} 4 tanques: ${avg.toFixed(1)} tiros/partida (tope 27)`)
+      else {
+        // v2.4: tope 30 en Mediano y Grande (antes 27 en todos). Desde v2.3 (empuje, cornisas) Mediano con 4 mide
+        // 25,9-26,2 (10 y 20 partidas): quedaba a menos de un tiro del tope y el error de 20 partidas es ~1,8
+        // tiros. Chico sigue en 27 (mide ~17).
+        const cap = size === 'small' ? 27 : 30
+        check(avg <= cap, `balance ${size} 4 tanques: ${avg.toFixed(1)} tiros/partida (tope ${cap})`)
+      }
     }
     const flowAvg = flowStats.ms / Math.max(1, flowStats.fires)
     console.log(
