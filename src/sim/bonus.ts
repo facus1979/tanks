@@ -156,7 +156,8 @@ export function freshInLava(state: GameState, shooterId: number, before: Before[
 export function lavaBonus(state: GameState, shooterId: number, fresh: Set<number>, events: GameEvent[], from: number): void {
   for (let i = from; i < events.length; i++) {
     const e = events[i]
-    if (e.type !== 'death' || e.cause !== 'lava' || !fresh.has(e.playerId)) continue
+    // la quemadura mata con un 'death' sin causa (daño de lava) o con cause 'lava' (la lava lo tapó entero)
+    if (e.type !== 'death' || !fresh.has(e.playerId)) continue
     const p = state.players.find((q) => q.id === e.playerId)!
     payBonus(state, shooterId, 'lava', p.x, p.y - TANK_H, e.t, events)
   }

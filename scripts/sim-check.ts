@@ -31,6 +31,9 @@ import {
   SNOW,
   ICE,
   BONUS,
+  ICE_SLIDE,
+  PERSONALITIES,
+  PROP_SIZE,
   physicsFor,
   applyCommand,
   chooseShot,
@@ -89,12 +92,13 @@ import { resolveShot } from '../src/sim/weapons'
 import { collapseStats } from '../src/sim/collapse'
 import { generate, humanSafe, padBounds, SPAWN_PIT_GAP, SPAWN_GAP_CROWD, spawnStats, CORNICE_CRUST, CORNICE_LEN, CORNICE_SPAWN_FLAT, CORNICE_SPILL, type Generated } from '../src/sim/gen'
 import { Rng } from '../src/sim/rng'
-import { cloneTerrain, columnGround, createTerrain, deform, fillRect, hasLiquid } from '../src/sim/terrain'
+import { cloneTerrain, columnGround, columnTop, createTerrain, deform, fillRect, hasLiquid } from '../src/sim/terrain'
 import { applyPatch, flowLiquids, liquidVolume } from '../src/sim/flow'
 import { flowStats } from '../src/sim/game'
 import { inLava, inWater } from '../src/sim/physics'
 import { slopeAt } from '../src/sim/slide'
-import { SNOW_SINK } from '../src/sim/snow'
+import { SNOW_SINK, iceRisk, snowSinkAt } from '../src/sim/snow'
+import { bonusStats } from '../src/sim/bonus'
 
 function mk(bots: number, difficulty: Difficulty, biome: MatchConfig['biome'], seed: number, rounds = 1, humans = 0, size?: MapSize): MatchConfig {
   const slots: SlotConfig[] = []

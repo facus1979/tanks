@@ -1917,7 +1917,8 @@ function freeze(t: Terrain, x0: number, x1: number): void {
 function snowFinish(t: Terrain, ice: { x0: number; x1: number; depth: number }[], basins: Basin[], spawnXs: number[], seed: number): void {
   snowfall(t, seed)
   for (const q of ice) iceSheet(t, q.x0, q.x1, q.depth, spawnXs)
-  for (const q of basins) if (q.kind === 'water') freeze(t, q.x0 - 2, q.x1 + 2)
+  // todo el agua del mapa de nieve está congelada (las cuencas y lo que el flujo haya corrido al asentarlas)
+  if (basins.length > 0) freeze(t, 0, t.w)
   for (const x of spawnXs) sinkIntoSnow(t, x, tankFloorAt(t, x))
 }
 
@@ -2021,15 +2022,15 @@ function frozenLake(t: Terrain, L: Layout, rng: Rng, spawns: number[]): Basin | 
   return { kind: 'water', x0: b0, x1: b1, level }
 }
 
-const CREVASSE_GAP = 24
-// Grieta de Chico: un tajo de 34-44 px (más ancho que un tanque: el que cae no se engancha) hasta cerca del
+const CREVASSE_GAP = 16
+// Grieta de Chico: un tajo de 32-40 px (más ancho que un tanque: el que cae no se engancha) hasta cerca del
 // fondo, con paredes de hielo, a CREVASSE_GAP px o más de la caja de los tanques y del lago. Sin lugar, no hay grieta.
 function crevasse(t: Terrain, L: Layout, rng: Rng, spawns: number[], lake: Basin | null): void {
-  const cw = rng.int(34, 44)
+  const cw = rng.int(32, 40)
   const seed = rng.int(1, 100000)
   // todas las x que sirven (de a 4 px) y una sorteada
   const opts: number[] = []
-  for (let x0 = L.platX1 + 56; x0 <= L.plateauX0 - 40 - cw; x0 += 4) {
+  for (let x0 = L.platX1 + 40; x0 <= L.plateauX0 - 30 - cw; x0 += 4) {
     const x1 = x0 + cw
     if (spawns.some((s) => x1 > s - TANK_HALF_W - CREVASSE_GAP && x0 < s + TANK_HALF_W + CREVASSE_GAP)) continue
     if (lake && x1 > lake.x0 - CREVASSE_GAP && x0 < lake.x1 + CREVASSE_GAP) continue
