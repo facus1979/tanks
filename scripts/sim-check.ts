@@ -28,6 +28,9 @@ import {
   MAX_PLAYERS,
   MAX_PLAYERS_BY_SIZE,
   TANK_COLORS,
+  SNOW,
+  ICE,
+  BONUS,
   physicsFor,
   applyCommand,
   chooseShot,
@@ -91,6 +94,7 @@ import { applyPatch, flowLiquids, liquidVolume } from '../src/sim/flow'
 import { flowStats } from '../src/sim/game'
 import { inLava, inWater } from '../src/sim/physics'
 import { slopeAt } from '../src/sim/slide'
+import { SNOW_SINK } from '../src/sim/snow'
 
 function mk(bots: number, difficulty: Difficulty, biome: MatchConfig['biome'], seed: number, rounds = 1, humans = 0, size?: MapSize): MatchConfig {
   const slots: SlotConfig[] = []
@@ -313,7 +317,7 @@ function tramoChecks(g: Generated, biome: Biome, size: MapSize, seed: number): v
     let deepest = 0
     let dry = true
     for (let x = q.x0; x < q.x1; x++) {
-      const y = columnGround(t, x)
+      const y = lakeBed(t, x) // v3: debajo del hielo de un lago congelado
       deepest = Math.max(deepest, y - q.level)
       if (y <= q.level) dry = false
     }
@@ -389,7 +393,9 @@ function tankChecks(s: GameState, tag: string): void {
       for (let x = p.x - TANK_HALF_W - 4; x < p.x + TANK_HALF_W + 4; x++) {
         const i = y * W + x
         const body = y >= p.y - TANK_H && x >= p.x - TANK_HALF_W && x < p.x + TANK_HALF_W
-        if (body ? t.front[i] !== AIR || t.back[i] !== AIR : STRUCTURE.has(t.front[i]) || STRUCTURE.has(t.back[i])) inside++
+        // v3 nieve: el tanque nace hundido SNOW_SINK px en la nieve: en esas filas la pared de fondo es nieve
+        const trench = y >= p.y - SNOW_SINK && t.back[i] === SNOW
+        if (body ? t.front[i] !== AIR || (t.back[i] !== AIR && !trench) : STRUCTURE.has(t.front[i]) || STRUCTURE.has(t.back[i])) inside++
       }
     }
     check(inside === 0, `tanque ${p.id} dentro de una estructura (${inside} px) ${tag}`)
@@ -414,8 +420,16 @@ function tankChecks(s: GameState, tag: string): void {
 
 // ---------- 2. generación válida ----------
 const STRUCTURE = new Set([BRICK, WOOD, SLAT, BEAM, POST, METAL])
+// v3: hash de los mapas de Chico de nieve (30 seeds × 1-4 jugadores), fijo desde que se armó el bioma
+const CHICO_SNOW_HASH = 'pendiente'
+// v3: el lecho de una cuenca: el primer sólido debajo del hielo de un lago congelado
+function lakeBed(t: { w: number; h: number; front: Uint8Array }, x: number): number {
+  let y = columnGround(t as never, x)
+  while (y < t.h && t.front[y * t.w + x] === ICE) y++
+  return y < t.h && t.front[y * t.w + x] === WATER ? columnGround(t as never, x, y) : y
+}
 // v3: snow sin firma propia hasta que el área sim arme el bioma (hoy usa el generador del bosque)
-const signature: Record<Biome, number[]> = { forest: [STONE, BRICK, SLAT], jungle: [STONE, SLAT], industrial: [BRICK, METAL], snow: [] }
+const signature: Record<Biome, number[]> = { forest: [STONE, BRICK, SLAT], jungle: [STONE, SLAT], industrial: [BRICK, METAL], snow: [SNOW, ICE, WOOD, METAL] }
 // Chico con 20 seeds (los mapas de v1); Mediano y Grande con 10.
 const GEN_SEEDS: Record<MapSize, number> = { small: 20, medium: 10, large: 10 }
 for (const size of MAP_SIZE_ORDER) for (const biome of BIOMES) {
@@ -446,7 +460,8 @@ for (const size of MAP_SIZE_ORDER) for (const biome of BIOMES) {
         liquidChecks(g, `${size}/${biome}/seed ${seed}`)
       }
       // v4: Chico sin líquidos; ningún tanque nace con líquido en la caja
-      if (size === 'small') check(count(s, WATER) + count(s, LAVA) === 0, `líquido en Chico ${tag}`)
+      // v3: la nieve sí (el lago congelado de Chico)
+      if (size === 'small' && biome !== 'snow') check(count(s, WATER) + count(s, LAVA) === 0, `líquido en Chico ${tag}`)
       for (const p of s.players) check(!hasLiquid(t, WATER, p.x - TANK_HALF_W, p.y - TANK_H, p.x + TANK_HALF_W, p.y + 1) && !hasLiquid(t, LAVA, p.x - TANK_HALF_W, p.y - TANK_H, p.x + TANK_HALF_W, p.y + 1), `tanque nace en un líquido ${tag} p${p.id}`)
       // spawns repartidos: ninguno a menos de un sexto del espacio parejo de otro
       if (size !== 'small') {
@@ -497,8 +512,10 @@ for (const size of MAP_SIZE_ORDER) {
   }
   // Chico no cambia: los mapas de 1 a 4 jugadores, byte a byte iguales a los de v1-v4 (hash de grillas,
   // utilería y spawns de 30 seeds × 3 biomas × 1-4 jugadores, tomado antes de v5)
+  // v3: la nieve va con su propio hash (abajo): los otros tres biomas tienen que dar el de siempre
+  const chicoHash = (biomes: Biome[]) => {
   let all = 0x811c9dc5
-  for (const biome of BIOMES) {
+  for (const biome of biomes) {
     for (let seed = 1; seed <= 30; seed++) {
       for (let c = 1; c <= 4; c++) {
         const g = generate(biome, new Rng(roundSeed(seed, 1)), c)
@@ -515,7 +532,13 @@ for (const size of MAP_SIZE_ORDER) {
       }
     }
   }
-  check(all.toString(16) === '1a082a97', `v5: los mapas de Chico cambiaron (hash ${all.toString(16)}, esperaba 1a082a97)`)
+  return all.toString(16)
+  }
+  const old = chicoHash(['forest', 'jungle', 'industrial'])
+  check(old === '1a082a97', `v5: los mapas de Chico cambiaron (hash ${old}, esperaba 1a082a97)`)
+  const snowHash = chicoHash(['snow'])
+  console.log(`v3 Chico nieve: hash ${snowHash}`)
+  check(snowHash === CHICO_SNOW_HASH, `v3: los mapas de Chico de nieve cambiaron (hash ${snowHash}, esperaba ${CHICO_SNOW_HASH})`)
 
   // spawns con 6 en Mediano y 8 en Grande: válidos, repartidos a lo ancho y a SPAWN_GAP_CROWD o más
   // (más que el alcance de cualquier arma al arrancar: ningún tiro llega a dos tanques a la vez)
@@ -1063,7 +1086,7 @@ function playMatch(config: MatchConfig, maxShots = 150): MatchRun {
 {
   // rotate y random
   const biomes = [1, 2, 3, 4].map((r) => biomeFor('rotate', 9, r))
-  check(biomes.join() === 'forest,jungle,industrial,forest', `rotate: ${biomes.join()}`)
+  check(biomes.join() === 'forest,jungle,industrial,snow', `rotate: ${biomes.join()}`)
   check(biomeFor('random', 9, 2) === biomeFor('random', 9, 2), 'random determinista')
   check(new Set([1, 2, 3, 4, 5, 6, 7, 8].map((r) => biomeFor('random', 9, r))).size > 1, 'random varía por ronda')
   check(biomeFor('industrial', 9, 3) === 'industrial', 'bioma fijo')
@@ -1725,7 +1748,8 @@ type DeathEv = Extract<GameEvent, { type: 'death' }>
     const hit = found.events.filter((e): e is DamageEv => e.type === 'damage' && e.playerId === 1).reduce((a, e) => a + e.amount, 0)
     check(s.players[0].kills === 1, `abismo: el que lo tiró suma kill (${s.players[0].kills})`)
     check(s.phase === 'roundover' && s.roundWinnerId === 0, 'abismo: la ronda termina con el ganador')
-    const expect = EARN.kill + hit * EARN.perDamage + EARN.survive + EARN.roundWin
+    // v3: más los bonos de abismo y de primera sangre
+    const expect = EARN.kill + hit * EARN.perDamage + EARN.survive + EARN.roundWin + BONUS.abyss + BONUS.firstblood
     check(s.earnings[0] === expect, `abismo: plata del que lo tiró ${s.earnings[0]} (esperaba ${expect})`)
     check(s.earnings[1] === 0, `abismo: el que cayó no cobra (${s.earnings[1]})`)
   }
@@ -2429,7 +2453,7 @@ function pushAt(weapon: WeaponId, x: number, y = 270, prep?: (s: GameState) => v
           if (r.state === m || r.state.current !== p.id) break
           rampSteps++
           // v2.3: al borde de un abismo el tanque se puede volcar (vuelco al abismo): eso no es la rampa
-          rampSlides += slidesOf(r.events).filter((e) => !r.state.terrain.pits?.some((v, x) => v === 1 && Math.abs(x - e.path[0].x) <= TANK_W)).length
+          rampSlides += slidesOf(r.events).filter((e) => e.cause !== 'ice' && !r.state.terrain.pits?.some((v, x) => v === 1 && Math.abs(x - e.path[0].x) <= TANK_W)).length
           m = r.state
         }
       }
@@ -2700,6 +2724,7 @@ function crowdMap(xs: number[], hp: number[] = []): GameState {
     p.y = 300
     p.hp = hp[i] ?? 100
     for (const id of WEAPON_ORDER) p.ammo[id] = WEAPONS[id].ammo
+    p.personality = undefined // v3: la IA neutra (las personalidades tienen su propia prueba)
   })
   s.current = 0
   s.wind = 0
@@ -3077,6 +3102,7 @@ const abyssDeath = (ev: GameEvent[], id: number) => ev.some((e) => e.type === 'd
     for (const id of WEAPON_ORDER) s.players[0].ammo[id] = 0
     s.players[0].ammo.normal = 99
     s.players[0].ammo.dirt = 9
+    for (const p of s.players) p.personality = undefined // v3: IA neutra
     s.current = 0
     s.wind = 0
     return s

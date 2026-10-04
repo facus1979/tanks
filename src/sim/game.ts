@@ -258,7 +258,7 @@ export function applyCommand(state: GameState, command: Command): StepResult {
       const next = shallow(state)
       const p = next.players[i]
       p.kind = command.kind
-      if (p.kind === 'ai' && !p.personality) p.personality = personalityFor(next.seed, i)
+      // v3: un humano que pasa a IA juega sin personalidad (neutra), así la ida y vuelta no cambia el estado
       // en la tienda, una IA que entra compra y queda lista para no trabar la ronda
       if (next.phase === 'shop' && p.kind === 'ai' && !p.ready) {
         aiShop(p, next.difficulty, next.seed, next.round)
