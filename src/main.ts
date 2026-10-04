@@ -675,6 +675,7 @@ function mergePad(a: PadState, b: PadState): PadState {
     angle: clamp1(a.angle + b.angle),
     power: clamp1(a.power + b.power),
     move: a.move || b.move,
+    steer: clamp1(a.steer + b.steer),
     pan: clamp1(a.pan + b.pan),
     fine: a.fine || b.fine,
     stepAngle: a.stepAngle + b.stepAngle,
