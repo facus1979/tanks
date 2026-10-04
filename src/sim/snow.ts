@@ -1,8 +1,8 @@
 // v3 bioma nieve: reglas de la nieve blanda y del hielo para tanques.
 //
 // Nieve (SNOW): se rompe más fácil que la tierra (MATERIALS: toughness > 1) y se compacta bajo el tanque:
-// al terminar cada turno, un tanque apoyado sobre nieve honda se hunde SNOW_SINK px (la nieve de debajo de
-// sus orugas pasa a aire; la pared de fondo queda, así se ve la huella). Se hunde una sola vez por lugar:
+// al terminar cada turno, un tanque apoyado con toda la caja sobre nieve honda se hunde SNOW_SINK px (la
+// nieve de debajo de sus orugas pasa a aire; la pared de fondo queda, así se ve la huella). Se hunde una sola vez por lugar:
 // si al costado de la caja ya hay nieve más alta que su piso (está en su propia huella) no se hunde más.
 // SNOW_SINK es mucho menos que MAX_CLIMB: el tanque sale de la huella caminando, nunca queda trabado.
 //
@@ -34,8 +34,6 @@ export const SNOW_SINK = 3
 // Para hundirse, la columna tiene que tener al menos SNOW_SINK + SNOW_SINK_FIRM filas sólidas desde el
 // piso (si no, la nieve es una costra fina sobre un hueco y el tanque no la pisa).
 const SNOW_SINK_FIRM = 2
-// Columnas de la caja que tienen que ser nieve para que se hunda (la mitad de las orugas).
-const SNOW_SINK_COLS = TANK_HALF_W
 const MIN_SUPPORT = 3 // como en physics
 export const ICE_OFF_COST = 4
 // Pixels por punto del path del patinazo (como el empuje).
@@ -53,12 +51,9 @@ export function snowSinkAt(t: Terrain, x: number, y: number): number {
   for (const ix of [cx - TANK_HALF_W - 1, cx + TANK_HALF_W]) {
     if (ix >= 0 && ix < w && front[(y - 1) * w + ix] === SNOW) return 0
   }
-  let n = 0
-  for (let ix = cx - TANK_HALF_W; ix < cx + TANK_HALF_W; ix++) {
-    if (ix < 0 || ix >= w || !sinkable(t, ix, y)) continue
-    n++
-  }
-  return n >= SNOW_SINK_COLS ? SNOW_SINK : 0
+  // todas las columnas de la caja: así el piso nuevo es parejo (una oruga a medio hundir quedaría mal apoyada)
+  for (let ix = cx - TANK_HALF_W; ix < cx + TANK_HALF_W; ix++) if (ix < 0 || ix >= w || !sinkable(t, ix, y)) return 0
+  return SNOW_SINK
 }
 
 function sinkable(t: Terrain, ix: number, y: number): boolean {
@@ -75,10 +70,7 @@ export function sinkIntoSnow(t: Terrain, x: number, y: number): number {
   if (snowSinkAt(t, x, y) <= 0) return y
   const cx = Math.round(x)
   const { w, front } = t
-  for (let ix = cx - TANK_HALF_W; ix < cx + TANK_HALF_W; ix++) {
-    if (ix < 0 || ix >= w || !sinkable(t, ix, y)) continue
-    for (let k = 0; k < SNOW_SINK; k++) front[(y + k) * w + ix] = AIR
-  }
+  for (let ix = cx - TANK_HALF_W; ix < cx + TANK_HALF_W; ix++) for (let k = 0; k < SNOW_SINK; k++) front[(y + k) * w + ix] = AIR
   // el piso nuevo: la primera fila con MIN_SUPPORT columnas sólidas (como tankFloor)
   for (let yy = y; yy < t.h; yy++) {
     let n = 0

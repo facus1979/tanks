@@ -163,9 +163,9 @@ export function diggerPlan(state: GameState, actor: Player, targets: Player[], b
   const ty = columnGround(state.terrain, Math.round(tx))
   let bestShot: PersonalPlan | null = null
   let bestD = 14
-  for (let a = 20; a <= 80; a += 4) {
+  for (let a = 20; a <= 80; a += 6) {
     const angle = dir > 0 ? a : 180 - a
-    for (let power = 14; power <= 60; power += 2) {
+    for (let power = 14; power <= 60; power += 3) {
       const f = fly({ terrain: state.terrain, players: state.players, props: state.props, ownerId: actor.id, angle, power, wind: state.wind, lava: state.lava ?? undefined, lavaSolid: true })
       if (f.impact.kind === 'out') continue
       const d = Math.abs(f.impact.x - tx) + Math.abs(f.impact.y - ty) * 0.5

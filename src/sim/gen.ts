@@ -1567,7 +1567,7 @@ function carve(b: Build, seg: Seg): void {
       // labio, si spawnOk lo acepta); spreadSpawns los prefiere
       b.brinks.push({ x: ma - SPAWN_PIT_GAP - TANK_HALF_W - 2, dir: -1 }, { x: mz + SPAWN_PIT_GAP + TANK_HALF_W + 2, dir: 1 })
       // v3 nieve: la grieta tiene las paredes de hielo (debajo de la costra de la boca)
-      if (biome === 'snow') iceWalls(t, pa - 8, pz + 8, (x) => surf[Math.max(x0, Math.min(x1 - 1, x))] + 14)
+      if (biome === 'snow') iceWalls(t, b.pits, pa - 8, pz + 8, (x) => surf[Math.max(x0, Math.min(x1 - 1, x))] + 14)
       if (cornL) b.ledges.push({ kind: 'cornice', x0: pa, x1: ma, thick: crust })
       if (cornR) b.ledges.push({ kind: 'cornice', x0: mz + 1, x1: pz + 1, thick: crust })
       if (p.bridge) b.ledges.push({ kind: 'bridge', x0: ma, x1: mz + 1, thick: p.bridgeT })
@@ -1836,11 +1836,13 @@ function iceCave(t: Terrain, x0: number, y0: number, x1: number, y1: number): vo
 
 // Paredes de hielo de una grieta (columnas [x0, x1]): lo sólido junto al aire de las columnas de abismo, por
 // debajo de from(x) (la costra de la boca y las cornisas quedan de nieve).
-function iceWalls(t: Terrain, x0: number, x1: number, from: (x: number) => number): void {
-  const pits = t.pits ?? null
+function iceWalls(t: Terrain, pits: Uint8Array, x0: number, x1: number, from: (x: number) => number): void {
   const ax = Math.max(2, x0)
   const bx = Math.min(t.w - 3, x1)
-  iceAround(t, ax, 0, bx, t.h - BEDROCK_ROWS - 1, (x, y) => t.front[y * t.w + x] === AIR && (pits ? pits[x] === 1 : false) && y > from(x))
+  const open = (x: number, y: number) => t.front[y * t.w + x] === AIR && pits[x] === 1 && y > from(x)
+  iceAround(t, ax, 0, bx, t.h - BEDROCK_ROWS - 1, open)
+  // la pared de fondo de la grieta también es de hielo
+  for (let x = ax; x <= bx; x++) for (let y = 0; y < t.h; y++) if (open(x, y) && t.back[y * t.w + x] === DIRT) t.back[y * t.w + x] = ICE
 }
 
 // Lo sólido blando (tierra, nieve, piedra) a 2 px o menos de una celda `open` pasa a hielo.
@@ -1897,10 +1899,13 @@ function iceSheet(t: Terrain, x0: number, x1: number, depth: number, spawns: num
   }
 }
 
-// Lago congelado: las ICE_CRUST primeras filas de agua desde la superficie de la cuenca pasan a hielo.
-function freeze(t: Terrain, x0: number, x1: number, level: number): void {
+// Lago congelado: en cada columna de la cuenca, las ICE_CRUST primeras filas de agua desde su superficie
+// (después del flujo que asienta la cuenca) pasan a hielo.
+function freeze(t: Terrain, x0: number, x1: number): void {
   for (let x = Math.max(0, x0); x < Math.min(t.w, x1); x++) {
-    for (let y = Math.max(0, level); y < Math.min(t.h, level + ICE_CRUST); y++) {
+    const top = columnTop(t, x)
+    if (top >= t.h || t.front[top * t.w + x] !== WATER) continue
+    for (let y = top; y < Math.min(t.h, top + ICE_CRUST); y++) {
       const i = y * t.w + x
       if (t.front[i] === WATER) t.front[i] = ICE
     }
@@ -1912,7 +1917,7 @@ function freeze(t: Terrain, x0: number, x1: number, level: number): void {
 function snowFinish(t: Terrain, ice: { x0: number; x1: number; depth: number }[], basins: Basin[], spawnXs: number[], seed: number): void {
   snowfall(t, seed)
   for (const q of ice) iceSheet(t, q.x0, q.x1, q.depth, spawnXs)
-  for (const q of basins) if (q.kind === 'water') freeze(t, q.x0, q.x1, q.level)
+  for (const q of basins) if (q.kind === 'water') freeze(t, q.x0 - 2, q.x1 + 2)
   for (const x of spawnXs) sinkIntoSnow(t, x, tankFloorAt(t, x))
 }
 
@@ -2083,7 +2088,8 @@ export function placeTargets(t: Terrain, props: Prop[], spawns: number[], rng: R
     for (let ix = x - 2; ix < x + w + 2 && ok; ix++) {
       const g = columnGround(t, ix)
       if (t.pits?.[ix] || columnTop(t, ix) < g || g >= t.h - BEDROCK_ROWS - 4 || liquidBelow(t, ix, g)) ok = false
-      lo = Math.min(lo, g)
+      // apoyo: el piso más alto bajo la caja (no el de los costados)
+      if (ix >= x && ix < x + w) lo = Math.min(lo, g)
       hi = Math.max(hi, g)
     }
     if (!ok || hi - lo > TARGET_FLAT || nearPit(t, Math.round(x + w / 2), w / 2 + 40)) continue
