@@ -510,3 +510,21 @@ html.touch .shop3 .prow .px-btn { min-width: 32px; min-height: 30px; }
 html.touch .shop3 .prow .px-btn { min-width: 30px; min-height: 24px; }
 @media (max-height: 520px) { .shop3 .colhead { padding-top: 0; padding-bottom: 0; } .shop-detail { padding-top: 0; padding-bottom: 0; } #shop-view { padding: 4px; } }
 html.touch .shop-right .px-btn.play { min-height: 40px; }
+
+/* ---------- v3: perfil (color de tanque, personalidad, nombre con teclado del sistema) ---------- */
+.slot .cell.color { display: flex; align-items: center; justify-content: center; align-self: stretch; padding: calc(var(--px) * 2); }
+.swatch {
+  width: calc(var(--px) * 9); height: calc(var(--px) * 9); flex: none;
+  background: var(--swatch, #3a3430); border: var(--px) solid var(--out);
+  box-shadow: inset calc(var(--px) * -1) calc(var(--px) * -1) 0 #0006, inset var(--px) var(--px) 0 #ffffff40;
+}
+.slot .cell.color.off .swatch { opacity: 0.35; box-shadow: none; }
+.slot .cell.name.has-input { position: relative; }
+.slot .cell.name.ai { background: #0e1418; }
+.name-input[hidden] { display: none; }
+@media (max-width: 900px), (max-height: 520px) {
+  .swatch { width: calc(var(--px) * 7); height: calc(var(--px) * 7); }
+  .slot .cell.color { padding: var(--px); }
+  .slots8 .slot .cell.name { min-width: calc(var(--px) * 46); }
+}
+html.touch .slots8 .slot .cell.color { min-width: 36px; }

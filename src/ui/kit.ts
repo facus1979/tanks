@@ -231,6 +231,8 @@ export function bindNav(handler: (nav: Nav) => void, raw?: (e: KeyboardEvent) =>
     if (e.ctrlKey || e.metaKey || e.altKey) return
     // la vista se queda con todas las teclas: el juego no tiene que ver el espacio ni las flechas
     e.stopPropagation()
+    // v3: en un campo de nombre (táctil, teclado del sistema) las teclas son texto; el campo maneja Enter/Esc
+    if (e.target instanceof HTMLInputElement && e.target.classList.contains('name-input')) return
     if (raw?.(e)) {
       e.preventDefault()
       return
