@@ -1,5 +1,6 @@
 // Resolución de un impacto: terreno, daño, utilería, barriles en cadena, caída y aplastamiento.
-import { deform, hasLiquid, isPit, isSolid, liquidAt, solidRunUp } from './terrain'
+import { deform, hasLiquid, isPit, isSolid, liquidAt, peekDirty, solidRunUp } from './terrain'
+import { COLLAPSE_FRAME_ITERS, collapseStats, collapseTerrain } from './collapse'
 import { knock, slideDown } from './slide'
 import {
   FALL_DAMAGE,
@@ -317,6 +318,70 @@ export function settleAfterFlow(state: GameState, events: GameEvent[], t: number
     const e = events[i]
     if ((e.type === 'prop' || e.type === 'fall' || e.type === 'damage' || e.type === 'death' || e.type === 'shield') && e.t === undefined) e.t = t
   }
+}
+
+// ---------- v2.4: derrumbe ----------
+
+// Segundos entre el final de lo que se ve del tiro y el primer parche del derrumbe, y entre parches.
+export const COLLAPSE_DELAY = 0.1
+export const COLLAPSE_DT = 1 / 30
+// Aplastamiento por derrumbe: las celdas que cayeron al menos COLLAPSE_MIN_DROP px y terminaron sobre el
+// tanque (columnas de su caja, desde COLLAPSE_PILE px por encima del techo hasta el piso) le hacen 1 de daño
+// cada COLLAPSE_CELLS_PER_HP, desde COLLAPSE_MIN_CELLS celdas (las migas no lastiman) y con tope
+// COLLAPSE_MAX_DAMAGE. Un montón de 10 px de alto a lo ancho del tanque (280 celdas) hace 28; taparlo entero
+// llega al tope de 40 (más que una normal directa, menos que una pesada de lleno).
+export const COLLAPSE_MIN_DROP = 4
+export const COLLAPSE_PILE = 12
+export const COLLAPSE_MIN_CELLS = 24
+export const COLLAPSE_CELLS_PER_HP = 10
+export const COLLAPSE_MAX_DAMAGE = 40
+
+// Derrumbe después de los impactos de un tiro (fire y la simulación de la IA, con el mismo resolver).
+// t: momento del primer parche. record: emitir el evento 'collapse' con los parches (la IA no los arma).
+// Aplasta a los tanques que quedan bajo lo que cayó (damage con cause 'collapse', en el fin del derrumbe) y
+// después asienta utilería y tanques (un terrón que se fue de abajo de un tanque lo deja caer).
+// Devuelve el t del fin del derrumbe (t si no se cayó nada).
+export function collapseAfterShot(state: GameState, events: GameEvent[], t: number, record: boolean): number {
+  const t0 = performance.now()
+  const rep = collapseTerrain(state.terrain, { seed: peekDirty(state.terrain), record, band: state.lava ?? undefined })
+  const ms = performance.now() - t0
+  if (record) {
+    collapseStats.calls++
+    collapseStats.ms += ms
+    collapseStats.worst = Math.max(collapseStats.worst, ms)
+  }
+  if (!rep.changed) return t
+  const frames = record ? rep.patches.length - 1 : Math.ceil(Math.min(rep.iters, 240) / COLLAPSE_FRAME_ITERS)
+  const end = t + Math.max(0, frames) * COLLAPSE_DT
+  if (record) {
+    collapseStats.collapses++
+    collapseStats.cells += rep.cells
+    events.push({ type: 'collapse', t, dt: COLLAPSE_DT, patches: rep.patches, cells: rep.cells })
+  }
+  const w = state.terrain.w
+  for (const p of state.players) {
+    if (!p.alive) continue
+    const cx = Math.round(p.x)
+    let n = 0
+    for (const c of rep.landed) {
+      if (c.drop < COLLAPSE_MIN_DROP) continue
+      const x = c.i % w
+      const y = (c.i - x) / w
+      if (x >= cx - TANK_HALF_W && x < cx + TANK_HALF_W && y >= p.y - TANK_H - COLLAPSE_PILE && y < p.y) n++
+    }
+    if (n < COLLAPSE_MIN_CELLS) continue
+    const mark = events.length
+    hurt(p, Math.min(COLLAPSE_MAX_DAMAGE, n / COLLAPSE_CELLS_PER_HP), events)
+    for (let i = mark; i < events.length; i++) {
+      const e = events[i]
+      if (e.type === 'damage') {
+        e.t = end
+        e.cause = 'collapse'
+      } else if (e.type === 'death' || e.type === 'shield') e.t = end
+    }
+  }
+  settleAfterFlow(state, events, end)
+  return end
 }
 
 // v3: el tanque en x quedó sin ningún piso (tankFloor dio el borde del mapa) y tiene columnas de

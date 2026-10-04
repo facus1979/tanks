@@ -50,6 +50,12 @@ export function markDirty(t: Terrain, x0: number, y0: number, x1: number, y1: nu
   }
 }
 
+// v2.4: el rectángulo sucio sin limpiarlo (el derrumbe mira lo que cambió el tiro; después el flujo lo toma).
+export function peekDirty(t: Terrain): Rect | null {
+  const r = dirtyOf.get(t)
+  return r ? { ...r } : null
+}
+
 // Devuelve y limpia el rectángulo sucio (null si no se tocó nada desde la última vez).
 export function takeDirty(t: Terrain): Rect | null {
   const r = dirtyOf.get(t) ?? null

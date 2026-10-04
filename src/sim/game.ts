@@ -1,7 +1,7 @@
 import { PATH_DT } from './ballistics'
 import { generate } from './gen'
 import { flowLiquids } from './flow'
-import { engulfedInLava, hurt, inLava, kill, settleAfterFlow, settleTank, tankFloor } from './physics'
+import { COLLAPSE_DELAY, collapseAfterShot, engulfedInLava, hurt, inLava, kill, settleAfterFlow, settleTank, tankFloor } from './physics'
 import { SLIDE_MAX, slopeAt, stepTank } from './slide'
 import { resolveShot } from './weapons'
 import { Rng, hashSeed, irange } from './rng'
@@ -318,6 +318,8 @@ function fire(state: GameState, actor: Player): StepResult {
   const weapon = shooter.weapon
   const before = next.players.map((p) => ({ hp: p.hp + p.shield, alive: p.alive }))
   const { flights, events } = resolveShot(next, shooter, weapon)
+  // v2.4: los terrones sueltos caen (antes que los líquidos: lo que cae al agua la desplaza y el flujo la reparte)
+  collapseAfterShot(next, events, shotEnd(events, flights) + COLLAPSE_DELAY, true)
   // v4: los líquidos corren y se asientan después de los impactos (y lo que eso derrumbe o queme)
   settleLiquids(next, events, flights)
   // v3: los que cayeron al abismo con este tiro. La vida que perdieron no es daño que se cobre;
@@ -459,7 +461,7 @@ function shotEnd(events: GameEvent[], flights: Flight[]): number {
   for (const e of events) {
     if ('t' in e && typeof e.t === 'number') end = Math.max(end, e.t)
     // v4: el flujo dura un parche cada dt
-    if (e.type === 'flow') end = Math.max(end, e.t + Math.max(0, e.patches.length - 1) * e.dt)
+    if (e.type === 'flow' || e.type === 'collapse') end = Math.max(end, e.t + Math.max(0, e.patches.length - 1) * e.dt) // v2.4: y el derrumbe
   }
   return end
 }

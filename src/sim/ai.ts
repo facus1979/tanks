@@ -2,7 +2,7 @@ import { fly, muzzle, skylineOf } from './ballistics'
 import { tankTilt } from './tilt'
 import { applyCommand } from './game'
 import { flowLiquids } from './flow'
-import { blastDamage, inLava, submerged } from './physics'
+import { blastDamage, collapseAfterShot, inLava, submerged } from './physics'
 import { columnTop, hasLiquid, takeDirty } from './terrain'
 import { Rng, hashSeed } from './rng'
 import { SLIDE_MAX } from './slide'
@@ -629,6 +629,8 @@ function simulate(state: GameState, c: Candidate, prio?: Map<number, number>): n
   actor.power = c.power
   const before = s.players.map((p) => ({ hp: p.hp, alive: p.alive, x: p.x, y: p.y }))
   const { events } = resolveShot(s, actor, c.weapon)
+  // v2.4: el derrumbe, con el mismo resolver que fire (sin parches): un terrón que cae sobre un rival lo aplasta
+  collapseAfterShot(s, events, 0, false)
   // v4: si el tiro tocó cerca de lava, la deja correr (como fire) y el rival que quede en ella cuenta
   // como golpeado por lo que la lava le va a quemar. El agua no daña: no hace falta simularla.
   // Tope de flujos por turno (flowBudget): pasado ese, la estimación sigue sin flujo.
