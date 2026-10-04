@@ -159,12 +159,9 @@ export function collapseTerrain(t: Terrain, opts: CollapseOptions): CollapseRepo
       if (y > 0) push(i - w)
       if (y < h - 1) push(i + w)
     }
-    if (ok) {
-      // todo lo visto (y lo que quedó en la pila) es del mismo componente: apoyado
-      for (let k = 0; k < sp; k++) cells.push(stack[k])
-      return null
-    }
-    return cells
+    // apoyado: todo lo visto (también lo que quedó en la pila) queda marcado con este componente, así otra
+    // búsqueda que lo toque sabe que está apoyada (ver old)
+    return ok ? null : cells
     function push(j: number): void {
       if (!SOLID[front[j]]) return
       if (seen[j] === call) {
