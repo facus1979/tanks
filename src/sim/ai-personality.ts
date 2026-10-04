@@ -49,7 +49,7 @@ export interface Traits {
 const NEUTRAL: Traits = { cost: 1, wander: 0.15, steps: [-20, 20], moveCost: 0, hazard: 1, props: 0.5, far: 0 }
 
 export const TRAITS: Record<Personality, Traits> = {
-  aggressive: { cost: 0.35, wander: 0.35, steps: [-40, -20, 20, 40], moveCost: 0, hazard: 1, props: 0.3, far: -0.15 },
+  aggressive: { cost: 0.35, wander: 0.3, steps: [-30, 30], moveCost: 0, hazard: 1, props: 0.3, far: -0.15 },
   sniper: { cost: 1.7, costOf: { normal: 1 }, wander: 0.03, steps: [-20, 20], moveCost: 3, hazard: 1, props: 0.5, far: 0.25 },
   digger: { cost: 0.9, costOf: { digger: 0.4 }, wander: 0.1, steps: [-20, 20], moveCost: 0.5, hazard: 1, props: 0.5, far: 0 },
   opportunist: { cost: 0.8, wander: 0.15, steps: [-30, -15, 15, 30], moveCost: 0, hazard: 2.2, props: 1.6, far: 0 },

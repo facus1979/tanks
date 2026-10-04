@@ -1740,6 +1740,9 @@ function beamDeck(b: Build, cx: number): void {
 
 export const SNOW_DEPTH: [number, number] = [5, 9]
 export const ICE_CRUST = 5
+// Chico: cuánto más alto es el cerro nevado que el de v1 (con más, las faldas pasan los 75° junto a la rampa
+// del tanque de la cima y caminando desde el pad resbala)
+const SNOW_HILL = 10
 
 // Cabaña de madera con techo de vigas y nieve encima, apoyada en la fila más alta de su ancho (cimiento
 // de piedra hasta el suelo). x: columna izquierda, w: ancho. Va después de copiar la pared de fondo.
@@ -1940,7 +1943,7 @@ function tankFloorAt(t: Terrain, x: number): number {
 // Mapa Chico de nieve (ver arriba). Usa layout y surface de v1 con el cerro más alto.
 function singleSnow(rng: Rng, count: number): Generated {
   const L = layout('snow', rng)
-  L.hillH += 34 // cerro nevado: más alto que el de los otros biomas
+  L.hillH += SNOW_HILL // cerro nevado: más alto que el de los otros biomas
   const t = createTerrain(W, H)
   const surf: number[] = []
   for (let x = 0; x < W; x++) surf[x] = surface(L, 'snow', x)
@@ -2022,7 +2025,9 @@ function frozenLake(t: Terrain, L: Layout, rng: Rng, spawns: number[]): Basin | 
   return { kind: 'water', x0: b0, x1: b1, level }
 }
 
-const CREVASSE_GAP = 16
+// Distancia de la grieta a la caja de los tanques y al lago. Con menos, caminar 30 px desde el pad de la cima
+// del cerro llega a la pared de la grieta y resbala adentro. Con 4 tanques en Chico no queda lugar: sin grieta.
+const CREVASSE_GAP = 32
 // Grieta de Chico: un tajo de 32-40 px (más ancho que un tanque: el que cae no se engancha) hasta cerca del
 // fondo, con paredes de hielo, a CREVASSE_GAP px o más de la caja de los tanques y del lago. Sin lugar, no hay grieta.
 function crevasse(t: Terrain, L: Layout, rng: Rng, spawns: number[], lake: Basin | null): void {

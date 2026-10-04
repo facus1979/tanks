@@ -3509,20 +3509,22 @@ const missShot = (s: GameState) => shoot(s, 'normal', s.players[s.current].x < s
         if (t.back[(p.y - 1) * t.w + Math.round(p.x)] === SNOW && t.front[(p.y - 1) * t.w + Math.round(p.x) - TANK_HALF_W - 1] === SNOW) sunk++
         check(snowSinkAt(t, p.x, p.y) === 0, `v3 nieve: un tanque nace sin hundirse ${size}/${seed}`)
       }
-      // Chico: grieta (back de hielo bajo la superficie) y cabaña
+      // Chico con 3 tanques: grieta (aire con pared de fondo de hielo bajo la superficie). Con 4 no entra: la
+      // grieta va a 32 px o más de los pads (más cerca, caminar desde el pad la hace resbalar adentro)
       if (size === 'small') {
+        const g3 = generate('snow', new Rng(roundSeed(seed, 1)), 3).terrain
         let crev = false
-        for (let x = 0; x < t.w && !crev; x++) crev = t.front[400 * t.w + x] === AIR && t.back[400 * t.w + x] === ICE && columnGround(t, x) > 400
+        for (let x = 0; x < g3.w && !crev; x++) crev = g3.front[400 * g3.w + x] === AIR && g3.back[400 * g3.w + x] === ICE && columnGround(g3, x) > 400
         if (crev) crevasses++
       }
       if (count(s, WOOD) > 150) cabins++
     }
   }
-  console.log(`v3 nieve: ${maps} mapas, nieve ${(cells.snow / maps).toFixed(0)} y hielo ${(cells.ice / maps).toFixed(0)} celdas por mapa, lagos ${frozenCols} columnas congeladas (${openCols} abiertas), tanques hundidos ${sunk}/${tanks}, grietas en Chico ${crevasses}/8, con cabaña ${cabins}/${maps}`)
+  console.log(`v3 nieve: ${maps} mapas, nieve ${(cells.snow / maps).toFixed(0)} y hielo ${(cells.ice / maps).toFixed(0)} celdas por mapa, lagos ${frozenCols} columnas congeladas (${openCols} abiertas), tanques hundidos ${sunk}/${tanks}, grietas en Chico con 3 tanques ${crevasses}/8, con cabaña ${cabins}/${maps}`)
   check(openCols === 0 && frozenCols > 0, `v3 nieve: lagos sin congelar (${openCols} columnas)`)
   check(sunk >= tanks * 0.6, `v3 nieve: pocos tanques hundidos al nacer (${sunk}/${tanks})`)
   check(cabins === maps, `v3 nieve: mapas sin cabaña (${cabins}/${maps})`)
-  check(crevasses >= 3, `v3 nieve: pocas grietas en Chico (${crevasses}/8)`)
+  check(crevasses >= 5, `v3 nieve: pocas grietas en Chico (${crevasses}/8)`)
   // determinismo del generador de nieve
   for (const size of MAP_SIZE_ORDER) {
     const a = createMatch(mk(3, 'normal', 'snow', 77, 1, 0, size))
