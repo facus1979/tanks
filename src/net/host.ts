@@ -14,7 +14,7 @@
 //
 //
 // v3 perfil (ver ./profile para las reglas de nombre y color):
-//   room.setProfile({ name, crew, color })   // el del casillero del anfitrión (solo en el lobby)
+//   room.setProfile({ name, crew, color })   // el del casillero del anfitrión (solo en el lobby); alias room.profile
 //   room.setPersonality(slot, p | null)      // personalidad de un casillero de IA (null = la sortea la sim)
 //   Los clientes mandan 'profile'; el anfitrión lo aplica a su casillero y lo refleja en el LobbyState.
 //   El perfil del peer se recuerda: si cambia de casillero (claim) se lo lleva.
@@ -209,6 +209,11 @@ export class HostRoom {
     const color = this.applyProfile(slot, p, 'host')
     this.lobbyChanged()
     return color
+  }
+
+  // v3: el mismo nombre que en ClientRoom (el flujo llama room.profile en los dos roles).
+  profile(p: ProfileInput): number | null {
+    return this.setProfile(p)
   }
 
   // v3: personalidad de un casillero de IA (null = que la sortee la sim con la seed). Solo en el lobby.

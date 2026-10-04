@@ -7,7 +7,7 @@
 //   hooks.apply(cmd)                      // log del anfitrión, en orden y sin huecos
 //   room.input(cmd)                       // pedido al anfitrión (vuelve por hooks.apply si lo acepta)
 //   room.aimLive(id, angle, power)        // vista previa (limitada a ~15/s); input(fire) la vacía antes
-//   room.profile(name, crew, color)       // v3: perfil del casillero (solo en el lobby; se reenvía solo al
+//   room.profile({ name, crew, color })   // v3: perfil del casillero (solo en el lobby; se reenvía solo al
 //                                         // reconectar). El anfitrión lo sanea y puede cambiar el color
 //                                         // (ver ./profile): el que vale es el del lobby.
 //
@@ -147,8 +147,10 @@ export class ClientRoom {
     this.transport.send(HOST_ID, { t: 'input', command })
   }
 
-  // v3: perfil del casillero que ocupa (o del próximo que tome). Solo en el lobby.
-  profile(name: string, crew: CrewId, color: number): void {
+  // v3: perfil del casillero que ocupa (o del próximo que tome). Solo en el lobby. El flujo lo llama con
+  // un objeto ({ name, crew, color }); también acepta los tres argumentos sueltos.
+  profile(p: { name: string; crew: CrewId; color: number } | string, crewArg?: CrewId, colorArg?: number): void {
+    const { name, crew, color } = typeof p === 'string' ? { name: p, crew: crewArg as CrewId, color: colorArg as number } : p
     this.myProfile = { name, crew, color }
     if (!this.started) this.transport.send(HOST_ID, { t: 'profile', name, crew, color })
   }
