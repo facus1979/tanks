@@ -8,7 +8,8 @@
 // hay una textura por fase (16), como los focos; para radios grandes se usa una sola fase (la trama queda
 // corrida, no se nota en una luz grande) y el radio se redondea a pasos de 4 u 8 px para no rehacer texturas
 // cuando la cámara hace zoom.
-import { BufferImageSource, Container, Sprite, Texture } from 'pixi.js'
+import { Container, Sprite, type Texture } from 'pixi.js'
+import { bufferTexture } from './gpu'
 import { Raster } from './raster'
 
 const PHASED_R = 64 // hasta este radio (pixels del buffer) la textura respeta la fase de la trama
@@ -21,19 +22,6 @@ interface LightTex {
   R: number // radio con que se hizo la textura
   area: number
   used: number // último frame en que se usó
-}
-
-export function bufferTexture(r: Raster): Texture {
-  const source = new BufferImageSource({
-    resource: r.bytes,
-    width: r.w,
-    height: r.h,
-    format: 'rgba8unorm',
-    alphaMode: 'premultiply-alpha-on-upload',
-    scaleMode: 'nearest',
-    autoGenerateMipmaps: false,
-  })
-  return new Texture({ source })
 }
 
 // Misma API que Raster para las luces (setView, clear, light, dirty), así el código de efectos no cambia:

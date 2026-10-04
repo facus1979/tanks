@@ -189,6 +189,7 @@ export class PixiRenderer implements GameRenderer {
     host.appendChild(this.app.canvas)
     this.art = await loadArt()
 
+    installRasterUpload(this.app.renderer)
     // v3: fx se sube directo desde sus bytes y las luces son sprites aditivos (fx.light.root)
     this.fxSprite.texture = this.fx.fxTexture
     this.fxSprite.visible = false

@@ -8,7 +8,8 @@ import { AIR, STONE, WATER, WEAPONS } from '../../sim/types'
 import { DEBRIS_COLORS, OUT } from './fallback'
 import { LIQ, solidCell } from './liquids'
 import type { Texture } from 'pixi.js'
-import { LightLayer, bufferTexture } from './lights'
+import { rasterTexture, uploadRect, type RasterSource } from './gpu'
+import { LightLayer } from './lights'
 import { Raster, Rng, bayer, mix } from './raster'
 
 const FIRE = [0xfffbe2, 0xffe27a, 0xffb43e, 0xf77a28, 0xd24a1c, 0x8a2814]
@@ -243,8 +244,8 @@ export class Fx {
   // v3: las luces son sprites aditivos en la GPU (lights.ts); fx.light.light(...) sigue igual que con el Raster.
   readonly light: LightLayer
   // v3: textura de GPU que se llena directo desde los bytes de fx (sin canvas ni putImageData), ver present().
-  readonly fxTexture: Texture
-  private fxShown = false
+  readonly fxTexture: Texture<RasterSource>
+  private shown = [0, 0, -1, -1] // caja de fx subida el frame anterior (hay que borrarla si hoy no se pinta)
   shake = 0
   flash = 0
   flashColor = 0xfff1c9
@@ -276,15 +277,24 @@ export class Fx {
   constructor(w: number, h: number) {
     this.fx = new Raster(w, h)
     this.light = new LightLayer(w, h)
-    this.fxTexture = bufferTexture(this.fx)
+    this.fxTexture = rasterTexture(this.fx)
   }
 
-  // Sube a la GPU lo que se dibujó en fx (si hay algo o si hay que borrar lo del frame anterior).
-  // Devuelve si el sprite de efectos tiene que verse.
+  // Sube a la GPU lo que se dibujó en fx: la caja pintada en este frame unida a la del anterior (que quedó
+  // borrada en los bytes). Devuelve si el sprite de efectos tiene que verse.
   present(): boolean {
     const fx = this.fx
-    if (fx.dirty || this.fxShown) this.fxTexture.source.update()
-    this.fxShown = fx.dirty
+    const p = this.shown
+    const has = fx.bx1 >= fx.bx0
+    if (has || p[2] >= p[0]) {
+      const x0 = has ? Math.min(fx.bx0, p[2] >= p[0] ? p[0] : fx.bx0) : p[0]
+      const y0 = has ? Math.min(fx.by0, p[2] >= p[0] ? p[1] : fx.by0) : p[1]
+      const x1 = Math.max(fx.bx1, p[2])
+      const y1 = Math.max(fx.by1, p[3])
+      uploadRect(this.fxTexture, x0, y0, x1, y1)
+    }
+    if (has) this.shown = [fx.bx0, fx.by0, fx.bx1, fx.by1]
+    else this.shown = [0, 0, -1, -1]
     return fx.dirty
   }
 

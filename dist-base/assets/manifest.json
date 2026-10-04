@@ -1,0 +1,398 @@
+{
+  "version": 2,
+  "tank": {
+    "bodies": [
+      "tank/body-0.png",
+      "tank/body-1.png",
+      "tank/body-2.png",
+      "tank/body-3.png",
+      "tank/body-4.png",
+      "tank/body-5.png",
+      "tank/body-6.png",
+      "tank/body-7.png"
+    ],
+    "wreck": "tank/wreck.png",
+    "barrels": [
+      {
+        "file": "tank/barrel-0.png",
+        "cell": {
+          "w": 17,
+          "h": 17
+        },
+        "frames": 19
+      },
+      {
+        "file": "tank/barrel-1.png",
+        "cell": {
+          "w": 17,
+          "h": 17
+        },
+        "frames": 19
+      },
+      {
+        "file": "tank/barrel-2.png",
+        "cell": {
+          "w": 17,
+          "h": 17
+        },
+        "frames": 19
+      },
+      {
+        "file": "tank/barrel-3.png",
+        "cell": {
+          "w": 17,
+          "h": 17
+        },
+        "frames": 19
+      },
+      {
+        "file": "tank/barrel-4.png",
+        "cell": {
+          "w": 17,
+          "h": 17
+        },
+        "frames": 19
+      },
+      {
+        "file": "tank/barrel-5.png",
+        "cell": {
+          "w": 17,
+          "h": 17
+        },
+        "frames": 19
+      },
+      {
+        "file": "tank/barrel-6.png",
+        "cell": {
+          "w": 17,
+          "h": 17
+        },
+        "frames": 19
+      },
+      {
+        "file": "tank/barrel-7.png",
+        "cell": {
+          "w": 17,
+          "h": 17
+        },
+        "frames": 19
+      }
+    ],
+    "barrelPivot": {
+      "x": 2,
+      "y": 14
+    },
+    "pivotInBody": {
+      "x": 19,
+      "y": 3
+    },
+    "crewInBody": {
+      "x": 8,
+      "y": -11
+    },
+    "antennaInBody": {
+      "x": 9,
+      "y": 0
+    },
+    "treadFrames": [
+      {
+        "file": "tank/treads-0.png",
+        "cell": {
+          "w": 28,
+          "h": 6
+        },
+        "frames": 4
+      },
+      {
+        "file": "tank/treads-1.png",
+        "cell": {
+          "w": 28,
+          "h": 6
+        },
+        "frames": 4
+      },
+      {
+        "file": "tank/treads-2.png",
+        "cell": {
+          "w": 28,
+          "h": 6
+        },
+        "frames": 4
+      },
+      {
+        "file": "tank/treads-3.png",
+        "cell": {
+          "w": 28,
+          "h": 6
+        },
+        "frames": 4
+      },
+      {
+        "file": "tank/treads-4.png",
+        "cell": {
+          "w": 28,
+          "h": 6
+        },
+        "frames": 4
+      },
+      {
+        "file": "tank/treads-5.png",
+        "cell": {
+          "w": 28,
+          "h": 6
+        },
+        "frames": 4
+      },
+      {
+        "file": "tank/treads-6.png",
+        "cell": {
+          "w": 28,
+          "h": 6
+        },
+        "frames": 4
+      },
+      {
+        "file": "tank/treads-7.png",
+        "cell": {
+          "w": 28,
+          "h": 6
+        },
+        "frames": 4
+      }
+    ]
+  },
+  "crews": {
+    "bandana": {
+      "sprite": "crew/bandana.png",
+      "portrait": "crew/bandana-portrait.png"
+    },
+    "sarge": {
+      "sprite": "crew/sarge.png",
+      "portrait": "crew/sarge-portrait.png"
+    },
+    "rookie": {
+      "sprite": "crew/rookie.png",
+      "portrait": "crew/rookie-portrait.png"
+    },
+    "desert": {
+      "sprite": "crew/desert.png",
+      "portrait": "crew/desert-portrait.png"
+    },
+    "commando": {
+      "sprite": "crew/commando.png",
+      "portrait": "crew/commando-portrait.png"
+    },
+    "goggles": {
+      "sprite": "crew/goggles.png",
+      "portrait": "crew/goggles-portrait.png"
+    },
+    "pilot": {
+      "sprite": "crew/pilot.png",
+      "portrait": "crew/pilot-portrait.png"
+    },
+    "colonel": {
+      "sprite": "crew/colonel.png",
+      "portrait": "crew/colonel-portrait.png"
+    }
+  },
+  "materials": {
+    "0": {
+      "file": "materials/air.png",
+      "w": 8,
+      "h": 8
+    },
+    "1": {
+      "file": "materials/dirt.png",
+      "w": 252,
+      "h": 132
+    },
+    "2": {
+      "file": "materials/stone.png",
+      "w": 256,
+      "h": 126
+    },
+    "3": {
+      "file": "materials/brick.png",
+      "w": 252,
+      "h": 120
+    },
+    "4": {
+      "file": "materials/wood.png",
+      "w": 260,
+      "h": 104
+    },
+    "5": {
+      "file": "materials/slat.png",
+      "w": 256,
+      "h": 128
+    },
+    "6": {
+      "file": "materials/beam.png",
+      "w": 256,
+      "h": 65
+    },
+    "7": {
+      "file": "materials/post.png",
+      "w": 128,
+      "h": 128
+    },
+    "8": {
+      "file": "materials/metal.png",
+      "w": 256,
+      "h": 128
+    },
+    "9": {
+      "file": "materials/bedrock.png",
+      "w": 256,
+      "h": 128
+    }
+  },
+  "backgrounds": {
+    "forest": {
+      "layers": [
+        "bg/forest-0.png",
+        "bg/forest-1.png",
+        "bg/forest-2.png",
+        "bg/forest-3.png",
+        "bg/forest-4.png"
+      ],
+      "fog": 15785928,
+      "tint": 16773858,
+      "repeat": [
+        "mirror",
+        "wrap",
+        "wrap",
+        "wrap",
+        "wrap"
+      ]
+    },
+    "jungle": {
+      "layers": [
+        "bg/jungle-0.png",
+        "bg/jungle-1.png",
+        "bg/jungle-2.png",
+        "bg/jungle-3.png",
+        "bg/jungle-4.png"
+      ],
+      "fog": 13625062,
+      "tint": 15398655,
+      "repeat": [
+        "mirror",
+        "wrap",
+        "wrap",
+        "wrap",
+        "wrap"
+      ]
+    },
+    "industrial": {
+      "layers": [
+        "bg/industrial-0.png",
+        "bg/industrial-1.png",
+        "bg/industrial-2.png",
+        "bg/industrial-3.png",
+        "bg/industrial-4.png"
+      ],
+      "fog": 15771752,
+      "tint": 16764056,
+      "repeat": [
+        "mirror",
+        "wrap",
+        "wrap",
+        "wrap",
+        "wrap"
+      ]
+    }
+  },
+  "biomePalette": {
+    "forest": {
+      "grass": [
+        4016684,
+        6121024,
+        9077846
+      ],
+      "moss": 5069366,
+      "rim": 4601130,
+      "ambient": 16777215
+    },
+    "jungle": {
+      "grass": [
+        2379818,
+        3830836,
+        6989898
+      ],
+      "moss": 3828270,
+      "rim": 4206634,
+      "ambient": 15267060
+    },
+    "industrial": {
+      "grass": [
+        4864548,
+        6968368,
+        10123844
+      ],
+      "moss": 5917226,
+      "rim": 5125670,
+      "ambient": 16770764
+    }
+  },
+  "props": {
+    "barrel": "props/barrel.png",
+    "crate": "props/crate.png",
+    "ladderTile": "props/ladder.png",
+    "lamp": "props/lamp.png",
+    "flag": {
+      "file": "props/flag.png",
+      "cell": {
+        "w": 22,
+        "h": 38
+      },
+      "frames": 6
+    },
+    "windsock": {
+      "file": "props/windsock.png",
+      "cell": {
+        "w": 33,
+        "h": 30
+      },
+      "frames": 7
+    },
+    "parachute": "props/parachute.png"
+  },
+  "ui": {
+    "bubbleAlert": "ui/bubble-alert.png",
+    "bubbleAsk": "ui/bubble-ask.png",
+    "tag": "ui/tag.png",
+    "font": {
+      "file": "ui/font.png",
+      "glyphW": 6,
+      "glyphH": 6,
+      "chars": "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,:!?-/%+ "
+    },
+    "arrow": "ui/arrow.png",
+    "pip": {
+      "file": "ui/pip.png",
+      "cell": {
+        "w": 4,
+        "h": 5
+      },
+      "frames": 2
+    },
+    "weaponIcons": {
+      "file": "ui/weapons.png",
+      "cell": {
+        "w": 12,
+        "h": 12
+      },
+      "frames": 8
+    },
+    "itemIcons": {
+      "file": "ui/items.png",
+      "cell": {
+        "w": 12,
+        "h": 12
+      },
+      "frames": 5
+    },
+    "logo": "ui/logo.png"
+  }
+}
