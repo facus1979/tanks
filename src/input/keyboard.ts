@@ -34,11 +34,8 @@ export class Keyboard {
   }
 }
 
-// Índice 0-9 del arma elegida con 1-9 y 0 (v3: 9 y 0 son la novena y la décima del orden de WEAPON_ORDER), o -1.
+// Índice 0-7 de la columna elegida con 1-8, o -1 (v3: el arma la decide weaponForKey de src/ui/arsenal.ts).
 export function weaponSlot(pressed: Set<string>): number {
-  for (let i = 0; i < 10; i++) {
-    const d = (i + 1) % 10
-    if (pressed.has(`Digit${d}`) || pressed.has(`Numpad${d}`)) return i
-  }
+  for (let i = 0; i < 8; i++) if (pressed.has(`Digit${i + 1}`) || pressed.has(`Numpad${i + 1}`)) return i
   return -1
 }

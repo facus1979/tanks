@@ -1,7 +1,7 @@
 // Online: conecta HostRoom / ClientRoom (src/net) con la sesión. Sin vistas: main.ts muestra el
 // lobby con lobbyModel() y el HUD con hudNet().
 import { decodeState, encodeState, hashState } from '../sim'
-import type { Command, MatchConfig } from '../sim/types'
+import type { Command, MatchConfig, Personality } from '../sim/types'
 import { ClientRoom, HostRoom, createTransport, roomLink } from '../net'
 import type { LinkStatus, LobbyState, Role, TransportKind } from '../net'
 import type { HudNet, LobbyModel } from '../ui/types'
@@ -15,8 +15,10 @@ import { loadProfile, type Profile } from './profile'
 // - steerLive(playerId, x, y): manda la posición en vivo del misil que dirige este dispositivo (mensaje
 //   'steerLive'; el anfitrión la reparte a los demás).
 // - hooks.onSteerLive(playerId, x, y): llegó la posición en vivo del misil de otro.
+// - setPersonality(slot, p): anfitrión, personalidad de una IA de la sala (null = al azar).
 interface RoomV3 {
   profile?: (p: Profile) => void
+  setPersonality?: (slot: number, personality: Personality | null) => void
   steerLive?: (playerId: number, x: number, y: number) => void
 }
 
@@ -274,6 +276,14 @@ export class Online {
     } catch (err) {
       console.warn('online: no se pudo mandar el perfil', err)
     }
+  }
+
+  // v3: el anfitrión elige la personalidad de una IA de la sala (null = al azar).
+  setPersonality(slot: number, personality: Personality | null): void {
+    if (!this.host) return
+    const room = this.room()
+    if (room?.setPersonality) room.setPersonality(slot, personality)
+    else console.warn('online: la sala todavía no sabe elegir la personalidad de la IA')
   }
 
   private room(): RoomV3 | null {

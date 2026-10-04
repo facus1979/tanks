@@ -9,11 +9,12 @@ import { ITEM_CURSOR_SPEED, Session, abyssLostAt, isAbyssFall } from './game/ses
 import { TargetOverlay } from './input/target'
 import type { NetSeat } from './game/session'
 import { Online } from './game/online'
-import { rememberProfile, withProfile } from './game/profile'
+import { rememberProfile, saveProfile, withProfile } from './game/profile'
 import { normalizeCode, readNetParams } from './net'
 import { createOnlineMenuView } from './ui/online'
 import { createLobbyView } from './ui/lobby'
 import { Hud } from './ui/hud'
+import { ITEM_CODES, weaponForKey } from './ui/arsenal'
 import { loadUiAssets } from './ui/assets'
 import { createMenuView, refreshLabels } from './ui/menu'
 import { createTitleView } from './ui/title'
@@ -75,17 +76,9 @@ const netStart = demo || uitest || playParam != null ? null : net.host ? 'host' 
 // autotest: cada humano apunta con la IA difícil, así la partida de prueba termina rápido
 const AUTO_SHOT = { delay: 0.8 }
 
-// v3: J jetpack, E teletransporte (los dos piden destino), N ancla, V deflector
-const ITEM_KEYS: Record<string, ItemId> = {
-  KeyQ: 'shield',
-  KeyF: 'fuel',
-  KeyR: 'repair',
-  KeyT: 'tracer',
-  KeyJ: 'jetpack',
-  KeyE: 'teleport',
-  KeyN: 'anchor',
-  KeyV: 'deflector',
-}
+// Teclas de los ítems (v3, de src/ui/arsenal.ts): Q escudo, F combustible, R reparación, T trazador,
+// J jetpack y K teletransporte (los dos piden destino), N ancla, E deflector.
+const ITEM_KEYS: Record<string, ItemId> = ITEM_CODES
 // Cámara (v2): Z / X panean a la izquierda / derecha, C recentra en el tanque del turno.
 // También: mouse contra el borde, arrastre con el botón del medio (o el izquierdo fuera del tanque y
 // del tablero / controles del HUD), stick derecho del gamepad (R3 recentra), dos dedos en táctil (◎ recentra),
@@ -298,6 +291,19 @@ function onCurrentTank(clientX: number, clientY: number): boolean {
   const w = renderer.screenToWorld(clientX, clientY)
   return Math.abs(w.x - p.x) <= TANK_HALF_W + 4 && w.y >= p.y - TANK_H - 10 && w.y <= p.y + 4
 }
+
+// v3 perfil en la sala: el propio (nombre, tripulante, color) se guarda en el navegador y viaja como
+// 'profile'; el anfitrión elige la personalidad de cada IA
+lobbyView.onProfile((p) => {
+  if (!online || screen !== 'lobby') return
+  saveProfile(p)
+  online.sendProfile(p, true)
+})
+lobbyView.onPersonality((slot, personality) => {
+  if (!online || screen !== 'lobby') return
+  sfx.click()
+  online.setPersonality(slot, personality)
+})
 
 menu.onOnline(() => {
   if (screen !== 'menu') return
@@ -802,11 +808,16 @@ function handleInput(dt: number, pressed: Set<string>, padState: ReturnType<Game
   const right = keys.isDown('KeyD') || padState?.move === 1 || moveHold?.dir === 1
   if (left !== right) session.move(left ? -1 : 1, dt)
   else session.stopMove()
-  // v3: 1 a 9 y 0 eligen las primeras 10 del orden de la barra; Tab / Shift+Tab y la rueda recorren las 16
+  // v3 (barra de 2 filas de 8, ver src/ui/arsenal.ts): N elige la columna N y, si ya estaba, alterna con la
+  // de abajo; Shift+N, la de abajo directo. Tab / Shift+Tab y la rueda recorren las 16.
   const slot = weaponSlot(pressed)
-  if (slot >= 0 && slot < WEAPON_ORDER.length) {
-    sfx.click()
-    session.select(WEAPON_ORDER[slot])
+  const cur = session.state?.players[session.state.current]
+  if (slot >= 0 && cur) {
+    const w = weaponForKey(slot + 1, cur.weapon, keys.isDown('ShiftLeft') || keys.isDown('ShiftRight'), cur.ammo)
+    if (w) {
+      sfx.click()
+      session.select(w)
+    }
   }
   if (pressed.has('Tab')) {
     sfx.click()

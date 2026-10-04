@@ -20,7 +20,7 @@ import type {
   Vec2,
   WeaponId,
 } from '../sim/types'
-import { GUIDE_TIME, ITEM_ORDER, JETPACK_RANGE, LAVA, MAX_PLAYERS_BY_SIZE, SHOP, STEER_TICK, SUDDEN_DEATH_CALM, TANK_H, TANK_W, TELEPORT_RANGE, WATER, WEAPONS, fuelFor } from '../sim/types'
+import { GUIDE_TIME, ITEM_ORDER, TANK_COLORS, JETPACK_RANGE, LAVA, MAX_PLAYERS_BY_SIZE, SHOP, STEER_TICK, SUDDEN_DEATH_CALM, TANK_H, TANK_W, TELEPORT_RANGE, WATER, WEAPONS, fuelFor } from '../sim/types'
 import { AIM_PREVIEW_T, HUD_BAR_H, VIEW_W, type Camera, type RenderFrame } from '../render/types'
 import type { HudModel, HudSide } from '../ui/hud'
 import type { BannerModel, HudExtras, HudNet, MinimapModel, ScoreModel, ShopModel } from '../ui/types'
@@ -716,6 +716,14 @@ export class Session {
     return true
   }
 
+  // v3 perfil: color elegido para el casillero (SlotConfig.color, índice en TANK_COLORS) para los modelos de
+  // las vistas (tabla, cartel de turno, tienda, HUD, minimapa). Si la sim ya lo aplica a Player.color da lo
+  // mismo; si no lo trae, queda el de la sim. El id del jugador es su índice de casillero.
+  private colorOf(p: Player): number {
+    const c = this.config?.slots[p.id]?.color
+    return typeof c === 'number' && Number.isInteger(c) && c >= 0 && c < TANK_COLORS.length ? TANK_COLORS[c] : p.color
+  }
+
   private turnKey(s: GameState): string {
     return `${this.matchId}:${s.turn}:${s.current}`
   }
@@ -966,7 +974,7 @@ export class Session {
     return {
       playerId: p.id,
       name: p.name,
-      color: p.color,
+      color: this.colorOf(p),
       crew: p.crew,
       money: p.money,
       round: Math.min(s.rounds, s.round + 1),
@@ -1020,7 +1028,7 @@ export class Session {
       rows: s.players.map((p) => ({
         id: p.id,
         name: p.name,
-        color: p.color,
+        color: this.colorOf(p),
         crew: p.crew,
         alive: p.alive,
         roundsWon: p.roundsWon ?? 0,
@@ -1049,7 +1057,7 @@ export class Session {
     const p = this.bannerFor()
     const s = this.state
     if (!p || !s) return null
-    return { name: p.name, color: p.color, crew: p.crew, round: s.round, rounds: s.rounds }
+    return { name: p.name, color: this.colorOf(p), crew: p.crew, round: s.round, rounds: s.rounds }
   }
 
   ackBanner(): void {
@@ -1633,14 +1641,14 @@ export class Session {
     const lastImpacts: MinimapModel['lastImpacts'] = []
     for (const [playerId, at] of this.lastImpacts) {
       const p = players.find((q) => q.id === playerId)
-      if (p) lastImpacts.push({ playerId, x: at.x, y: at.y, color: p.color })
+      if (p) lastImpacts.push({ playerId, x: at.x, y: at.y, color: this.colorOf(p) })
     }
     return {
       terrain,
       terrainVersion: this.terrainVersion,
       view: this.cam.view(),
       // el perdido en un abismo queda marcado en el fondo del mapa
-      tanks: players.map((p, i) => ({ id: p.id, x: p.x, y: Math.min(p.y, terrain.h), color: p.color, alive: p.alive, current: i === currentIndex })),
+      tanks: players.map((p, i) => ({ id: p.id, x: p.x, y: Math.min(p.y, terrain.h), color: this.colorOf(p), alive: p.alive, current: i === currentIndex })),
       projectiles: pb ? this.projectiles(pb) : this.guide && this.state?.phase === 'guiding' ? [samplePath(this.guide.pts, this.guide.t)] : [],
       lastImpacts,
       lava: this.lavaView(),
@@ -1680,7 +1688,7 @@ export class Session {
         ? {
             name: p.name,
             tag: `P${p.id + 1}`,
-            color: p.color,
+            color: this.colorOf(p),
             crew: p.crew,
             hp: Math.round(p.hp),
             alive: p.alive,
