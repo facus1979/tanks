@@ -3852,9 +3852,10 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
   only(sa, 'acid')
   sa.players[1].x = 600
   // búnker de metal sobre P1
-  fillRect(sa.terrain, 576, 262, 624, 268, METAL, 'both')
-  fillRect(sa.terrain, 576, 262, 580, 299, METAL, 'both')
-  fillRect(sa.terrain, 620, 262, 624, 299, METAL, 'both')
+  // paredes y techo de 15 px: más que el radio de la normal (el escudo de metal la frena entera)
+  fillRect(sa.terrain, 571, 250, 629, 264, METAL, 'both')
+  fillRect(sa.terrain, 571, 250, 585, 299, METAL, 'both')
+  fillRect(sa.terrain, 615, 250, 629, 299, METAL, 'both')
   const pa = chooseShot(sa, 'hard')
   check(pa.weapon === 'acid', `IA: ácido contra el búnker (${pa.weapon})`)
   const sx = pitMap()

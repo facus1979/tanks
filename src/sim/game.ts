@@ -340,7 +340,8 @@ function useItem(state: GameState, item: ItemId, target?: Vec2): StepResult {
 
 // v3 jetpack y teletransporte. target: el punto del piso donde apoyar el tanque (como Player.x / Player.y).
 // - Rango: a lo sumo JETPACK_RANGE (TELEPORT_RANGE) px en línea recta desde el piso del tanque al target.
-// - Destino (landingFor): x = target.x (dentro del mapa); si hay piso entre MAX_CLIMB px arriba y abajo de
+// - Destino (landingFor): x = target.x (dentro del mapa); un target metido en el terreno (hasta JUMP_SNAP px)
+//   sube a la superficie; si hay piso entre MAX_CLIMB px arriba y abajo de
 //   target.y, se apoya ahí; si no, queda en el aire en target.y y cae (daño de caída, paracaídas, abismo, agua).
 //   Si la caja del tanque en el destino choca con terreno u otro tanque, el comando no hace nada.
 // - Jetpack: vuela en arco (JET_LIFT px por encima del más alto de los dos extremos) a JET_SPEED px/s; si el
@@ -348,13 +349,17 @@ function useItem(state: GameState, item: ItemId, target?: Vec2): StepResult {
 //   (piso del tanque cada PATH_DT). Teletransporte: evento 'teleport' (from / to); no mira lo que hay en medio.
 // - Una mina cerca del destino explota (t: fin del salto). No gastan el turno ni combustible.
 export const JET_LIFT = 36
+export const JUMP_SNAP = 2 * TANK_H
 export const JET_SPEED = 170
 export function landingFor(state: GameState, id: number, target: Vec2): Vec2 | null {
   const t = state.terrain
   if (!Number.isFinite(target.x) || !Number.isFinite(target.y) || target.y >= t.h || target.y < TANK_H) return null
   const x = Math.round(Math.min(state.width - TANK_HALF_W, Math.max(TANK_HALF_W, target.x)))
-  const f = tankFloor(t, x, target.y - MAX_CLIMB)
-  const y = f <= target.y + MAX_CLIMB ? f : Math.round(target.y)
+  // destino metido en el terreno (hasta JUMP_SNAP px): se apoya en la superficie de arriba
+  let ty = Math.round(target.y)
+  for (let k = 0; k < JUMP_SNAP && isSolid(t, x, ty - 1); k++) ty--
+  const f = tankFloor(t, x, ty - MAX_CLIMB)
+  const y = f <= ty + MAX_CLIMB ? f : ty
   if (!boxFree(state, id, x, y)) return null
   return { x, y }
 }
