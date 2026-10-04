@@ -161,7 +161,7 @@ export function frost(t: Terrain, r: { x0: number; y0: number; x1: number; y1: n
       }
       // carámbanos: de la cara de abajo de cualquier sólido (más seguido en hielo y nieve)
       if (y + 1 < H && f[k + W] === AIR) {
-        const p = m === ICE ? 0.7 : m === SNOW ? 0.8 : 0.9
+        const p = m === ICE ? 0.68 : m === SNOW ? 0.78 : 0.85
         if (rnd(x, y, 166) <= p || (craters.length && melted(x, y))) continue
         const len = 2 + Math.floor(rnd(x, y, 167) * (m === ICE ? 8 : 5))
         for (let i = 1; i <= len; i++) {
