@@ -50,7 +50,7 @@ export class BonusSigns {
     const text = `+${amount} ${BONUS_LABEL[kind] ?? kind.toUpperCase()}`
     // apila sobre los carteles recientes cercanos
     let yy = y - 18
-    for (const o of this.list) if (o.age < 0.8 && Math.abs(o.x - x) < 70 && Math.abs(o.y - yy) < 14) yy = o.y - 16
+    for (const o of this.list) if (o.age < 0.8 && Math.abs(o.x - x) < 70 && Math.abs(o.y - yy) < 20) yy = o.y - 20
     const s = new Sprite(signTexture(text, color, this.font))
     s.anchor.set(0.5, 1)
     const half = (s.texture.width * SCALE) / 2 + 2

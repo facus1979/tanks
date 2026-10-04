@@ -480,20 +480,22 @@ export class WeaponsFx {
       // columnas cuyo piso quedó bastante más arriba que el de los costados
       const tops: number[] = []
       for (let cx = Math.round(x) - 14; cx <= x + 14; cx++) tops.push(surfaceBelow(t, cx, y - radius * 3, y + radius))
-      const valid = tops.filter((v) => v >= 0)
-      if (valid.length) {
-        const ground = Math.max(...valid)
-        const hi = Math.min(...valid)
-        if (ground - hi > 8) {
+      // piso de los costados (las 3 columnas de cada punta); la pared son columnas angostas bastante más altas
+      const ends = tops.slice(0, 3).concat(tops.slice(-3)).filter((v) => v >= 0)
+      if (ends.length) {
+        const ground = Math.max(...ends)
+        let a = -1
+        let b = -1
+        let hi = ground
+        tops.forEach((v, i) => {
+          if (v >= 0 && v < ground - 12) {
+            if (a < 0) a = i
+            b = i
+            hi = Math.min(hi, v)
+          }
+        })
+        if (a >= 0 && b - a <= 12) {
           ghost = false
-          let a = -1
-          let b = -1
-          tops.forEach((v, i) => {
-            if (v >= 0 && v < ground - 6) {
-              if (a < 0) a = i
-              b = i
-            }
-          })
           x0 = Math.round(x) - 14 + a
           x1 = Math.round(x) - 14 + b
           top = hi
