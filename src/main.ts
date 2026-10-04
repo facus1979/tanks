@@ -5,13 +5,16 @@ import { TouchControls, fullscreenButton, isTouchDevice, vibrate } from './input
 import { MousePan } from './input/mouse'
 import { VIEW_H, VIEW_W, type Viewport } from './render/types'
 import { Sfx } from './audio/sfx'
-import { Session, abyssLostAt, isAbyssFall } from './game/session'
+import { ITEM_CURSOR_SPEED, Session, abyssLostAt, isAbyssFall } from './game/session'
+import { TargetOverlay } from './input/target'
 import type { NetSeat } from './game/session'
 import { Online } from './game/online'
+import { rememberProfile, saveProfile, withProfile } from './game/profile'
 import { normalizeCode, readNetParams } from './net'
 import { createOnlineMenuView } from './ui/online'
 import { createLobbyView } from './ui/lobby'
-import { Hud, WEAPON_SLOTS } from './ui/hud'
+import { Hud } from './ui/hud'
+import { ITEM_CODES, weaponForKey } from './ui/arsenal'
 import { loadUiAssets } from './ui/assets'
 import { createMenuView, refreshLabels } from './ui/menu'
 import { createTitleView } from './ui/title'
@@ -73,7 +76,9 @@ const netStart = demo || uitest || playParam != null ? null : net.host ? 'host' 
 // autotest: cada humano apunta con la IA difícil, así la partida de prueba termina rápido
 const AUTO_SHOT = { delay: 0.8 }
 
-const ITEM_KEYS: Record<string, ItemId> = { KeyQ: 'shield', KeyF: 'fuel', KeyR: 'repair', KeyT: 'tracer' }
+// Teclas de los ítems (v3, de src/ui/arsenal.ts): Q escudo, F combustible, R reparación, T trazador,
+// J jetpack y K teletransporte (los dos piden destino), N ancla, E deflector.
+const ITEM_KEYS: Record<string, ItemId> = ITEM_CODES
 // Cámara (v2): Z / X panean a la izquierda / derecha, C recentra en el tanque del turno.
 // También: mouse contra el borde, arrastre con el botón del medio (o el izquierdo fuera del tanque y
 // del tablero / controles del HUD), stick derecho del gamepad (R3 recentra), dos dedos en táctil (◎ recentra),
@@ -88,6 +93,7 @@ const keys = new Keyboard()
 const pad = new Gamepad()
 const touch = new TouchControls(stage)
 const mouse = new MousePan(stage)
+const target = new TargetOverlay()
 if (isTouchDevice()) {
   // pantalla completa también fuera de la partida (menú, lobby, tienda)
   const fs = fullscreenButton()
@@ -195,15 +201,53 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyM') sfx.toggleMute()
 })
 
+// v3 destino de jetpack / teletransporte con mouse o toque: el puntero mueve el cursor (mouse) y el click o
+// el toque en el mundo lo confirma ahí; el botón derecho cancela. En captura, antes que el arrastre y el
+// apuntado táctil.
+stage.addEventListener(
+  'pointerdown',
+  (e) => {
+    if (!playing() || !session.aimingItem || onHud(e)) return
+    e.preventDefault()
+    e.stopImmediatePropagation()
+    if (e.button === 2) {
+      session.cancelItemAim()
+      sfx.click()
+      return
+    }
+    const w = renderer.screenToWorld(e.clientX, e.clientY)
+    session.setItemCursor(w.x, w.y)
+    if (!session.confirmItemAim()) sfx.empty()
+  },
+  true,
+)
+stage.addEventListener('contextmenu', (e) => {
+  if (session.aimingItem) e.preventDefault()
+})
+window.addEventListener('pointermove', (e) => {
+  if (e.pointerType !== 'mouse' || !playing() || !session.aimingItem || onHud(e)) return
+  const w = renderer.screenToWorld(e.clientX, e.clientY)
+  session.setItemCursor(w.x, w.y)
+})
+
 // ---------- cámara: minimapa, arrastre y apuntado táctil en mundo ----------
 
 const playing = (): boolean => screen === 'play' && overlay === 'none' && !paused
 const onMinimap = (e: PointerEvent): boolean => playing() && hud.minimapAt(e.clientX, e.clientY) != null
 
 touch.toWorld = (x, y) => renderer.screenToWorld(x, y)
-touch.ignore = onHud
+// v3: eligiendo destino de un ítem, el toque elige el lugar (no apunta)
+touch.ignore = (e) => onHud(e) || !!session.aimingItem
+// v3: mundo → ventana (inversa de screenToWorld, con la cámara del último frame) para la ayuda de destino
+target.toClient = (p) => {
+  const vp = viewport
+  if (!vp || vp.w <= 0) return { x: 0, y: 0 }
+  const a = renderer.screenToWorld(vp.x, vp.y)
+  const b = renderer.screenToWorld(vp.x + vp.w, vp.y + vp.h)
+  return { x: vp.x + ((p.x - a.x) / (b.x - a.x || 1)) * vp.w, y: vp.y + ((p.y - a.y) / (b.y - a.y || 1)) * vp.h }
+}
 // el click izquierdo arrastra el mundo salvo sobre el tanque del turno, el tablero, un control del HUD o el minimapa
-mouse.blocked = (e) => onHud(e) || onCurrentTank(e.clientX, e.clientY)
+mouse.blocked = (e) => onHud(e) || onCurrentTank(e.clientX, e.clientY) || !!session.aimingItem
 // el mouse contra el borde no panea sobre el tablero ni sobre los ítems de arriba
 mouse.noEdge = (x, y) => inBar(x, y) || controlAt(x, y) != null
 
@@ -247,6 +291,19 @@ function onCurrentTank(clientX: number, clientY: number): boolean {
   const w = renderer.screenToWorld(clientX, clientY)
   return Math.abs(w.x - p.x) <= TANK_HALF_W + 4 && w.y >= p.y - TANK_H - 10 && w.y <= p.y + 4
 }
+
+// v3 perfil en la sala: el propio (nombre, tripulante, color) se guarda en el navegador y viaja como
+// 'profile'; el anfitrión elige la personalidad de cada IA
+lobbyView.onProfile((p) => {
+  if (!online || screen !== 'lobby') return
+  saveProfile(p)
+  online.sendProfile(p, true)
+})
+lobbyView.onPersonality((slot, personality) => {
+  if (!online || screen !== 'lobby') return
+  sfx.click()
+  online.setPersonality(slot, personality)
+})
 
 menu.onOnline(() => {
   if (screen !== 'menu') return
@@ -363,10 +420,12 @@ function toMenu(): void {
   hud.hide()
   stage.hidden = true
   keys.capture = false
-  menu.show(lastConfig, (config) => {
+  // v3: el primer casillero humano arranca con el perfil guardado (nombre, tripulante y color)
+  menu.show(withProfile(lastConfig), (config) => {
     if (screen !== 'menu') return
     sfx.click()
     menu.hide()
+    rememberProfile(config)
     begin(config)
   })
 }
@@ -582,7 +641,11 @@ function tick(rawDt: number): void {
   touch.setActive(screen === 'play' && overlay === 'none')
   mouse.active = playing()
   if (!mouse.active) mouse.cancel()
-  if (!playing()) moveHold = null
+  if (!playing()) {
+    moveHold = null
+    target.show(null)
+    touch.setSteer(false)
+  }
   step1(Math.min(0.05, Math.max(0, rawDt)), true)
 }
 
@@ -635,6 +698,9 @@ function step1(dt: number, live: boolean, draw = true): void {
   }
 
   for (const shot of session.pullShots()) sfx.fire(shot.weapon)
+  // v3: soplido del cohete en cada tanda del teledirigido; en táctil, ◀ ▶ mientras lo dirige este dispositivo
+  for (const st of session.pullSteers()) sfx.missile(st.dir, st.left)
+  if (live) touch.setSteer(session.steering && playing())
   for (const _ of session.pullMelts()) sfx.melt()
   // v4: proyectiles que entran al agua, en su momento del vuelo
   for (const _ of session.pullSplashes()) sfx.splash()
@@ -663,6 +729,8 @@ function step1(dt: number, live: boolean, draw = true): void {
     sfx.setWind(frame.wind)
   }
   renderer.render(frame, events, dt * session.timeScale)
+  // v3: ayuda de destino de jetpack / teletransporte (encima del juego, con la cámara de este frame)
+  target.show(live && playing() ? session.aimingItem : null)
   const model = session.hud()
   if (model) hud.update(model)
   flow()
@@ -675,6 +743,7 @@ function mergePad(a: PadState, b: PadState): PadState {
     angle: clamp1(a.angle + b.angle),
     power: clamp1(a.power + b.power),
     move: a.move || b.move,
+    steer: clamp1(a.steer + b.steer),
     pan: clamp1(a.pan + b.pan),
     fine: a.fine || b.fine,
     stepAngle: a.stepAngle + b.stepAngle,
@@ -703,7 +772,22 @@ function handleCamera(dt: number, pressed: Set<string>, padState: PadState | nul
 }
 
 function handleInput(dt: number, pressed: Set<string>, padState: ReturnType<Gamepad['poll']> | null): void {
+  // v3 teledirigido: ← → (o A / D), el stick o la cruceta, y en táctil ◀ ▶ o arrastrar, dirigen el misil
+  if (session.steering) {
+    let side = 0
+    if (keys.isDown('ArrowLeft') || keys.isDown('KeyA')) side -= 1
+    if (keys.isDown('ArrowRight') || keys.isDown('KeyD')) side += 1
+    if (padState) side += Math.abs(padState.steer) >= 0.5 ? Math.sign(padState.steer) : 0
+    session.steerInput(side < 0 ? -1 : side > 0 ? 1 : 0)
+    return
+  }
+  session.steerInput(0)
   if (!session.inputEnabled) return
+  // v3: eligiendo destino de jetpack o teletransporte
+  if (session.aimingItem) {
+    handleItemAim(dt, pressed, padState)
+    return
+  }
   let dAngle = 0
   let dPower = 0
   if (keys.isDown('ArrowLeft')) dAngle += ANGLE_SPEED * dt
@@ -724,14 +808,29 @@ function handleInput(dt: number, pressed: Set<string>, padState: ReturnType<Game
   const right = keys.isDown('KeyD') || padState?.move === 1 || moveHold?.dir === 1
   if (left !== right) session.move(left ? -1 : 1, dt)
   else session.stopMove()
+  // v3 (barra de 2 filas de 8, ver src/ui/arsenal.ts): N elige la columna N y, si ya estaba, alterna con la
+  // de abajo; Shift+N, la de abajo directo. Tab / Shift+Tab y la rueda recorren las 16.
   const slot = weaponSlot(pressed)
-  if (slot >= 0 && slot < WEAPON_SLOTS.length) {
+  const cur = session.state?.players[session.state.current]
+  if (slot >= 0 && cur) {
+    const w = weaponForKey(slot + 1, cur.weapon, keys.isDown('ShiftLeft') || keys.isDown('ShiftRight'), cur.ammo)
+    if (w) {
+      sfx.click()
+      session.select(w)
+    }
+  }
+  if (pressed.has('Tab')) {
     sfx.click()
-    session.select(WEAPON_SLOTS[slot])
+    session.cycleWeapon(keys.isDown('ShiftLeft') || keys.isDown('ShiftRight') ? -1 : 1, WEAPON_ORDER)
+  }
+  const wheel = takeWheel()
+  if (wheel) {
+    sfx.click()
+    session.cycleWeapon(wheel, WEAPON_ORDER)
   }
   if (padState?.pressed.has('prevWeapon') || padState?.pressed.has('nextWeapon')) {
     sfx.click()
-    session.cycleWeapon(padState.pressed.has('prevWeapon') ? -1 : 1, WEAPON_SLOTS)
+    session.cycleWeapon(padState.pressed.has('prevWeapon') ? -1 : 1, WEAPON_ORDER)
   }
   for (const code of pressed) {
     const item = ITEM_KEYS[code]
@@ -742,6 +841,53 @@ function handleInput(dt: number, pressed: Set<string>, padState: ReturnType<Game
     if (!item || !session.useItem(item)) sfx.empty()
   }
   if (pressed.has('Space') || padState?.pressed.has('fire')) session.fire()
+}
+
+// v3: modo de elegir destino. Flechas (o el stick) mueven el cursor, Espacio / Enter (o A) confirman y
+// Esc (o B, o la tecla del mismo ítem) cancelan sin gastarlo. Mouse y toque van por pointer (ver arriba).
+function handleItemAim(dt: number, pressed: Set<string>, padState: PadState | null): void {
+  const aim = session.aimingItem
+  if (!aim) return
+  const fine = keys.isDown('ShiftLeft') || keys.isDown('ShiftRight') ? FINE : 1
+  let dx = 0
+  let dy = 0
+  if (keys.isDown('ArrowLeft')) dx -= 1
+  if (keys.isDown('ArrowRight')) dx += 1
+  if (keys.isDown('ArrowUp')) dy -= 1
+  if (keys.isDown('ArrowDown')) dy += 1
+  if (padState) {
+    dx -= padState.angle
+    dy -= padState.power
+  }
+  const v = ITEM_CURSOR_SPEED * dt * fine
+  if (dx || dy) session.moveItemCursor(dx * v, dy * v)
+  const again = [...pressed].some((code) => ITEM_KEYS[code] === aim.item)
+  if (pressed.has('Escape') || again || padState?.pressed.has('item')) {
+    session.cancelItemAim()
+    sfx.click()
+    return
+  }
+  if (pressed.has('Space') || pressed.has('Enter') || pressed.has('NumpadEnter') || padState?.pressed.has('fire')) {
+    if (!session.confirmItemAim()) sfx.empty()
+  }
+}
+
+// v3: rueda del mouse sobre el juego: recorre las armas (una por "muesca", acumulando el trackpad).
+let wheelAcc = 0
+stage.addEventListener(
+  'wheel',
+  (e) => {
+    if (!playing()) return
+    e.preventDefault()
+    wheelAcc += e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY
+  },
+  { passive: false },
+)
+function takeWheel(): -1 | 0 | 1 {
+  if (Math.abs(wheelAcc) < 60) return 0
+  const dir = wheelAcc > 0 ? 1 : -1
+  wheelAcc = 0
+  return dir
 }
 
 function playSounds(events: GameEvent[]): void {
@@ -760,6 +906,41 @@ function playSounds(events: GameEvent[]): void {
         break
       case 'prop':
         if (e.destroyed && e.kind === 'barrel') sfx.barrel()
+        // v3: caja de botín rota (con monedas) u objetivo pago destruido; la caja que aparece cae en paracaídas
+        else if (e.destroyed && e.kind === 'loot') sfx.lootBreak()
+        else if (e.destroyed && e.kind === 'target') sfx.targetDown()
+        else if (!e.destroyed && e.kind === 'loot' && session.isNewProp(e)) sfx.lootDrop()
+        break
+      // ---------- v3 ----------
+      case 'beam':
+        sfx.beam(Math.hypot(e.x1 - e.x0, e.y1 - e.y0))
+        break
+      case 'quake':
+        sfx.quake(e.radius)
+        break
+      case 'pull':
+        sfx.blackhole(e.duration)
+        break
+      case 'hazard':
+        if (e.hazard.kind === 'mine') {
+          if (e.action === 'place') sfx.mineArm()
+          else if (e.action === 'trigger' || e.action === 'expire') sfx.mineTrigger()
+        } else if (e.action !== 'expire') sfx.acidBubble(e.action === 'trigger' ? 1 : 0.6)
+        break
+      case 'deflect':
+        sfx.deflect()
+        break
+      case 'jetpack':
+        sfx.jetpack(Math.max(0, e.path.length - 1) * PATH_DT)
+        break
+      case 'teleport':
+        sfx.teleport()
+        break
+      case 'guide':
+        sfx.guideStart()
+        break
+      case 'bonus':
+        sfx.bonus(e.kind)
         break
       case 'fall':
         // v3: al abismo, silbido que se aleja durante la caída; v2.3: dura hasta que el tanque se pierde
@@ -813,7 +994,9 @@ function playSounds(events: GameEvent[]): void {
         break
       case 'item':
         if (e.item === 'shield') sfx.shieldOn()
-        else sfx.click()
+        else if (e.item === 'anchor' || e.item === 'deflector') sfx.itemOn(e.item)
+        // v3: jetpack y teletransporte suenan con su propio evento (jetpack / teleport)
+        else if (e.item !== 'jetpack' && e.item !== 'teleport') sfx.click()
         break
       case 'roundover':
         sfx.roundEnd()

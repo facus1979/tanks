@@ -5,6 +5,8 @@
 // v2 ajuste fino: el stick izquierdo modula la velocidad por cuánto se inclina (curva cuadrática pasada la
 // zona muerta: a media inclinación va a 1/4); mantener L3 (apretar el stick izquierdo) o Select/Back pasa
 // ángulo y potencia a 1/5 de velocidad, como Shift en el teclado.
+// v3: mientras se guía el teledirigido, el stick izquierdo (o la cruceta) en horizontal lo dirige (steer);
+// eligiendo destino de jetpack / teletransporte, el stick mueve el cursor (angle/power), A confirma y B cancela.
 export type PadAction = 'fire' | 'prevWeapon' | 'nextWeapon' | 'item' | 'pause' | 'recenter'
 
 const DEAD = 0.25
@@ -14,6 +16,7 @@ export interface PadState {
   angle: number // -1..1: positivo sube el ángulo (a la izquierda)
   power: number // -1..1: positivo sube la potencia
   move: -1 | 0 | 1
+  steer: number // v3: -1..1, teledirigido: negativo a la izquierda, positivo a la derecha
   pan: number // -1..1: paneo de la cámara (positivo a la derecha)
   fine: boolean // ajuste fino mantenido: angle y power van a 1/5 de velocidad
   // pasos sueltos (ya en grados / puntos de potencia, sin escalar): toque corto de los botones táctiles
@@ -40,7 +43,7 @@ export class Gamepad {
   }
 
   poll(): PadState {
-    const state: PadState = { angle: 0, power: 0, move: 0, pan: 0, fine: false, stepAngle: 0, stepPower: 0, pressed: new Set() }
+    const state: PadState = { angle: 0, power: 0, move: 0, steer: 0, pan: 0, fine: false, stepAngle: 0, stepPower: 0, pressed: new Set() }
     const now = new Set<number>()
     let pads: (globalThis.Gamepad | null)[] = []
     try {
@@ -56,6 +59,7 @@ export class Gamepad {
       const ay = pad.axes[1] ?? 0
       state.angle += -stick(ax) + b(14) - b(15)
       state.power += -stick(ay) + b(12) - b(13)
+      state.steer += (Math.abs(ax) > DEAD ? Math.sign(ax) : 0) + b(15) - b(14)
       if (b(10) > 0.5 || b(8) > 0.5) state.fine = true
       const rx = pad.axes[2] ?? 0
       if (Math.abs(rx) > DEAD) state.pan += (rx - Math.sign(rx) * DEAD) / (1 - DEAD)
@@ -67,6 +71,7 @@ export class Gamepad {
     state.angle = Math.max(-1, Math.min(1, state.angle))
     state.power = Math.max(-1, Math.min(1, state.power))
     state.pan = Math.max(-1, Math.min(1, state.pan))
+    state.steer = Math.max(-1, Math.min(1, state.steer))
     if (this.hold) {
       // espera a que se suelten los botones de acción
       if (![...now].some((i) => i in BUTTON_ACTION)) this.hold = false
