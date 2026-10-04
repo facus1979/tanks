@@ -20,6 +20,7 @@ import { LiquidView, solidCell } from './liquids'
 import { DMG_BIG, DMG_COLOR, DMG_LAVA, DMG_SHIELD, DamageNumbers } from './numbers'
 import { Raster, Rng } from './raster'
 import { installRasterUpload } from './gpu'
+import { QualityGovernor } from './quality'
 import { CHUNK_W, TerrainPainter } from './terrain'
 import type { Rect } from './terrain'
 
@@ -136,6 +137,7 @@ export class PixiRenderer implements GameRenderer {
   // v3: lo que cae al abismo (tanques, tripulantes, utilería)
   private abyss = new AbyssFalls(this.fx, () => this.painter?.pits ?? null)
   private fxSprite = new Sprite()
+  private quality = new QualityGovernor()
 
   private lampLayer = new Container()
   private lampTex = new Map<string, Texture>()
@@ -326,6 +328,8 @@ export class PixiRenderer implements GameRenderer {
 
     this.trackShot(frame, anim)
 
+    // v3: calidad automática de efectos (quality.ts; ?quality=low|high la fija)
+    this.fx.quality = this.quality.sample()
     const stopped = this.fx.hitStop > 0
     const t0 = this.stats ? performance.now() : 0
     this.fx.update(anim, frame.wind)
@@ -348,7 +352,7 @@ export class PixiRenderer implements GameRenderer {
     this.updateLiquids(frame, step, events)
 
     this.fx.draw(this.shotViews(frame))
-    this.stats?.sample(this.fx.count, dt, performance.now() - t0, this.fx.trails)
+    this.stats?.sample(this.fx.count, dt, performance.now() - t0, `${this.fx.trails} · calidad ${this.quality.level}`)
 
     this.abyss.update(frame.terrain, step)
     this.syncTanks(art, frame, step)

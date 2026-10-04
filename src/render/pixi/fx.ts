@@ -10,6 +10,7 @@ import { LIQ, solidCell } from './liquids'
 import type { Texture } from 'pixi.js'
 import { rasterTexture, uploadRect, type RasterSource } from './gpu'
 import { LightLayer } from './lights'
+import type { Quality } from './quality'
 import { Raster, Rng, bayer, mix } from './raster'
 
 const FIRE = [0xfffbe2, 0xffe27a, 0xffb43e, 0xf77a28, 0xd24a1c, 0x8a2814]
@@ -29,6 +30,10 @@ const BURN_TAIL = 1.2 // humo que sigue después de apagarse las llamas
 // Tope de partículas vivas entre blobs, softs (sin la estela del proyectil), chispas y escombros.
 // Una explosión normal anda por ~230; al pasarse se descartan las más gastadas (edad/vida más alta).
 const MAX_PARTICLES = 300
+// v3: con calidad 'low' (quality.ts) el tope baja, se emite la mitad de las bocanadas de humo y polvo, los
+// escombros no dejan estela y se omiten las luces tenues.
+const MAX_PARTICLES_LOW = 160
+const LOW_MIN_LIGHT = 0.08
 // Polvo de suelo: más claro que el humo (SMOKE[0]), sin contorno oscuro.
 const PUFF_HI = 0xd2c6b0
 const PUFF_MID = 0xb8aa94
@@ -245,6 +250,8 @@ export class Fx {
   readonly light: LightLayer
   // v3: textura de GPU que se llena directo desde los bytes de fx (sin canvas ni putImageData), ver present().
   readonly fxTexture: Texture<RasterSource>
+  quality: Quality = 'high'
+  private softSkip = 0
   private shown = [0, 0, -1, -1] // caja de fx subida el frame anterior (hay que borrarla si hoy no se pinta)
   shake = 0
   flash = 0
@@ -400,6 +407,7 @@ export class Fx {
   }
 
   private soft(s: Partial<Soft> & Pick<Soft, 'x0' | 'y0' | 'r0' | 'r1' | 'life' | 'inner' | 'edge' | 'a0'>): void {
+    if (this.quality === 'low' && !s.trail && !s.top && this.softSkip++ % 2 === 1) return
     this.softs.push({ vx: 0, vy: 0, ax: 0, drag: 0, age: 0, keep: 0, top: false, trail: false, puff: 0, ...s })
   }
 
@@ -1714,7 +1722,7 @@ export class Fx {
   private capParticles(): void {
     let n = this.blobs.length + this.debris.length + this.sparks.length
     for (const s of this.softs) if (!s.trail) n++
-    const over = n - MAX_PARTICLES
+    const over = n - (this.quality === 'low' ? MAX_PARTICLES_LOW : MAX_PARTICLES)
     if (over <= 0) return
     const us: number[] = []
     for (const b of this.blobs) us.push(b.delay > 0 ? 0 : b.age / b.life)
@@ -1926,7 +1934,7 @@ export class Fx {
       const x = Math.round(d.x)
       const y = Math.round(d.y)
       const sp = Math.hypot(d.vx, d.vy)
-      if (!d.rest && sp > 40) {
+      if (!d.rest && sp > 40 && this.quality === 'high') {
         const ux = d.vx / sp
         const uy = d.vy / sp
         for (let k = 2; k < 6; k++) fx.put(x - ux * k * 1.6, y - uy * k * 1.6, 0x3a302a, 0.45 - k * 0.06)
@@ -2019,7 +2027,11 @@ export class Fx {
 
     const light = this.light
     light.clear()
-    for (const l of this.lights) light.light(l.x, l.y, l.R, l.tint, l.k * Math.pow(1 - l.age / l.life, 1.5))
+    const minK = this.quality === 'low' ? LOW_MIN_LIGHT : 0
+    for (const l of this.lights) {
+      const k = l.k * Math.pow(1 - l.age / l.life, 1.5)
+      if (k > minK) light.light(l.x, l.y, l.R, l.tint, k)
+    }
     for (const e of this.emitters) {
       if (e.kind === 'wreck') {
         if (!this.sunk(e.y - 10)) light.light(e.x, e.y - 12, 22 + Math.sin(this.time * 17 + e.x) * 2, 0xff8a3a, 0.28)
