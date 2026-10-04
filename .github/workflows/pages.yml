@@ -35,6 +35,12 @@ jobs:
 
       - name: Build project
         run: npm run build
+        env:
+          # Relay TURN propio para el online entre redes estrictas (src/net/peer.ts). Si los secrets
+          # no están cargados quedan vacíos y el build usa el relay público por defecto.
+          VITE_TURN_URLS: ${{ secrets.TURN_URLS }}
+          VITE_TURN_USER: ${{ secrets.TURN_USER }}
+          VITE_TURN_PASS: ${{ secrets.TURN_PASS }}
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

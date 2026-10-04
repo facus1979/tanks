@@ -19,6 +19,14 @@ Abrí el navegador en https://facus1979.github.io/tanks/
 - Si el anfitrión cierra el juego, la partida termina.
 - Algunas redes muy cerradas (por ejemplo, redes corporativas) pueden bloquear WebRTC. Desde redes hogareñas normalmente funciona.
 
+### Relay TURN (redes estrictas y datos móviles)
+
+Entre redes con NAT estricto (datos móviles, algunos routers) la conexión directa no alcanza y hace falta un relay TURN. El relay público que trae el código por defecto (Open Relay con credenciales fijas) **ya no acepta conexiones** (verificado el 2026-10-03 con `NET_TEST_TRANSPORT=peer NET_TEST_RELAY=1 npm run net-test`). Para tener relay:
+
+1. Creá una cuenta gratis de TURN (por ejemplo en Metered) y copiá sus URLs, usuario y contraseña.
+2. En GitHub: **Settings → Secrets and variables → Actions**, cargá `TURN_URLS` (URLs separadas por coma, por ejemplo `turn:global.relay.metered.ca:80,turn:global.relay.metered.ca:443`), `TURN_USER` y `TURN_PASS`.
+3. El próximo deploy las mete en el build (`VITE_TURN_URLS`, `VITE_TURN_USER`, `VITE_TURN_PASS`). Para probarlo local, poné esas mismas variables antes de `npm run dev` y corré la prueba forzando el relay.
+
 ## Cómo correrlo local
 
 ```bash
