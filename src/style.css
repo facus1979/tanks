@@ -535,3 +535,8 @@ html.touch .slots8 .slot .cell.color { min-width: 36px; }
 html.touch .lobby-slot .cell.color { min-width: 32px; }
 html.touch .lobby-slot .cell.kind { min-height: 38px; }
 html.touch .lobby-frame .msg { min-height: 0; }
+/* v3: el estado no se encoge debajo de los botones (con poco alto, el marco scrollea) */
+.lobby-frame > * { flex-shrink: 0; }
+html.touch .lobby-slot .cell.kind { min-height: 34px; }
+html.touch .lobby-opts .px-btn, html.touch .lobby-frame .px-btn.play, html.touch .lobby-frame .actions .px-btn { min-height: 34px; }
+html.touch .lobby-head .px-btn { min-height: 30px; }

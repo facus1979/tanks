@@ -1,4 +1,8 @@
 // Página de prueba de las vistas: ?uitest=online|lobby|title|menu|banner|score|final|shop|hud con modelos falsos.
+// v3: ?uitest=hud muestra la barra de 16 armas (&weapon=<WeaponId> elige una; &guide=S la barra de guiado con
+// S segundos; &aim=jetpack|teleport la ayuda de destino), ?uitest=shop la tienda con las 8 armas y 4 ítems nuevos
+// (si SHOP todavía no los trae, con precios de prueba), ?uitest=profile el menú con nombres, colores elegidos y
+// personalidades, y ?uitest=lobby la sala con colores y personalidades (&keys=ArrowLeft,Space edita el nombre).
 // index.html la carga solo si la query trae uitest; main.ts puede llamar mountUiTest(name) si prefiere.
 import { BEDROCK, BRICK, CREWS, DIRT, GUIDE_TIME, ITEM_ORDER, WEAPONS, WEAPON_ORDER, type ItemId, type ShopEntry, MAP_SIZES, MAX_PLAYERS_BY_SIZE, SHOP, STONE, TANK_COLORS, WOOD, type MapSize, type MatchConfig, type ShopId, type Terrain, type WeaponId } from '../sim/types'
 import { loadUiAssets } from './assets'
