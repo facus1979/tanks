@@ -3,8 +3,13 @@
 //
 // Disposición (coordenadas lógicas):
 // - Abajo, a lo ancho y de HUD_BAR_H de alto, el tablero con los datos del que tiene el turno:
-//   retrato + nombre + vida + escudo | ÁNG | POT | VIENTO | COMB (◀ ▶) | las 8 armas.
-// - Arriba a la izquierda: ronda y plata, y al lado la fila de ítems (botones de 22 con su tecla).
+//   retrato + nombre + vida + escudo | ÁNG | POT | VIENTO | COMB (◀ ▶) | las armas.
+//   v3: 16 armas en dos filas de 8 (fila 1 las clásicas, fila 2 las de v3; teclas en ./arsenal.ts).
+// - Arriba a la izquierda: ronda y plata, y al lado los 9 ítems (botones de 22 con su tecla). v3: si la fila
+//   no entra antes del minimapa se parte en dos filas parejas (5 + 4).
+// - v3: mientras se dirige el teledirigido (extras.guide), una barra grande de guiado en la columna del
+//   centro; eligiendo destino de jetpack o teletransporte (extras.aimItem), el cartel "ELEGÍ EL DESTINO" y el
+//   alcance marcado en el minimapa.
 // - Arriba al centro: el minimapa (mapas que scrollean) y debajo, en una sola columna centrada, los
 //   carteles: estado ("TU TURNO", …), aviso o cartel de muerte súbita y "ESPERANDO A …" de la red.
 // - Arriba a la derecha: las placas compactas de los demás tanques apiladas, y debajo de ellas el panel
@@ -13,10 +18,11 @@
 // - Flechas en los bordes hacia los tanques fuera de cámara, entre los paneles de arriba de cada lado y el
 //   tablero; se juntan o se agrupan si no entran, y la del tanque del turno va en dorado y titila.
 // Sin extras (demo congelado) no hay tablero ni ítems: solo las placas de todos y el estado.
-import { ITEM_ORDER, SHIELD_HP, WEAPONS, type CrewId, type ItemId, type Vec2, type WeaponId } from '../sim/types'
+import { ITEM_ORDER, JETPACK_RANGE, SHIELD_HP, TANK_W, TELEPORT_RANGE, WEAPONS, WEAPON_ORDER, type CrewId, type ItemId, type Vec2, type WeaponId } from '../sim/types'
 import { HUD_BAR_H, VIEW_H, VIEW_W, type Viewport } from '../render/types'
 import { uiAssets, type UiAssets } from './assets'
 import { OUT, drawText, measure } from './pixelfont'
+import { ARMS_COLS, ITEM_KEYS, ITEM_NAMES, drawArsenalIcon } from './arsenal'
 import { MinimapTerrain, drawEdgeArrows, drawMinimap, minimapLayout, minimapPoint, type MinimapLayout } from './minimap'
 import {
   BRONZE,
@@ -50,9 +56,9 @@ import {
 } from './hudkit'
 import type { HudControl, HudExtras, HudNet, MinimapInput } from './types'
 
-// Tecla de cada ítem usable (el paracaídas es pasivo). La lee también el flujo de entrada.
-export const ITEM_KEYS: Partial<Record<ItemId, string>> = { shield: 'Q', fuel: 'F', repair: 'R', tracer: 'T' }
-const ITEM_NAMES: Record<ItemId, string> = { shield: 'ESCUDO', parachute: 'PARACAIDAS', fuel: 'COMBUSTIBLE', repair: 'REPARAR', tracer: 'TRAZADOR', jetpack: 'JETPACK', teleport: 'TELEPORT', anchor: 'ANCLA', deflector: 'DEFLECTOR' }
+// Tecla de cada ítem usable (el paracaídas es pasivo): ahora vive en ./arsenal.ts (con ITEM_CODES y
+// weaponForKey para el flujo); se reexporta por compatibilidad.
+export { ITEM_KEYS, ITEM_CODES, weaponForKey } from './arsenal'
 
 export interface HudSide {
   name: string
@@ -76,7 +82,7 @@ export interface HudModel {
   wind: number
   status: string
   showAim: boolean
-  // munición de las 8 armas del que tiene el turno (0 = deshabilitada)
+  // munición de las 16 armas del que tiene el turno (0 = deshabilitada)
   ammoAll: Record<WeaponId, number>
   fuel: number // 0..1 del combustible del turno
   showBar: boolean // controles (armas, ítems, mover) activos: solo en el turno de un humano de esta pantalla
@@ -88,8 +94,9 @@ const PIPS = 6
 const HP_HI = 0x5ec46a
 const HP_MID = 0xf0c040
 const HP_LO = 0xe0483a
-// Orden de la tira weaponIcons del manifiesto (el de WeaponId en types.ts). También es el de las teclas 1-8.
-export const WEAPON_SLOTS: WeaponId[] = ['normal', 'heavy', 'dirt', 'cluster', 'napalm', 'digger', 'roller', 'nuke']
+// Orden de la barra (y de la tira weaponIcons del manifiesto): WEAPON_ORDER, 16 en v3. Las teclas 1-8 van
+// a la columna (ver weaponForKey en ./arsenal.ts); cycleWeapon del flujo recorre las 16.
+export const WEAPON_SLOTS: WeaponId[] = WEAPON_ORDER
 const BLINK_MS = 280 // titileo del tanque del turno en el minimapa
 // v2 muerte súbita
 const SD_WARN_AT = 3 // el aviso "MUERTE SÚBITA EN N" aparece con calmLeft <= 3
@@ -118,6 +125,15 @@ const PLATE_STEP = 30
 const PLATE_STEP_DENSE = 24
 const SPLIT_AT = 4
 const PLATE_NAME_MAX = 56
+// v3: ítems de arriba a la izquierda sin minimapa (Chico): hasta dónde pueden llegar antes de partirse en dos filas
+const ITEMS_MAX_X = 330
+// v3: barra de guiado del teledirigido (ancho, alto) y desde qué fracción titila en rojo
+const GUIDE_W = 200
+const GUIDE_H = 10
+const GUIDE_LOW = 0.3
+// v3: armas en dos filas de 8; paso horizontal y vertical entre ranuras (botones de BTN)
+const ARMS_STEP_X = BTN + SLOT_GAP
+const ARMS_STEP_Y = BTN + 1
 
 interface HitBox {
   x: number
@@ -179,7 +195,11 @@ export class Hud implements MinimapInput {
     const pulse = sd?.active ? sdPulse(now) : -1
     const assets = uiAssets()
     const sock = ex ? sockFrame(model.wind, now, assets.windsock?.frames ?? 7) : -1
-    const key = JSON.stringify(model, (k, v) => (k === 'terrain' ? undefined : v)) + (blink ? '*' : '') + pulse + '/' + sock
+    // v3: la barra de guiado titila cuando queda poco; el destino de ítem, siempre (marca del minimapa)
+    const guide = ex?.guide ?? null
+    const aimItem = ex?.aimItem ?? null
+    const flick = (guide && guide.left / Math.max(0.001, guide.total) < GUIDE_LOW) || aimItem ? Math.floor(now / BLINK_MS) % 2 : 0
+    const key = JSON.stringify(model, (k, v) => (k === 'terrain' ? undefined : v)) + (blink ? '*' : '') + pulse + '/' + sock + '/' + flick
     if (key === this.key) return
     this.key = key
     const ctx = this.ctx
@@ -191,17 +211,21 @@ export class Hud implements MinimapInput {
     const subject = ex ? (sides.find((s) => s.active) ?? model.human ?? model.rival) : null
     const plates = sides.filter((s) => s !== subject).sort((a, b) => tagNum(a) - tagNum(b))
 
-    // arriba a la izquierda: ronda, plata e ítems
-    const leftBottom = ex ? this.roundAndItems(assets, ex, model.showBar) : 3
-
-    // arriba al centro: minimapa y la columna de carteles debajo
+    // arriba al centro: minimapa (se calcula primero: los ítems de la izquierda no pueden pisarlo)
     this.mm = mm ? minimapLayout(mm.terrain) : null
+    // arriba a la izquierda: ronda, plata e ítems
+    const leftBottom = ex ? this.roundAndItems(assets, ex, model.showBar, this.mm ? this.mm.x - 6 : ITEMS_MAX_X) : 3
+
+    // y la columna de carteles debajo del minimapa
     let below = 6
     if (mm && this.mm) {
       drawMinimap(ctx, this.mm, mm, this.mmTerrain.image(mm.terrain, mm.terrainVersion), blink)
+      if (aimItem) this.rangeOnMinimap(this.mm, mm, aimItem, flick === 0)
       below = this.mm.y + this.mm.h + 3 + 4
     }
     if (model.status) below = this.banner(assets, model.status.toUpperCase(), below, GOLD) + 3
+    if (guide) below = this.guideBar(assets, guide, below, flick === 1) + 3
+    if (aimItem) below = this.aimHelp(assets, aimItem, below) + 3
     if (sd) below = this.suddenDeath(assets, sd, below, pulse)
     if (ex?.net?.waiting) {
       const text = ex.net.waiting.toUpperCase().replace(/…/g, '...')
@@ -340,15 +364,19 @@ export class Hud implements MinimapInput {
     const pct = `${Math.round(fuel * 100)}%`
     drawText(ctx, font, pct, x + Math.floor((fw - measure(font, pct)) / 2), by + 8, low ? 0xff7a5a : FUEL_HI)
 
-    // --- ARMAS: nombre y munición del arma elegida arriba, las 8 ranuras abajo
+    // --- ARMAS: nombre y munición del arma elegida arriba, y las 16 ranuras en dos filas de 8 (v3). La
+    // fila 2 (las de v3) lleva el número de su columna en bronce: se llega con la misma tecla dos veces o
+    // con Shift + número (ver weaponForKey).
     x = SEC.arms
     const name = (WEAPONS[model.weapon]?.name ?? model.weapon).toUpperCase()
     const w0 = drawText(ctx, font, name, x + 1, top + 1, WHITE)
     if (model.ammo < 50) drawText(ctx, font, `x${model.ammo}`, x + w0 + 6, top + 1, model.ammo > 0 ? GOLD : FUEL_LOW)
     WEAPON_SLOTS.forEach((id, i) => {
-      const sx = x + i * (BTN + SLOT_GAP)
-      const sy = top + 11
-      this.weaponSlot(assets, id, i, sx, sy, model.ammoAll[id] ?? 0, id === model.weapon)
+      const col = i % ARMS_COLS
+      const row = Math.floor(i / ARMS_COLS)
+      const sx = x + col * ARMS_STEP_X
+      const sy = top + 9 + row * ARMS_STEP_Y
+      this.weaponSlot(assets, id, col, row, sx, sy, model.ammoAll[id] ?? 0, id === model.weapon)
       if (model.showBar) this.hits.push({ x: sx, y: sy, w: BTN, h: BTN, ctl: { kind: 'weapon', id } })
     })
   }
@@ -374,12 +402,12 @@ export class Hud implements MinimapInput {
     bigText(ctx, font, text, x, y + font.h, color, 2)
   }
 
-  private weaponSlot(assets: UiAssets, id: WeaponId, i: number, x: number, y: number, ammo: number, sel: boolean): void {
+  private weaponSlot(assets: UiAssets, id: WeaponId, col: number, row: number, x: number, y: number, ammo: number, sel: boolean): void {
     const ctx = this.ctx
     const font = assets.font
     button(ctx, font, x, y, BTN, { on: ammo > 0, sel })
-    // tecla arriba a la izquierda (chica y apagada), ícono corrido a la derecha, munición abajo
-    drawText(ctx, font, `${i + 1}`, x + 3, y + 3, sel ? GOLD : ammo > 0 ? GREY : DEAD)
+    // tecla arriba a la izquierda (chica y apagada; en la fila 2, bronce), ícono corrido a la derecha, munición abajo
+    drawText(ctx, font, `${col + 1}`, x + 3, y + 3, sel ? GOLD : ammo <= 0 ? DEAD : row > 0 ? BRONZE : GREY)
     this.icon(assets, id, x + 7, y + 3, ammo <= 0)
     if (ammo > 0 && ammo < 50) {
       const t = `${ammo}`
@@ -419,8 +447,9 @@ export class Hud implements MinimapInput {
 
   // ---------- arriba a la izquierda ----------
 
-  // Ronda y plata en un panel, y a su derecha los 5 ítems en botones de 22. Devuelve la y de abajo.
-  private roundAndItems(assets: UiAssets, ex: HudExtras, active: boolean): number {
+  // Ronda y plata en un panel, y a su derecha los 9 ítems en botones de 22 (v3). maxX: hasta dónde pueden
+  // llegar (el borde del minimapa); si no entran en una fila, van en dos filas parejas. Devuelve la y de abajo.
+  private roundAndItems(assets: UiAssets, ex: HudExtras, active: boolean, maxX: number): number {
     const ctx = this.ctx
     const font = assets.font
     const r = `RONDA ${ex.round}/${ex.rounds}`
@@ -432,19 +461,89 @@ export class Hud implements MinimapInput {
     panel(ctx, x0, y0, w, h)
     drawText(ctx, font, r, x0 + 6, y0 + 5, GREY)
     drawText(ctx, font, m, x0 + 6, y0 + 8 + font.h, GOLD)
-    let ix = x0 + w + 3
-    for (const id of ITEM_ORDER) {
+    const ix0 = x0 + w + 3
+    const fit = Math.max(1, Math.floor((maxX - ix0 + 2) / ITEM_STEP))
+    const rows = Math.ceil(ITEM_ORDER.length / fit)
+    const perRow = Math.ceil(ITEM_ORDER.length / rows)
+    ITEM_ORDER.forEach((id, i) => {
+      const ix = ix0 + (i % perRow) * ITEM_STEP
+      const iy = y0 + 1 + Math.floor(i / perRow) * ITEM_STEP
       const n = ex.items[id] ?? 0
       const key = ITEM_KEYS[id] ?? ''
-      // el trazador encendido queda marcado en dorado
-      button(ctx, font, ix, y0 + 1, BTN, { on: n > 0, sel: id === 'tracer' && ex.tracer, key })
-      this.itemIcon(assets, id, ix + 3, y0 + 6, n <= 0)
+      // el trazador encendido queda marcado en dorado; el ítem cuyo destino se está eligiendo, también
+      button(ctx, font, ix, iy, BTN, { on: n > 0, sel: (id === 'tracer' && ex.tracer) || id === ex.aimItem, key })
+      this.itemIcon(assets, id, ix + 3, iy + 5, n <= 0)
       const t = `${n}`
-      drawText(ctx, font, t, ix + 19 - measure(font, t), y0 + 16, n > 0 ? WHITE : 0x6a625a)
-      if (active && key) this.hits.push({ x: ix, y: y0 + 1, w: BTN, h: BTN, ctl: { kind: 'item', id } })
-      ix += ITEM_STEP
-    }
-    return y0 + Math.max(h, BTN + 1)
+      drawText(ctx, font, t, ix + 19 - measure(font, t), iy + 15, n > 0 ? WHITE : 0x6a625a)
+      if (active && key) this.hits.push({ x: ix, y: iy, w: BTN, h: BTN, ctl: { kind: 'item', id } })
+    })
+    return y0 + Math.max(h, rows * ITEM_STEP - 1)
+  }
+
+  // ---------- v3: teledirigido y destino de ítems ----------
+
+  // Barra de guiado del teledirigido: cartel "GUIÁ CON ◀ ▶" con los segundos que quedan y una barra gruesa
+  // que se vacía (dorada; roja y titilando en el último GUIDE_LOW). Devuelve la y de abajo.
+  private guideBar(assets: UiAssets, g: NonNullable<HudExtras['guide']>, y: number, flash: boolean): number {
+    const ctx = this.ctx
+    const font = assets.font
+    const f = Math.max(0, Math.min(1, g.left / Math.max(0.001, g.total)))
+    const low = f < GUIDE_LOW
+    const bw = GUIDE_W + 12
+    const bh = font.h * 2 + GUIDE_H + 16
+    const bx = Math.round((VIEW_W - bw) / 2)
+    panel(ctx, bx, y, bw, bh, low && flash ? FUEL_LOW : GOLD)
+    const title = 'GUIA CON'
+    const secs = `${Math.max(0, g.left).toFixed(1).replace('.', ',')} S`
+    const tw = measureBig(font, title, 2)
+    // título ×2 con las flechas ◀ ▶ dibujadas (la fuente no tiene triángulos)
+    const tx = bx + 6
+    bigText(ctx, font, title, tx, y + 5, WHITE, 2)
+    const ax = tx + tw + 7
+    moveArrow(ctx, ax, y + 5, -1, GOLD)
+    moveArrow(ctx, ax + 10, y + 5, 1, GOLD)
+    const sw = measureBig(font, secs, 2)
+    bigText(ctx, font, secs, bx + bw - 6 - sw, y + 5, low ? 0xff6a4a : GOLD, 2)
+    const gy = y + 5 + font.h * 2 + 4
+    segBar(ctx, bx + 6, gy, GUIDE_W, GUIDE_H, f, low ? [FUEL_LOW, 0xff6a4a, 0xffb090] : [POW_MID, GOLD, 0xfff2b0], 12)
+    return y + bh
+  }
+
+  // Ayuda del destino de jetpack / teletransporte: "ELEGÍ EL DESTINO" grande y debajo el ítem, su alcance
+  // en tanques y cómo cancelar. Devuelve la y de abajo.
+  private aimHelp(assets: UiAssets, item: 'jetpack' | 'teleport', y: number): number {
+    const ctx = this.ctx
+    const font = assets.font
+    const title = 'ELEGI EL DESTINO'
+    const range = item === 'jetpack' ? JETPACK_RANGE : TELEPORT_RANGE
+    const sub = `${ITEM_NAMES[item]}: HASTA ${Math.round(range / TANK_W)} TANQUES   ESC CANCELA`
+    const tw = measureBig(font, title, 2)
+    const sw = measure(font, sub)
+    const bw = Math.max(tw, sw) + 16
+    const bh = font.h * 3 + 16
+    const bx = Math.round((VIEW_W - bw) / 2)
+    panel(ctx, bx, y, bw, bh, GOLD)
+    bigText(ctx, font, title, bx + Math.round((bw - tw) / 2), y + 5, GOLD, 2)
+    drawText(ctx, font, sub, bx + Math.round((bw - sw) / 2), y + 5 + font.h * 2 + 4, WHITE)
+    return y + bh
+  }
+
+  // Alcance del ítem marcado en el minimapa: una franja de ±rango alrededor del tanque del turno, con topes
+  // en las puntas (titila con on). El render dibuja el alcance en el mundo; esto es la referencia global.
+  private rangeOnMinimap(lay: MinimapLayout, mm: NonNullable<HudExtras['minimap']>, item: 'jetpack' | 'teleport', on: boolean): void {
+    const me = mm.tanks.find((t) => t.current && t.alive)
+    if (!me) return
+    const ctx = this.ctx
+    const k = lay.w / lay.worldW
+    const range = item === 'jetpack' ? JETPACK_RANGE : TELEPORT_RANGE
+    const x0 = Math.max(lay.x, Math.round(lay.x + (me.x - range) * k))
+    const x1 = Math.min(lay.x + lay.w - 1, Math.round(lay.x + (me.x + range) * k))
+    const yy = Math.max(lay.y + 3, Math.min(lay.y + lay.h - 3, Math.round(lay.y + me.y * k) + 2))
+    const c = on ? GOLD : mix(GOLD, OUT, 0.45)
+    rect(ctx, x0, yy + 1, x1 - x0 + 1, 1, OUT)
+    rect(ctx, x0, yy, x1 - x0 + 1, 1, c)
+    rect(ctx, x0, yy - 3, 1, 5, c)
+    rect(ctx, x1, yy - 3, 1, 5, c)
   }
 
   // ---------- arriba al centro ----------
@@ -680,43 +779,14 @@ export class Hud implements MinimapInput {
     ctx.restore()
   }
 
+  // Íconos de ítems y armas: el frame del manifiesto o el respaldo de ./arsenal.ts (letra sobre un color
+  // propio, mientras arte no pinte los 16 y 9 frames de v3).
   private itemIcon(assets: UiAssets, id: ItemId, x: number, y: number, off = false): void {
-    const ctx = this.ctx
-    const icons = assets.itemIcons
-    const index = ITEM_ORDER.indexOf(id)
-    ctx.save()
-    if (off) {
-      ctx.globalAlpha = 0.45
-      ctx.filter = 'grayscale(1)'
-    }
-    if (icons && index >= 0 && index < icons.frames) {
-      ctx.drawImage(icons.img, index * icons.w, 0, icons.w, icons.h, x, y, 12, 12)
-    } else {
-      rect(ctx, x, y, 12, 12, OUT)
-      rect(ctx, x + 1, y + 1, 10, 10, 0x3d8cf0)
-      drawText(ctx, assets.font, ITEM_NAMES[id][0], x + 4, y + 3, WHITE, null)
-    }
-    ctx.restore()
+    drawArsenalIcon(this.ctx, assets, id, x, y, off)
   }
 
   private icon(assets: UiAssets, weapon: WeaponId, x: number, y: number, off = false): void {
-    const ctx = this.ctx
-    const icons = assets.weaponIcons
-    const index = WEAPON_SLOTS.indexOf(weapon)
-    ctx.save()
-    if (off) {
-      ctx.globalAlpha = 0.35
-      ctx.filter = 'grayscale(1)'
-    }
-    if (icons && index >= 0 && index < icons.frames) {
-      ctx.drawImage(icons.img, index * icons.w, 0, icons.w, icons.h, x, y, 12, 12)
-    } else {
-      // respaldo: un obús
-      rect(ctx, x + 2, y + 4, 8, 5, OUT)
-      rect(ctx, x + 3, y + 5, 5, 3, weapon === 'heavy' ? 0xd0362c : weapon === 'dirt' ? 0x8a5a34 : 0xb8b0a0)
-      rect(ctx, x + 8, y + 5, 2, 3, GOLD)
-    }
-    ctx.restore()
+    drawArsenalIcon(this.ctx, assets, weapon, x, y, off)
   }
 }
 
