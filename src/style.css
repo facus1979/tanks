@@ -471,3 +471,72 @@ html.touch button, html.touch .cell { touch-action: manipulation; }
 
 .code-field { position: relative; }
 .code-input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; font-size: 16px; border: 0; padding: 0; background: transparent; color: transparent; caret-color: transparent; }
+
+/* ---------- v3: tienda de 15 armas y 9 ítems en tres columnas, con ficha del elegido ---------- */
+.shop-frame { width: min(100%, calc(var(--px) * 470)); }
+.shop.shop3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: calc(var(--px) * 3); }
+.shop3 .shop-col { gap: var(--px); }
+.shop3 .prow { gap: calc(var(--px) * 2); padding: var(--px) calc(var(--px) * 2); }
+.shop3 .prow .grow { min-width: 0; overflow: hidden; }
+.shop3 .prow .price { min-width: calc(var(--px) * 14); }
+.shop3 .prow > canvas:first-child { flex: none; }
+.prow .line, .shop-detail .line { display: flex; align-items: center; gap: calc(var(--px) * 2); }
+.shop-detail {
+  display: flex; align-items: center; gap: calc(var(--px) * 3); width: 100%;
+  min-height: calc(var(--px) * 18); padding: calc(var(--px) * 2) calc(var(--px) * 3);
+  background: #120d0b; border: var(--px) solid var(--out); box-shadow: 0 0 0 var(--px) var(--bronze) inset;
+}
+.shop-detail .grow { display: flex; flex-direction: column; gap: var(--px); min-width: 0; }
+@media (max-width: 900px), (max-height: 520px) {
+  .shop.shop3 { gap: calc(var(--px) * 2); }
+  .shop3 .prow { padding: 0 var(--px); gap: var(--px); }
+  .shop3 .prow .grow { flex-direction: row; align-items: center; justify-content: space-between; gap: var(--px); }
+  .shop3 .prow .px-btn { padding: 0 var(--px); }
+  .shop3 .prow .price { min-width: calc(var(--px) * 12); }
+  .shop-detail { min-height: 0; padding: var(--px) calc(var(--px) * 2); }
+  .shop-frame .hint { display: none; }
+}
+html.touch .shop3 .prow .px-btn { min-width: 32px; min-height: 30px; }
+.shop-right { display: flex; align-items: center; gap: calc(var(--px) * 4); }
+.shop-detail > canvas { flex: none; }
+@media (max-width: 900px), (max-height: 520px) {
+  /* el precio queda en la ficha de abajo: la fila es ícono, nombre, tenés, − y + */
+  .shop3 .prow .grow > canvas:last-child { display: none; }
+  .shop3 .colhead canvas:last-child { display: none; }
+  .shop-frame { padding-top: calc(var(--px) * 2) !important; padding-bottom: calc(var(--px) * 2) !important; gap: var(--px) !important; }
+  .shop-right .px-btn.play { margin: 0; padding: calc(var(--px) * 2) calc(var(--px) * 6); }
+  .shop-detail .grow .line { display: none; }
+}
+html.touch .shop3 .prow .px-btn { min-width: 30px; min-height: 24px; }
+@media (max-height: 520px) { .shop3 .colhead { padding-top: 0; padding-bottom: 0; } .shop-detail { padding-top: 0; padding-bottom: 0; } #shop-view { padding: 4px; } }
+html.touch .shop-right .px-btn.play { min-height: 40px; }
+
+/* ---------- v3: perfil (color de tanque, personalidad, nombre con teclado del sistema) ---------- */
+.slot .cell.color { display: flex; align-items: center; justify-content: center; align-self: stretch; padding: calc(var(--px) * 2); }
+.swatch {
+  width: calc(var(--px) * 9); height: calc(var(--px) * 9); flex: none;
+  background: var(--swatch, #3a3430); border: var(--px) solid var(--out);
+  box-shadow: inset calc(var(--px) * -1) calc(var(--px) * -1) 0 #0006, inset var(--px) var(--px) 0 #ffffff40;
+}
+.slot .cell.color.off .swatch { opacity: 0.35; box-shadow: none; }
+.slot .cell.name.has-input { position: relative; }
+.slot .cell.name.ai { background: #0e1418; }
+.name-input[hidden] { display: none; }
+@media (max-width: 900px), (max-height: 520px) {
+  .swatch { width: calc(var(--px) * 7); height: calc(var(--px) * 7); }
+  .slot .cell.color { padding: var(--px); }
+  .slots8 .slot .cell.name { min-width: calc(var(--px) * 46); }
+}
+html.touch .slots8 .slot .cell.color { min-width: 36px; }
+.lobby-slot .cell.color { flex: none; display: flex; align-items: center; justify-content: center; align-self: stretch; padding: var(--px) calc(var(--px) * 2); }
+.lobby-slot .who.has-input { position: relative; }
+.lobby-slot.editable .who, .lobby-slot.editable .cell.crew, .lobby-slot.editable .cell.color { cursor: pointer; }
+.lobby-slot .who.sel { outline: var(--px) solid var(--gold); outline-offset: var(--px); }
+html.touch .lobby-slot .cell.color { min-width: 32px; }
+html.touch .lobby-slot .cell.kind { min-height: 38px; }
+html.touch .lobby-frame .msg { min-height: 0; }
+/* v3: el estado no se encoge debajo de los botones (con poco alto, el marco scrollea) */
+.lobby-frame > * { flex-shrink: 0; }
+html.touch .lobby-slot .cell.kind { min-height: 34px; }
+html.touch .lobby-opts .px-btn, html.touch .lobby-frame .px-btn.play, html.touch .lobby-frame .actions .px-btn { min-height: 34px; }
+html.touch .lobby-head .px-btn { min-height: 30px; }

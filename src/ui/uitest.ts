@@ -1,6 +1,10 @@
 // Página de prueba de las vistas: ?uitest=online|lobby|title|menu|banner|score|final|shop|hud con modelos falsos.
+// v3: ?uitest=hud muestra la barra de 16 armas (&weapon=<WeaponId> elige una; &guide=S la barra de guiado con
+// S segundos; &aim=jetpack|teleport la ayuda de destino), ?uitest=shop la tienda con las 8 armas y 4 ítems nuevos
+// (si SHOP todavía no los trae, con precios de prueba), ?uitest=profile el menú con nombres, colores elegidos y
+// personalidades, y ?uitest=lobby la sala con colores y personalidades (&keys=ArrowLeft,Space edita el nombre).
 // index.html la carga solo si la query trae uitest; main.ts puede llamar mountUiTest(name) si prefiere.
-import { BEDROCK, BRICK, CREWS, DIRT, ITEM_ORDER, MAP_SIZES, MAX_PLAYERS_BY_SIZE, SHOP, STONE, TANK_COLORS, WOOD, type MapSize, type MatchConfig, type ShopId, type Terrain } from '../sim/types'
+import { BEDROCK, BRICK, CREWS, DIRT, GUIDE_TIME, ITEM_ORDER, WEAPONS, WEAPON_ORDER, type ItemId, type ShopEntry, MAP_SIZES, MAX_PLAYERS_BY_SIZE, SHOP, STONE, TANK_COLORS, WOOD, type MapSize, type MatchConfig, type ShopId, type Terrain, type WeaponId } from '../sim/types'
 import { loadUiAssets } from './assets'
 import { Hud } from './hud'
 import { refreshLabels } from './kit'
@@ -32,6 +36,24 @@ function who(): (typeof ALL_ROWS)[number] {
   return ALL_ROWS[Math.max(1, Math.min(8, p)) - 1]
 }
 
+// v3: la tienda completa. Si SHOP todavía no trae las armas e ítems nuevos (los agrega sim-armas en paralelo),
+// se completan acá con precios de prueba, para ver las tres columnas llenas.
+const TEST_PRICES: Partial<Record<ShopId, [number, number, number]>> = {
+  guided: [450, 1, 3], bouncer: [260, 2, 9], laser: [380, 1, 5], mine: [200, 2, 6], quake: [500, 1, 3], blackhole: [650, 1, 2], acid: [320, 2, 6], wall: [140, 2, 9],
+  jetpack: [200, 1, 3], teleport: [400, 1, 2], anchor: [150, 1, 3], deflector: [300, 1, 3],
+}
+const ITEM_TEST_NAMES: Record<ItemId, string> = { shield: 'Escudo', parachute: 'Paracaídas', fuel: 'Combustible', repair: 'Reparación', tracer: 'Trazador', jetpack: 'Jetpack', teleport: 'Teletransporte', anchor: 'Ancla', deflector: 'Deflector' }
+const FULL_SHOP: ShopEntry[] = [
+  ...SHOP,
+  ...[...WEAPON_ORDER.filter((id) => id !== 'normal'), ...ITEM_ORDER]
+    .filter((id) => !SHOP.some((s) => s.id === id) && TEST_PRICES[id])
+    .map((id): ShopEntry => {
+      const [price, qty, max] = TEST_PRICES[id] ?? [100, 1, 3]
+      const item = (ITEM_ORDER as string[]).includes(id)
+      return { id, kind: item ? 'item' : 'weapon', name: item ? ITEM_TEST_NAMES[id as ItemId] : WEAPONS[id as WeaponId].name, price, qty, max }
+    }),
+]
+
 function shopModel(money: number, owned: Record<string, number>): ShopModel {
   const w = who()
   return {
@@ -42,7 +64,7 @@ function shopModel(money: number, owned: Record<string, number>): ShopModel {
     money,
     round: 2,
     rounds: 3,
-    rows: SHOP.map((s) => ({
+    rows: FULL_SHOP.map((s) => ({
       ...s,
       owned: owned[s.id] ?? 0,
       canBuy: money >= s.price && (owned[s.id] ?? 0) + s.qty <= s.max,
@@ -71,14 +93,15 @@ function lobbyModel(role: 'host' | 'client'): LobbyModel {
       ...(params.get('size') ? { size: params.get('size') as MapSize } : {}),
       // v5: siempre 8 casilleros; &size= decide cuántos están habilitados (Chico 4, Mediano 6, Grande 8)
       slots: [
-        { kind: 'human', name: 'Facu', crew: 'bandana', owner: 'host', connected: true },
-        { kind: 'human', name: 'Sargento', crew: 'sarge', owner: 'peer1', connected: true },
-        { kind: 'human', name: '', crew: 'rookie', owner: null, connected: false },
-        { kind: 'ai', name: 'IA', crew: 'desert', owner: null, connected: true },
-        { kind: 'human', name: 'Coman2', crew: 'commando', owner: 'peer2', connected: false },
-        { kind: 'ai', name: 'IA', crew: 'goggles', owner: null, connected: true },
-        { kind: 'off', name: '', crew: 'pilot', owner: null, connected: false },
-        { kind: 'ai', name: 'IA', crew: 'colonel', owner: null, connected: true },
+        // v3: colores elegidos (no por índice) y personalidades de las IA
+        { kind: 'human', name: 'Facu', crew: 'bandana', color: 4, owner: 'host', connected: true },
+        { kind: 'human', name: 'Sargento', crew: 'sarge', color: 1, owner: 'peer1', connected: true },
+        { kind: 'human', name: '', crew: 'rookie', color: 2, owner: null, connected: false },
+        { kind: 'ai', name: 'IA', crew: 'desert', color: 3, personality: 'sniper', owner: null, connected: true },
+        { kind: 'human', name: 'Coman2', crew: 'commando', color: 0, owner: 'peer2', connected: false },
+        { kind: 'ai', name: 'IA', crew: 'goggles', color: 5, owner: null, connected: true },
+        { kind: 'off', name: '', crew: 'pilot', color: 6, owner: null, connected: false },
+        { kind: 'ai', name: 'IA', crew: 'colonel', color: 7, personality: 'digger', owner: null, connected: true },
       ],
     },
   }
@@ -92,11 +115,28 @@ export async function mountUiTest(name: string): Promise<boolean> {
   await loadUiAssets()
   refreshLabels()
   if (name === 'title') createTitleView().show(() => console.log('start'))
-  else if (name === 'menu') {
+  else if (name === 'menu' || name === 'profile') {
     // v5: &players=N (2..8) arma una config de N casilleros (P1 humano, el resto IA, P3 con nombre) en el mapa
     // de &size= (por defecto grande); sin &players usa la config guardada o la de fábrica, como el juego.
     const n = Number(params.get('players'))
-    const initial: MatchConfig | null = n
+    // v3 ?uitest=profile: dos humanos con nombre propio y colores elegidos, e IA con personalidades
+    const initial: MatchConfig | null = name === 'profile'
+      ? {
+          slots: [
+            { kind: 'human', name: 'FACU', crew: 'pilot', color: 5 },
+            { kind: 'human', name: 'LA ROJA!', crew: 'commando', color: 1 },
+            { kind: 'ai', crew: 'colonel', color: 0, personality: 'aggressive' },
+            { kind: 'ai', crew: 'goggles', color: 7, personality: 'sniper' },
+            { kind: 'ai', crew: 'desert', color: 3, personality: 'digger' },
+            { kind: 'ai', crew: 'sarge', color: 6, personality: 'opportunist' },
+            { kind: 'ai', crew: 'rookie', color: 2 },
+          ],
+          rounds: 3,
+          difficulty: 'normal',
+          biome: 'rotate',
+          size: 'large',
+        }
+      : n
       ? {
           slots: Array.from({ length: Math.max(2, Math.min(8, n)) }, (_, i) => ({ kind: i === 0 ? ('human' as const) : ('ai' as const), crew: CREWS[i], ...(i === 2 ? { name: 'RULO' } : {}) })),
           rounds: 3,
@@ -126,7 +166,7 @@ export async function mountUiTest(name: string): Promise<boolean> {
     const owned: Record<string, number> = { heavy: 2, shield: 1 }
     const view = createShopView()
     const change = (id: ShopId, dir: number) => {
-      const s = SHOP.find((e) => e.id === id)
+      const s = FULL_SHOP.find((e) => e.id === id)
       if (!s) return
       money -= s.price * dir
       owned[id] = (owned[id] ?? 0) + s.qty * dir
@@ -194,7 +234,16 @@ export async function mountUiTest(name: string): Promise<boolean> {
           : null,
         minimap,
         suddenDeath,
+        // v3: &guide=S muestra la barra de guiado con S segundos de GUIDE_TIME; &aim=jetpack|teleport, la ayuda de destino
+        guide: params.has('guide') ? { left: Number(params.get('guide')) || 0, total: GUIDE_TIME } : null,
+        aimItem: params.get('aim') === 'jetpack' || params.get('aim') === 'teleport' ? (params.get('aim') as 'jetpack' | 'teleport') : null,
       },
+    }
+    // v3: &weapon=<WeaponId> elige el arma del tablero (por defecto la pesada)
+    const wp = params.get('weapon') as WeaponId | null
+    if (wp && wp in model.ammoAll) {
+      model.weapon = wp
+      model.ammo = model.ammoAll[wp]
     }
     // el flujo llama a update en cada frame; acá también, para ver el titileo del turno
     const tick = () => {
@@ -237,6 +286,15 @@ export async function mountUiTest(name: string): Promise<boolean> {
       start: () => console.log('start'),
       leave: () => console.log('leave'),
     })
+    // v3: el perfil propio y la personalidad de las IA (lo que haría el anfitrión al recibir 'profile')
+    view.onProfile((p) => push((m) => {
+      console.log('profile', JSON.stringify(p))
+      if (m.mySlot != null) m.lobby.slots[m.mySlot] = { ...m.lobby.slots[m.mySlot], name: p.name, crew: p.crew, color: p.color }
+    }))
+    view.onPersonality((i, pers) => push((m) => {
+      console.log('personality', i, pers)
+      m.lobby.slots[i] = { ...m.lobby.slots[i], personality: pers ?? undefined }
+    }))
     pressKeys()
   } else return false
   return true
