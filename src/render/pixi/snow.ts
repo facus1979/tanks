@@ -149,6 +149,10 @@ export function frost(t: Terrain, r: { x0: number; y0: number; x1: number; y1: n
             const s = k + side
             // solo en bordes de verdad (dos filas de aire debajo): en las pendientes no
             if (f[s] !== AIR || f[s + W] !== AIR || f[s + 2 * W] !== AIR) continue
+            // y arriba plano (3 px de techo con aire encima): en una ladera empinada cada escalón sería un diente
+            const i1 = k - side
+            const i2 = k - 2 * side
+            if (!solid(i1) || !solid(i2) || f[i1 - W] !== AIR || f[i2 - W] !== AIR) continue
             put(x + side, y, 0xeef5fc)
             if (rnd(x, y, 163 + side) > 0.45) put(x + side, y + 1, 0xc2d2e6)
             if (rnd(x, y, 165 + side) > 0.7 && f[s + side] === AIR) put(x + 2 * side, y, 0xdde8f4)
@@ -400,7 +404,7 @@ const FLAKE_PLANES = [
 const BREATH_EVERY = 2.6 // s entre bocanadas de un tripulante
 const MIST_H = 56
 const MIST_TILE = 256
-const GLINT_PERIOD = 120 // px entre reflejos que corren por el hielo
+const GLINT_PERIOD = 80 // px entre reflejos que corren por el hielo
 const GLINT_SPEED = 34 // px/s
 const SCAN_EVERY = 0.4 // s mínimos entre escaneos de la grilla mientras cambia
 const ICE_SPIN = 70 // px/s que giran las orugas sin tracción al patinar en el hielo
