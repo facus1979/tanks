@@ -894,14 +894,16 @@ function match(bots: number, seed: number, size: MapSize = 'small'): MatchStats 
   const w = s.roundWinnerId
   return { shots, turns: s.turn, winner: w, weapons, sudden: s.lava !== null, byLava, lavaMs, abyss, walked, rank: w === null ? -1 : order.indexOf(w), opener: w === opener }
 }
-// 20 partidas por tamaño (v2.4; antes Mediano y Grande con 10).
+// 20 partidas por tamaño, 40 con 2 tanques en Mediano y Grande (v2.4; antes Mediano y Grande con 10).
 {
   const full = process.argv.includes('--balance')
   for (const size of MAP_SIZE_ORDER) {
     const t0 = performance.now()
     // v2.4: 20 partidas en todos los tamaños (con 10, Mediano y Grande quedaban a un tiro del tope que
-    // bloquea el deploy; el workflow de Pages corre sim-check)
-    const games = 20
+    // bloquea el deploy; el workflow de Pages corre sim-check). Las de 2 tanques en Mediano y Grande, 40: son
+    // baratas (~5 s) y muy ruidosas (de 1 a 28 tiros); con 20, Grande daba entre 7,7 y 11,8 según la tanda de
+    // seeds (media de 60 partidas ~10) y el piso de 8 fallaba por azar.
+    const gamesFor = (bots: number) => (bots === 1 && size !== 'small' ? 40 : 20)
     void full
     // v4: costo del flujo en estas partidas (cada fire corre el flujo sobre todo el mapa)
     flowStats.fires = flowStats.flows = flowStats.ms = flowStats.worst = 0
@@ -910,6 +912,7 @@ function match(bots: number, seed: number, size: MapSize = 'small'): MatchStats 
     liquidEvents.splash = liquidEvents.water = liquidEvents.lava = liquidEvents.steam = 0
     for (const bots of [1, 3]) {
       const res = []
+      const games = gamesFor(bots)
       for (let seed = 1; seed <= games; seed++) res.push(match(bots, 100 + seed, size))
       const shots = res.map((r) => r.shots)
       const avg = shots.reduce((a, b) => a + b, 0) / shots.length
