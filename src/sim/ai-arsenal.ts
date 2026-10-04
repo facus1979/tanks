@@ -2,11 +2,10 @@
 // teledirigido, tiros que caen en un punto (mina, muro), apuntado del láser y lugares para el jetpack y el
 // teletransporte. Nada acá cambia el estado real.
 import { fly, muzzle, skylineOf } from './ballistics'
-import { fallGuided, steerGuided, ticksLeft } from './guided'
+import { fallGuided, startGuided, steerGuided, ticksLeft } from './guided'
 import { tankDistance } from './physics'
 import { SOLID } from './terrain'
 import { tankTilt } from './tilt'
-import { resolveShot } from './weapons'
 import { TANK_H, type Difficulty, type GameState, type GuidedState, type Player, type Vec2 } from './types'
 
 export type SteerDir = -1 | 0 | 1
@@ -57,12 +56,11 @@ export function noisySteer(dirs: SteerDir[], difficulty: Difficulty, rand: () =>
   return dirs.map((d) => (rand() < p ? ((Math.floor(rand() * 3) - 1) as SteerDir) : d))
 }
 
-// Lanza el teledirigido con el ángulo y la potencia del tirador en una copia (la de simulate) y devuelve el
-// estado en el apogeo (null si choca antes). No toca el estado.
+// El estado del teledirigido en el apogeo con el ángulo y la potencia del tirador (null si choca antes). Vuelo
+// puro (sin deflector): no toca el estado.
 export function apexOf(state: GameState, shooter: Player): GuidedState | null {
-  const probe = { ...state, hazards: [...state.hazards], players: state.players.map((p) => ({ ...p })) }
-  const out = resolveShot(probe, probe.players[state.players.indexOf(shooter)], 'guided', { pause: true })
-  return out.guided ?? null
+  const up = fly({ terrain: state.terrain, players: state.players, props: state.props, ownerId: shooter.id, angle: shooter.angle, power: shooter.power, wind: state.wind, lava: state.lava ?? undefined, stopAtApex: true })
+  return up.apex ? startGuided(state, shooter, up, up.time) : null
 }
 
 // El rival al que va el teledirigido: el más cerca de donde caería sin guiar.
