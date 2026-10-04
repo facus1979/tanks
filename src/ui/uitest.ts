@@ -1,6 +1,6 @@
 // Página de prueba de las vistas: ?uitest=online|lobby|title|menu|banner|score|final|shop|hud con modelos falsos.
 // index.html la carga solo si la query trae uitest; main.ts puede llamar mountUiTest(name) si prefiere.
-import { BEDROCK, BRICK, CREWS, DIRT, ITEM_ORDER, MAP_SIZES, MAX_PLAYERS_BY_SIZE, SHOP, STONE, TANK_COLORS, WOOD, type MapSize, type MatchConfig, type ShopId, type Terrain } from '../sim/types'
+import { BEDROCK, BRICK, CREWS, DIRT, GUIDE_TIME, ITEM_ORDER, MAP_SIZES, MAX_PLAYERS_BY_SIZE, SHOP, STONE, TANK_COLORS, WOOD, type MapSize, type MatchConfig, type ShopId, type Terrain, type WeaponId } from '../sim/types'
 import { loadUiAssets } from './assets'
 import { Hud } from './hud'
 import { refreshLabels } from './kit'
@@ -194,7 +194,16 @@ export async function mountUiTest(name: string): Promise<boolean> {
           : null,
         minimap,
         suddenDeath,
+        // v3: &guide=S muestra la barra de guiado con S segundos de GUIDE_TIME; &aim=jetpack|teleport, la ayuda de destino
+        guide: params.has('guide') ? { left: Number(params.get('guide')) || 0, total: GUIDE_TIME } : null,
+        aimItem: params.get('aim') === 'jetpack' || params.get('aim') === 'teleport' ? (params.get('aim') as 'jetpack' | 'teleport') : null,
       },
+    }
+    // v3: &weapon=<WeaponId> elige el arma del tablero (por defecto la pesada)
+    const wp = params.get('weapon') as WeaponId | null
+    if (wp && wp in model.ammoAll) {
+      model.weapon = wp
+      model.ammo = model.ammoAll[wp]
     }
     // el flujo llama a update en cada frame; acá también, para ver el titileo del turno
     const tick = () => {
