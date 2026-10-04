@@ -2,7 +2,7 @@
 import { deform, hasLiquid, isPit, isSolid, liquidAt, peekDirty, solidRunUp } from './terrain'
 import { COLLAPSE_FRAME_ITERS, collapseStats, collapseTerrain } from './collapse'
 import { knock, slideDown, slopeAt } from './slide'
-import { buildWall, pullTerrain, quakeTerrain } from './terrain-fx'
+import { buildWall, pullTerrain, quakeTerrain, WALL_DT } from './terrain-fx'
 import {
   FALL_DAMAGE,
   KNOCKBACK_MAX,
@@ -136,7 +136,7 @@ export function resolveBlast(state: GameState, first: Blast, after?: (events: Ga
       b.water = true
     }
     // v3: el muro levanta una pared (buildWall); 'none' (terremoto) no rompe: sacude (más abajo)
-    if (b.terrain === 'wall') buildWall(state.terrain, state.players, b.x, b.y, Math.round(b.radius * 2))
+    const wall = b.terrain === 'wall' ? buildWall(state.terrain, state.players, b.x, b.y, Math.round(b.radius * 2)) : null
     const debris = b.terrain === 'wall' || b.terrain === 'none' ? {} : deform(state.terrain, b.x, b.y, b.radius, b.terrain, state.lava ?? Infinity, b.hard)
     events.push({
       type: 'impact',
@@ -150,6 +150,8 @@ export function resolveBlast(state: GameState, first: Blast, after?: (events: Ga
       source: b.source ?? 'shot',
       ...(b.water ? { water: true } : {}), // v2.4: también en barriles en cadena
     })
+    // v3: el muro sube animado (evento 'flow' con parches, como los líquidos: el último deja la pared entera)
+    if (wall && wall.patches.length > 0) events.push({ type: 'flow', t: b.t, dt: WALL_DT, patches: wall.patches })
     // v3: terremoto y agujero negro mueven el terreno (eventos 'quake' / 'pull' y un 'collapse' con los parches)
     if (b.quake) {
       events.push({ type: 'quake', x: b.x, y: b.y, radius: b.quake, t: b.t })

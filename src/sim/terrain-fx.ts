@@ -108,9 +108,12 @@ export interface TerrainFx {
 // la columna del impacto. Solo llena aire (la lava que toca se vuelve piedra); no se mete en la caja de ningún
 // tanque vivo; en una columna sin piso (abismo) no hay muro.
 export const WALL_W = 8
-export function buildWall(t: Terrain, players: Player[], x: number, y: number, height: number): number {
+export const WALL_FRAMES = 12 // cuadros en que sube la pared (evento 'flow', uno cada WALL_DT)
+export const WALL_DT = 1 / 30
+export function buildWall(t: Terrain, players: Player[], x: number, y: number, height: number): TerrainFx {
   const cx = Math.round(x)
-  let n = 0
+  const built: number[] = [] // celdas que se llenaron
+  const was: number[] = [] // lo que había (aire, agua o lava)
   for (let ix = cx - WALL_W / 2; ix < cx + WALL_W / 2; ix++) {
     if (ix < 0 || ix >= t.w) continue
     // piso: la primera fila sólida desde un poco arriba del impacto
@@ -121,15 +124,40 @@ export function buildWall(t: Terrain, players: Player[], x: number, y: number, h
       if (players.some((p) => p.alive && ix >= Math.round(p.x) - TANK_HALF_W && ix < Math.round(p.x) + TANK_HALF_W && iy >= p.y - TANK_H && iy < p.y)) continue
       const i = iy * t.w + ix
       const m = t.front[i]
-      if (m === AIR || m === WATER) t.front[i] = DIRT
-      else if (m === LAVA) t.front[i] = STONE
-      else continue
+      if (m !== AIR && m !== WATER && m !== LAVA) continue
+      built.push(i)
+      was.push(m)
+      t.front[i] = m === LAVA ? STONE : DIRT
       if (t.back[i] === AIR) t.back[i] = DIRT
-      n++
     }
   }
   markDirty(t, cx - WALL_W, Math.floor(y) - height - 4, cx + WALL_W, Math.floor(y) + 8)
-  return n
+  if (built.length === 0 || !recordFx) return { changed: built.length > 0, cells: built.length, patches: [] }
+  // parches: la pared sube desde el piso (cuadro k: las celdas por debajo de la línea k)
+  let x0 = Infinity
+  let x1 = -1
+  let y0 = Infinity
+  let y1 = -1
+  for (const i of built) {
+    const xx = i % t.w
+    const yy = (i - xx) / t.w
+    x0 = Math.min(x0, xx)
+    x1 = Math.max(x1, xx)
+    y0 = Math.min(y0, yy)
+    y1 = Math.max(y1, yy)
+  }
+  const patches: TerrainPatch[] = []
+  for (let k = 0; k <= WALL_FRAMES; k++) {
+    const line = y1 + 1 - ((y1 + 1 - y0) * k) / WALL_FRAMES // filas >= line ya subieron
+    const p = patchOf(t, x0, y0, x1, y1)
+    for (let n = 0; n < built.length; n++) {
+      const xx = built[n] % t.w
+      const yy = (built[n] - xx) / t.w
+      if (yy < line) p.front[(yy - y0) * p.w + (xx - x0)] = was[n]
+    }
+    patches.push(p)
+  }
+  return { changed: true, cells: built.length, patches }
 }
 
 // ---------- terremoto ----------
