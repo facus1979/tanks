@@ -149,6 +149,7 @@ export class ArmasFx {
           ev.amount,
           ev.x,
           ev.y,
+          frame.terrain.w,
         )
         break
       case 'slide':

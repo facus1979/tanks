@@ -19,6 +19,7 @@ const TELE_HI = 0xe8fcff
 const TELE_ALT = 0xd080ff
 const SHIELD = 0x8ee8ff
 const SHIELD_HI = 0xe8fcff
+const SHIELD_EDGE = 0x1a5a88
 const METAL = 0x9a9a90
 const METAL_DARK = 0x5c5c54
 
@@ -258,7 +259,12 @@ export class ItemsFx {
           const lit = Math.cos(a - spin)
           if (lit < -0.2 && i % 2 === 1) continue // del lado oscuro, trama
           const c = lit > 0.8 ? SHIELD_HI : SHIELD
-          over.px(cx + Math.cos(a) * R, cy + Math.sin(a) * R * 0.92, c, lit > 0.3 ? 0.95 : 0.55)
+          const ex = cx + Math.cos(a) * R
+          const ey = cy + Math.sin(a) * R * 0.92
+          // borde exterior oscuro para que se lea contra la niebla clara, y el anillo de color adentro
+          if (lit > -0.2) over.px(cx + Math.cos(a) * (R + 1), cy + Math.sin(a) * (R + 1) * 0.92, SHIELD_EDGE, 0.5)
+          over.px(ex, ey, c, lit > 0.3 ? 1 : 0.6)
+          if (lit > 0.3) over.px(cx + Math.cos(a) * (R - 1), cy + Math.sin(a) * (R - 1) * 0.92, SHIELD, 0.5)
         }
         over.px(cx - R * 0.5, cy - R * 0.6, SHIELD_HI, 0.9)
         over.px(cx - R * 0.6, cy - R * 0.45, SHIELD_HI, 0.7)
