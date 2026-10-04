@@ -16,7 +16,7 @@
 // calcula como antes con lo que no es bono, y earnings del 'roundover' lo incluye.
 import { inLava } from './physics'
 import { groundAt, columnGround, columnTop, isPit } from './terrain'
-import { PROP_SIZE } from './gen'
+import { PROP_SIZE, liquidBelow } from './gen'
 import { Rng, hashSeed } from './rng'
 import {
   BONUS,
@@ -193,7 +193,7 @@ export function maybeDropLoot(state: GameState, events: GameEvent[], t: number):
     let ok = true
     for (let ix = x; ix < x + w && ok; ix++) {
       const g = columnGround(tr, ix)
-      if (isPit(tr, ix) || columnTop(tr, ix) < g || g - top > 3) ok = false
+      if (isPit(tr, ix) || columnTop(tr, ix) < g || g - top > 3 || liquidBelow(tr, ix, g)) ok = false
     }
     if (!ok) continue
     if (state.lava !== null && top >= state.lava - 6) continue

@@ -2016,16 +2016,23 @@ function frozenLake(t: Terrain, L: Layout, rng: Rng, spawns: number[]): Basin | 
   return { kind: 'water', x0: b0, x1: b1, level }
 }
 
+const CREVASSE_GAP = 24
 // Grieta de Chico: un tajo de 34-44 px (más ancho que un tanque: el que cae no se engancha) hasta cerca del
-// fondo, con paredes de hielo, a 30 px o más de la caja de los tanques y del lago. Sin lugar, no hay grieta.
+// fondo, con paredes de hielo, a CREVASSE_GAP px o más de la caja de los tanques y del lago. Sin lugar, no hay grieta.
 function crevasse(t: Terrain, L: Layout, rng: Rng, spawns: number[], lake: Basin | null): void {
   const cw = rng.int(34, 44)
   const seed = rng.int(1, 100000)
-  for (let k = 0; k < 16; k++) {
-    const x0 = rng.int(L.platX1 + 56, L.plateauX0 - 40 - cw)
+  // todas las x que sirven (de a 4 px) y una sorteada
+  const opts: number[] = []
+  for (let x0 = L.platX1 + 56; x0 <= L.plateauX0 - 40 - cw; x0 += 4) {
     const x1 = x0 + cw
-    if (spawns.some((s) => x1 > s - TANK_HALF_W - 30 && x0 < s + TANK_HALF_W + 30)) continue
-    if (lake && x1 > lake.x0 - 30 && x0 < lake.x1 + 30) continue
+    if (spawns.some((s) => x1 > s - TANK_HALF_W - CREVASSE_GAP && x0 < s + TANK_HALF_W + CREVASSE_GAP)) continue
+    if (lake && x1 > lake.x0 - CREVASSE_GAP && x0 < lake.x1 + CREVASSE_GAP) continue
+    opts.push(x0)
+  }
+  for (let k = 0; k < 4 && opts.length > 0; k++) {
+    const x0 = opts.splice(rng.int(0, opts.length - 1), 1)[0]
+    const x1 = x0 + cw
     let top = t.h
     for (let x = x0 - 8; x <= x1 + 8; x++) top = Math.min(top, columnGround(t, x))
     const bottom = H - BEDROCK_ROWS - 8 - rng.int(0, 24)
@@ -2056,7 +2063,14 @@ function crevasse(t: Terrain, L: Layout, rng: Rng, spawns: number[], lake: Basin
 // utilería ni estructuras. Los ubica createMatch con un rng propio después de generate (así generate y los
 // mapas de los otros biomas no cambian). Devuelve la utilería con los objetivos agregados.
 export const TARGET_SPAWN_GAP = 100
-const TARGET_TRIES = 60
+export const TARGET_SPAWN_GAP_SMALL = 70 // Chico: hay poco piso parejo lejos de los tanques
+// Hay líquido hasta 40 px debajo del piso de la columna (un lago congelado: el hielo no es piso firme).
+export function liquidBelow(t: Terrain, x: number, g: number): boolean {
+  for (let y = g; y < Math.min(t.h, g + 40); y++) if (LIQUID[t.front[y * t.w + x]]) return true
+  return false
+}
+const TARGET_TRIES = 80
+const TARGET_FLAT = 4 // diferencia de piso tolerada bajo el objetivo
 export function placeTargets(t: Terrain, props: Prop[], spawns: number[], rng: Rng, size: MapSize): Prop[] {
   const n = size === 'small' ? (rng.chance(0.5) ? 1 : 0) : size === 'medium' ? 1 : rng.chance(0.5) ? 2 : 1
   const out = props.slice()
@@ -2068,11 +2082,11 @@ export function placeTargets(t: Terrain, props: Prop[], spawns: number[], rng: R
     let ok = true
     for (let ix = x - 2; ix < x + w + 2 && ok; ix++) {
       const g = columnGround(t, ix)
-      if (t.pits?.[ix] || columnTop(t, ix) < g || g >= t.h - BEDROCK_ROWS - 4) ok = false
+      if (t.pits?.[ix] || columnTop(t, ix) < g || g >= t.h - BEDROCK_ROWS - 4 || liquidBelow(t, ix, g)) ok = false
       lo = Math.min(lo, g)
       hi = Math.max(hi, g)
     }
-    if (!ok || hi - lo > 2 || nearPit(t, Math.round(x + w / 2), w / 2 + 40)) continue
+    if (!ok || hi - lo > TARGET_FLAT || nearPit(t, Math.round(x + w / 2), w / 2 + 40)) continue
     const y = lo - h
     if (y < 10) continue
     // caja libre, sin estructuras alrededor
@@ -2084,7 +2098,7 @@ export function placeTargets(t: Terrain, props: Prop[], spawns: number[], rng: R
       }
     }
     if (!clearBox) continue
-    if (spawns.some((s) => Math.abs(s - (x + w / 2)) < TARGET_SPAWN_GAP)) continue
+    if (spawns.some((s) => Math.abs(s - (x + w / 2)) < (size === 'small' ? TARGET_SPAWN_GAP_SMALL : TARGET_SPAWN_GAP))) continue
     if (out.some((q) => x + w + 8 > q.x && x - 8 < q.x + q.w && y - 8 < q.y + q.h && lo + 8 > q.y)) continue
     out.push({ id: out.length, kind: 'target', x, y, w, h, alive: true })
     placed++
