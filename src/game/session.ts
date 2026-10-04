@@ -1375,6 +1375,33 @@ export class Session {
         camera: this.cam.camera,
         lava: this.lavaView(),
         splashes: this.takeFrameSplashes(),
+        hazards: pb.hazards,
+        guided: null,
+      }
+    }
+    const g = this.guide
+    if (g && s.phase === 'guiding') {
+      // v3: teledirigido en la bajada: el misil sale del camino de los steer, en el cabezal
+      const m = this.guideNow(g)
+      return {
+        biome,
+        terrain: s.terrain,
+        terrainVersion: this.terrainVersion,
+        matchId: this.matchId,
+        props: s.props ?? [],
+        players: this.withLost(s.players, s.terrain.h),
+        current: s.current,
+        wind: s.wind,
+        projectiles: [{ x: m.x, y: m.y }],
+        shooterId: g.ownerId,
+        weapon: g.weapon,
+        freeze: this.frozen,
+        aimPreview: null,
+        camera: this.cam.camera,
+        lava: this.lavaView(),
+        splashes: this.takeFrameSplashes(),
+        hazards: s.hazards ?? [],
+        guided: { x: m.x, y: m.y, vx: m.vx, vy: m.vy, guide: this.guideLeft(g) },
       }
     }
     const aim = this.aimGuide(s)
@@ -1397,6 +1424,8 @@ export class Session {
       lava: this.lavaView(),
       alerts: this.alerts(s),
       splashes: this.takeFrameSplashes(),
+      hazards: s.hazards ?? [],
+      guided: null,
     }
   }
 
@@ -1532,6 +1561,8 @@ export class Session {
       const now = this.projectiles(pb)
       const fall = this.fallFocus(pb)
       const slide = now.length ? null : this.slideFocus(pb)
+      // v3: terremoto, agujero negro, botín que cae o destino del teletransporte (después de los vuelos)
+      const focus = pb.focus && pb.t <= pb.focus.t1 && !now.length ? pb.focus : null
       if (fall) {
         // v3: un tanque cae al abismo: la cámara lo acompaña hasta el borde de abajo del mundo
         this.cam.followFall(fall.x, fall.y)
@@ -1549,6 +1580,8 @@ export class Session {
           y1 = Math.max(y1, p.y)
         }
         this.cam.followShot((x0 + x1) / 2, (y0 + y1) / 2, pb.zoom)
+      } else if (focus) {
+        this.cam.watch(focus.x, focus.y, focus.zoom)
       } else if (slide) {
         // pulido v2: un tanque se desliza (el del turno o uno que estaba en pantalla): la cámara lo acompaña
         this.cam.followSlide(slide.x, slide.y)
@@ -1563,6 +1596,19 @@ export class Session {
         else if (at) this.cam.settleAt(at.x, at.y)
         else this.cam.holdShot(1)
       }
+    } else if (s.phase === 'guiding' && this.guide) {
+      // v3: el misil guiado, con anticipación según su velocidad (mira hacia donde va)
+      const g = this.guide
+      const m = this.guideNow(g)
+      let x = m.x + m.vx * GUIDE_LOOKAHEAD
+      let y = m.y + m.vy * GUIDE_LOOKAHEAD
+      // online: el tramo del dueño remoto todavía no llegó por el log; la vista previa en vivo adelanta la cámara
+      const hint = g.hint && performance.now() - g.hint.at < 400 && g.t >= (g.pts.length - 1) * PATH_DT - 1e-6 ? g.hint : null
+      if (hint) {
+        x = hint.x
+        y = hint.y
+      }
+      this.cam.followShot(x, y, g.zoom)
     } else if (s.phase === 'aiming') {
       const key = `${this.matchId}:${s.turn}:${s.current}`
       if (key !== this.camKey) {
@@ -1571,7 +1617,10 @@ export class Session {
         if (this.cam.mode === 'manual') this.cam.mode = 'tank'
       }
       const p = s.players[s.current]
-      if (p) this.cam.followTank(p.x, p.y)
+      // v3: eligiendo destino de jetpack o teletransporte: la cámara encuadra el tanque y el cursor
+      const ia = this.aimingItem
+      if (ia && this.cam.mode !== 'manual') this.cam.followTank((ia.from.x + ia.to.x) / 2, Math.min(p?.y ?? ia.from.y, ia.to.y + TANK_H))
+      else if (p) this.cam.followTank(p.x, p.y)
     } else if (this.cam.mode === 'shot') {
       this.cam.holdShot(1)
     }
@@ -1592,7 +1641,7 @@ export class Session {
       view: this.cam.view(),
       // el perdido en un abismo queda marcado en el fondo del mapa
       tanks: players.map((p, i) => ({ id: p.id, x: p.x, y: Math.min(p.y, terrain.h), color: p.color, alive: p.alive, current: i === currentIndex })),
-      projectiles: pb ? this.projectiles(pb) : [],
+      projectiles: pb ? this.projectiles(pb) : this.guide && this.state?.phase === 'guiding' ? [samplePath(this.guide.pts, this.guide.t)] : [],
       lastImpacts,
       lava: this.lavaView(),
     }
@@ -1666,7 +1715,7 @@ export class Session {
       ammo: ammoOwner?.ammo?.[weapon] ?? 0,
       wind: pb ? pb.before.wind : s.wind,
       status: this.status(s, current),
-      showAim: !!current && !pb,
+      showAim: !!current && !pb && s.phase !== 'guiding',
       ammoAll,
       // pulido v2: el tanque lleno es el combustible de un turno en este mapa (fuelFor del ancho)
       fuel: current ? Math.max(0, current.fuel ?? 0) / fuelFor(s.width ?? s.terrain.w) : 0,
@@ -1682,6 +1731,9 @@ export class Session {
         net: this.netHud,
         minimap: this.minimap(players, currentIndex, pb ? pb.terrain : s.terrain),
         suddenDeath: this.suddenDeathModel(s),
+        // v3: barra de guiado del teledirigido y ayuda de destino de jetpack / teletransporte
+        guide: this.guide && s.phase === 'guiding' && !pb ? { left: this.guideLeft(this.guide), total: Math.max(GUIDE_TIME, this.guide.guide0) } : null,
+        aimItem: this.aimingItem?.item ?? null,
       },
     }
   }
@@ -1707,6 +1759,12 @@ export class Session {
   private status(s: GameState, current: Player | undefined): string {
     if (this.message) return this.message
     if (s.phase === 'gameover' && !this.playback) return this.resultText()
+    if (s.phase === 'guiding' && !this.playback) {
+      // v3: teledirigido en la bajada
+      const owner = s.players.find((p) => p.id === this.guide?.ownerId)
+      if (owner && this.controlledHere(owner)) return 'Guia con izquierda y derecha'
+      return owner ? `${owner.name} guia el misil` : ''
+    }
     if (s.phase !== 'aiming' && !this.playback) return 'Fin de ronda'
     if (this.playback || !current) return ''
     if (this.windNotice > 0) return 'Cambia el viento'
@@ -1760,6 +1818,8 @@ export class Session {
     if (s.phase !== 'aiming') return null
     const p = s.players[s.current]
     if (!p || !p.alive || !this.controlledHere(p) || this.bannerFor()) return null
+    // v3: eligiendo destino de un ítem, la guía del tiro no se muestra (el destino lo dibuja main.ts)
+    if (this.aimingItem) return null
     const aim = this.aim && this.aim.playerId === p.id ? this.aim : p
     const angle = quantize(aim.angle)
     const power = quantize(aim.power)
@@ -2219,6 +2279,8 @@ export class Session {
           // v3: utilería que aparece en el tiro (caja de botín que cae en paracaídas): entra con este evento
           pb.props.push(final ? { ...final } : { id: event.propId, kind: event.kind, x: event.x, y: event.y, w: 12, h: 12, alive: true })
           this.newProps.add(event)
+          // la cámara mira dónde cae el botín
+          if (event.kind === 'loot') this.focusOn(pb, final ? final.x + final.w / 2 : event.x, final ? final.y : event.y, 1, LOOT_HOLD)
         } else if (prop) {
           prop.alive = !event.destroyed
           if (final) {
@@ -2228,9 +2290,47 @@ export class Session {
         }
         break
       }
+      // ---------- v3 ----------
+      case 'hazard': {
+        const h = event.hazard
+        pb.hazards = pb.hazards.filter((q) => q.id !== h.id)
+        if (event.action === 'place') pb.hazards.push({ ...h })
+        break
+      }
+      case 'quake':
+        this.focusOn(pb, event.x, event.y, this.fitZoom(event.radius * 2.4), QUAKE_HOLD)
+        break
+      case 'pull':
+        this.focusOn(pb, event.x, event.y, this.fitZoom(event.radius * 2.4), (Number.isFinite(event.duration) ? event.duration : 1) + PULL_HOLD)
+        break
+      case 'teleport': {
+        const p = pb.players.find((q) => q.id === event.playerId)
+        if (p) {
+          p.x = event.to.x
+          p.y = event.to.y
+        }
+        this.focusOn(pb, event.to.x, event.to.y - TANK_H / 2, 1, TELEPORT_HOLD)
+        break
+      }
       default:
         break
     }
+  }
+
+  // v3: la cámara mira (x, y) con ese zoom hasta hold segundos de tiro desde ahora; el tiro dura al menos eso.
+  private focusOn(pb: Playback, x: number, y: number, zoom: number, hold: number): void {
+    if (this.cam.fixed && zoom >= 1) {
+      // mapa Chico: la cámara no se mueve, solo se estira el tiro para ver lo que pasa
+      pb.end = Math.max(pb.end, pb.t + hold)
+      return
+    }
+    pb.focus = { x, y, zoom, t1: pb.t + hold }
+    pb.end = Math.max(pb.end, pb.t + hold)
+  }
+
+  // Zoom que entra un ancho de mundo w (con margen del alto útil).
+  private fitZoom(w: number): number {
+    return clamp(Math.min(1, (VIEW_W * 0.85) / Math.max(1, w), (this.cam.usableH * 0.85) / Math.max(1, w * 0.6)), MIN_ZOOM, 1)
   }
 
   // ---------- líquidos (v4) ----------
@@ -2634,7 +2734,8 @@ function planSlides(timeline: TimedEvent[], h: number, slides: SlidePlay[]): voi
   for (let i = 0; i < timeline.length; i++) {
     const item = timeline[i]
     const ev = item.event
-    if (ev.type !== 'slide' || !Number.isFinite(item.t) || slides.some((sl) => sl.event === ev)) continue
+    // v3: el salto del jetpack se anima igual que un deslizamiento (path del tanque cada PATH_DT)
+    if ((ev.type !== 'slide' && ev.type !== 'jetpack') || !Number.isFinite(item.t) || slides.some((sl) => sl.event === ev)) continue
     const id = ev.playerId
     const prev = slides.reduce((m, sl) => (sl.playerId === id ? Math.max(m, sl.end) : m), -Infinity)
     const t0 = Math.max(item.t, prev)
@@ -2646,7 +2747,7 @@ function planSlides(timeline: TimedEvent[], h: number, slides: SlidePlay[]): voi
       const e = timeline[j]
       const next = e.event
       if (!('playerId' in next) || next.playerId !== id || !Number.isFinite(e.t)) continue
-      if (next.type === 'slide') break // el siguiente deslizamiento se encadena solo
+      if (next.type === 'slide' || next.type === 'jetpack') break // el siguiente deslizamiento se encadena solo
       if (next.type === 'fall' && !fell) {
         fell = true
         if (next.to > h || next.parachute || next.to <= next.from) {
