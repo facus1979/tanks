@@ -1,5 +1,6 @@
 // Teclado por código físico (KeyA, Digit1, Space...), así no depende del layout.
-const BLOCKED = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space', 'KeyA', 'KeyD'])
+// v3: Tab (recorre las armas) tampoco mueve el foco del navegador mientras se juega.
+const BLOCKED = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space', 'KeyA', 'KeyD', 'Tab'])
 
 export class Keyboard {
   capture = false
@@ -33,7 +34,7 @@ export class Keyboard {
   }
 }
 
-// Índice 0-7 del arma elegida con 1-8, o -1.
+// Índice 0-7 de la columna elegida con 1-8, o -1 (v3: el arma la decide weaponForKey de src/ui/arsenal.ts).
 export function weaponSlot(pressed: Set<string>): number {
   for (let i = 0; i < 8; i++) if (pressed.has(`Digit${i + 1}`) || pressed.has(`Numpad${i + 1}`)) return i
   return -1

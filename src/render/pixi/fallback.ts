@@ -230,10 +230,16 @@ export const DEBRIS_COLORS: number[][] = [
   [0x6e5038, 0x563e2c, 0x4a3424],
   [0x8a8a84, 0x5a5a56, 0xb0b0a8],
   [0x2a2622, 0x3a3430],
+  [0x8ab8b8, 0xcfe4dc], // v4 agua (no se rompe; por si acaso)
+  [0xff8a2a, 0xc83a10], // v4 lava
+  [0xffffff, 0xe6eef8, 0xc8d6e6, 0xa8bcd4], // v3 nieve: terrones blancos con sombra azulada
+  [0xe8f8ff, 0xa8d8ee, 0x7ab4d4, 0xffffff], // v3 hielo: astillas celestes y brillos
 ]
 
 // Color plano por material cuando falta la textura.
-export const MATERIAL_FLAT = [0, 0x20150f, 0x807761, 0x6d3b2b, 0x4a3526, 0xa8966c, 0x5a4230, 0x6e5038, 0x7a7a74, 0x2a2622]
+// v3: agua y lava no se pintan con esto (van en la capa de líquidos); nieve e hielo, de respaldo hasta que
+// el arte pinte sus texturas (snow.ts les pone encima el borde, las sombras y los reflejos).
+export const MATERIAL_FLAT = [0, 0x20150f, 0x807761, 0x6d3b2b, 0x4a3526, 0xa8966c, 0x5a4230, 0x6e5038, 0x7a7a74, 0x2a2622, 0x6a9aa8, 0xc84a18, 0xdce6f0, 0x9fcfe8]
 
 // Tramo de escalera 8×4 como ladder() del look-test.
 export const gridCanvas8x4 = (): HTMLCanvasElement =>

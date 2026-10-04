@@ -12,15 +12,45 @@
 //   room.startTimer(id) / stopTimer()   // límite de turno de un humano remoto; al vencer dispara solo
 //   room.close()
 //
+//
+// v3 perfil (ver ./profile para las reglas de nombre y color):
+//   room.setProfile({ name, crew, color })   // el del casillero del anfitrión (solo en el lobby); alias room.profile
+//   room.setPersonality(slot, p | null)      // personalidad de un casillero de IA (null = la sortea la sim)
+//   Los clientes mandan 'profile'; el anfitrión lo aplica a su casillero y lo refleja en el LobbyState.
+//   El perfil del peer se recuerda: si cambia de casillero (claim) se lo lleva.
+//   start() pone color y personality en cada SlotConfig del MatchConfig.
+//
+// v3 misil teledirigido (ver ./steer):
+//   room.dispatch({ type: 'steer', ... })    // los del anfitrión (su humano o la IA), igual que cualquier comando
+//   room.steerLive(playerId, x, y)           // posición en vivo del misil del anfitrión para los clientes
+//   hooks.guided()                           // OBLIGATORIO con el teledirigido: state.guided de la sim del anfitrión
+//   Con hooks.guided el room: rechaza 'steer' de quien no es el dueño del misil, completa con ceros si el
+//   turno vence en 'guiding', si el dueño se desconecta o si el guiado se cuelga (GUIDE_SLACK).
+//
 // Los comandos de los clientes llegan por 'input': el room verifica que sean del jugador del
 // casillero de ese peer y los pasa por hooks.apply (el mismo camino que dispatch).
 // hooks.apply NO debe llamar a dispatch de forma síncrona (si lo hace, el comando se encola).
-import { CREW_NAMES, CREWS, MAX_PLAYERS, MAX_PLAYERS_BY_SIZE } from '../sim'
-import type { Command, MapSize, MatchConfig, PlayerKind } from '../sim'
+import { CREW_NAMES, CREWS, MAX_PLAYERS, MAX_PLAYERS_BY_SIZE, PERSONALITIES, STEER_TICK } from '../sim'
+import type { Command, CrewId, MapSize, MatchConfig, Personality, PlayerKind } from '../sim'
 import type { NetTransport } from './base'
+import { assignColor, assignCrew, cleanName, isColor, isCrew } from './profile'
+import { GUIDE_SLACK, STEER_REJECT, validDirs } from './steer'
 import { NET_VERSION } from './types'
 import type { LobbySlot, LobbyState, NetMessage } from './types'
 import { compress } from './util'
+
+// Lo que el room necesita del misil en vuelo (GameState.guided de la sim del anfitrión).
+export interface GuidedInfo {
+  ownerId: number
+  t: number // segundos desde el disparo (en el apogeo: lo que tarda en verse el tramo balístico)
+  guide: number // segundos de guiado que le quedan
+}
+
+export interface ProfileInput {
+  name?: string
+  crew?: CrewId
+  color?: number
+}
 
 export interface HostHooks {
   apply(command: Command): boolean // applyCommand sobre la sim del anfitrión; true si lo aceptó
@@ -31,6 +61,8 @@ export interface HostHooks {
   onPeerBack?(p: RoomPeerEvent): void // volvió con su token (ya tiene snapshot): setKind 'human'
   onAimLive?(playerId: number, angle: number, power: number): void // vista previa de un remoto
   onTimer?(playerId: number, left: number): void
+  guided?(): GuidedInfo | null // v3: state.guided de la sim del anfitrión (null fuera de 'guiding')
+  onSteerLive?(playerId: number, x: number, y: number): void // v3: misil de un remoto en vivo (vista previa)
 }
 
 export interface RoomPeerEvent {
@@ -50,12 +82,14 @@ export interface RoomPeerInfo {
 
 const ROUNDS = [1, 3, 5, 10]
 const SIZE_NAMES: Record<MapSize, string> = { small: 'Chico', medium: 'Mediano', large: 'Grande' }
-const MAX_NAME = 14
+const BIOMES_OK = ['forest', 'jungle', 'industrial', 'snow', 'random', 'rotate']
 
 interface PeerRec {
   token: string
   name: string
   peerId: string | null // último peerId; conectado si byPeer lo tiene
+  crew?: CrewId // v3: perfil elegido (se lo lleva al cambiar de casillero)
+  color?: number
 }
 
 export class HostRoom {
@@ -73,6 +107,10 @@ export class HostRoom {
   private timer = 0
   private timerPlayer: number | null = null
   private readonly hashEvery: number
+  // v3 guiado de un remoto: hasta cuándo se le espera (performance.now()) antes de completar con ceros
+  private guideWatch: { playerId: number; timer: number } | null = null
+  private completing = false
+  private hostProfile: { crew?: CrewId; color?: number } = {} // v3: perfil del anfitrión (viaja con su casillero)
 
   constructor(
     private transport: NetTransport,
@@ -84,6 +122,7 @@ export class HostRoom {
       kind: i < 2 ? 'human' : 'off',
       name: i === 0 ? cleanName(opts.name) || CREW_NAMES[crew] : '',
       crew,
+      color: i, // v3: los 8 casilleros llevan siempre una permutación de los 8 colores (ver ./profile)
       owner: i === 0 ? 'host' : null,
       connected: i === 0,
     }))
@@ -133,6 +172,7 @@ export class HostRoom {
     if (s.owner === 'host' && kind !== 'human') return // el anfitrión suelta su casillero con release()
     if (s.owner && s.owner !== 'host' && kind !== 'human') s.owner = null
     s.kind = kind
+    if (kind !== 'ai') delete s.personality // v3: la personalidad es solo de IA
     if (kind === 'ai') s.name = CREW_NAMES[s.crew]
     if (kind === 'off' || (kind === 'human' && !s.owner)) s.name = ''
     s.connected = s.owner === 'host' || (!!s.owner && this.byPeer.has(s.owner))
@@ -144,7 +184,7 @@ export class HostRoom {
     const st = this.state
     if (key === 'rounds' && ROUNDS.includes(Number(value))) st.rounds = Number(value)
     else if (key === 'difficulty' && (value === 'easy' || value === 'normal' || value === 'hard')) st.difficulty = value
-    else if (key === 'biome' && ['forest', 'jungle', 'industrial', 'random', 'rotate'].includes(String(value)))
+    else if (key === 'biome' && BIOMES_OK.includes(String(value)))
       st.biome = value as LobbyState['biome']
     else if (key === 'turnSeconds' && Number(value) >= 0) st.turnSeconds = Math.round(Number(value))
     else if (key === 'size' && (value === 'small' || value === 'medium' || value === 'large')) {
@@ -156,6 +196,33 @@ export class HostRoom {
       for (const p of dropped) this.transport.send(p, { t: 'reject', reason })
       return
     } else return
+    this.lobbyChanged()
+  }
+
+  // v3: perfil del casillero del anfitrión (nombre, tripulante, color). Solo en el lobby.
+  // Devuelve el color que le quedó (puede no ser el pedido: ver ./profile), o null si no aplica.
+  setProfile(p: ProfileInput): number | null {
+    const slot = this.mySlot
+    if (this.started || slot === null) return null
+    if (isCrew(p.crew)) this.hostProfile.crew = p.crew
+    if (isColor(p.color)) this.hostProfile.color = p.color
+    const color = this.applyProfile(slot, p, 'host')
+    this.lobbyChanged()
+    return color
+  }
+
+  // v3: el mismo nombre que en ClientRoom (el flujo llama room.profile en los dos roles).
+  profile(p: ProfileInput): number | null {
+    return this.setProfile(p)
+  }
+
+  // v3: personalidad de un casillero de IA (null = que la sortee la sim con la seed). Solo en el lobby.
+  setPersonality(slot: number, p: Personality | null): void {
+    const s = this.state.slots[slot]
+    if (!s || this.started || s.kind !== 'ai') return
+    if (p === null) delete s.personality
+    else if (PERSONALITIES.includes(p)) s.personality = p
+    else return
     this.lobbyChanged()
   }
 
@@ -187,7 +254,14 @@ export class HostRoom {
     this.playerOfSlot = new Array(MAX_PLAYERS).fill(null)
     used.forEach(({ i }, id) => (this.playerOfSlot[i] = id))
     this.config = {
-      slots: used.map(({ s }) => ({ kind: s.kind as PlayerKind, name: s.name || CREW_NAMES[s.crew], crew: s.crew })),
+      // v3: color (único: la sala mantiene la permutación) y personalidad (solo IA; sin ella, la sortea la sim)
+      slots: used.map(({ s, i }) => ({
+        kind: s.kind as PlayerKind,
+        name: s.name || CREW_NAMES[s.crew],
+        crew: s.crew,
+        color: s.color ?? i,
+        ...(s.kind === 'ai' && s.personality ? { personality: s.personality } : {}),
+      })),
       rounds: st.rounds,
       difficulty: st.difficulty,
       biome: st.biome,
@@ -238,6 +312,33 @@ export class HostRoom {
     this.commit({ type: 'aim', playerId, angle: a.angle, power: a.power })
   }
 
+  // v3: posición en vivo del misil teledirigido que dirige el anfitrión (su humano o la IA). Vista previa:
+  // no entra al log. El flujo la llama a ~20/s mientras dura el guiado.
+  steerLive(playerId: number, x: number, y: number, except?: string): void {
+    const msg: NetMessage = { t: 'steerLive', playerId, x, y }
+    for (const p of this.byPeer.keys()) if (p !== except) this.sendTo(p, msg)
+  }
+
+  // v3: completa el guiado del misil de playerId con 'steer' de ceros hasta que cae (turno vencido, dueño
+  // caído o guiado colgado). Sin hooks.guided no hace nada (la sim no tiene teledirigido o el flujo no lo
+  // conectó). Corta si la sim rechaza los ceros, para no quedar en un bucle.
+  completeGuide(playerId: number): void {
+    const g = this.hooks.guided
+    if (!g || this.completing) return
+    this.completing = true
+    try {
+      for (let i = 0; i < 64; i++) {
+        const now = g()
+        if (!now || now.ownerId !== playerId) break
+        const ticks = Math.max(1, Math.min(64, Math.ceil(now.guide / STEER_TICK - 1e-6)))
+        if (!this.dispatch({ type: 'steer', playerId, dirs: new Array(ticks).fill(0) })) break
+      }
+    } finally {
+      this.completing = false
+    }
+    this.watchGuide()
+  }
+
   // Cuenta regresiva del turno de un humano remoto conectado. Al llegar a 0 dispara en su nombre.
   startTimer(playerId: number): void {
     this.stopTimer()
@@ -251,7 +352,11 @@ export class HostRoom {
       this.hooks.onTimer?.(playerId, left)
       if (left <= 0) {
         this.stopTimer()
-        this.dispatch({ type: 'fire', playerId })
+        const g = this.hooks.guided?.()
+        // v3: si venció con el misil en el aire, se completa el guiado; si no, dispara en su nombre (y si
+        // ese tiro es un teledirigido, el turno ya está vencido: se completa enseguida)
+        if (!g || g.ownerId !== playerId) this.dispatch({ type: 'fire', playerId })
+        this.completeGuide(playerId)
       }
       left--
     }
@@ -271,6 +376,7 @@ export class HostRoom {
 
   close(reason = 'El anfitrión cerró la sala'): void {
     this.stopTimer()
+    this.stopGuideWatch()
     this.transport.send('all', { t: 'bye', reason })
     setTimeout(() => this.transport.close(), 300) // que el bye alcance a salir
   }
@@ -299,7 +405,30 @@ export class HostRoom {
       if (next.type === 'aim') this.aim(next.playerId, next.angle, next.power)
       else this.commit(next)
     }
+    if (ok) this.watchGuide()
     return ok
+  }
+
+  // v3: con un misil de un humano remoto en 'guiding', se le da el tramo balístico (guided.t), el guiado
+  // que le queda y GUIDE_SLACK de margen; si para entonces sigue en el aire, se completa con ceros.
+  // El plazo se fija al entrar en 'guiding' (no se renueva con cada tanda).
+  private watchGuide(): void {
+    const g = this.hooks.guided?.()
+    if (!g) return this.stopGuideWatch()
+    if (this.guideWatch?.playerId === g.ownerId) return
+    this.stopGuideWatch()
+    const slot = this.slotOf(g.ownerId)
+    const s = slot === null ? null : this.state.slots[slot]
+    if (!s || s.kind !== 'human' || !s.owner || s.owner === 'host') return // anfitrión o IA: los maneja el flujo
+    const playerId = g.ownerId
+    if (!s.connected) return this.completeGuide(playerId) // se fue: no hay a quién esperar
+    const ms = (g.t + g.guide + GUIDE_SLACK) * 1000
+    this.guideWatch = { playerId, timer: window.setTimeout(() => this.completeGuide(playerId), ms) }
+  }
+
+  private stopGuideWatch(): void {
+    if (this.guideWatch) clearTimeout(this.guideWatch.timer)
+    this.guideWatch = null
   }
 
   private message(from: string, msg: NetMessage): void {
@@ -318,6 +447,19 @@ export class HostRoom {
       case 'aimLive':
         if (this.started && this.playerOfPeer(from) === msg.playerId) this.aim(msg.playerId, msg.angle, msg.power, from)
         return
+      case 'profile': // v3: solo en el lobby y solo para el casillero que ocupa
+        if (!this.started) this.profileFrom(from, rec, msg)
+        return
+      case 'steerLive': {
+        // v3: vista previa del misil; solo del dueño del misil en vuelo (si el flujo conectó hooks.guided)
+        const pid = this.playerOfPeer(from)
+        if (!this.started || pid === null || pid !== msg.playerId || !Number.isFinite(msg.x) || !Number.isFinite(msg.y)) return
+        const g = this.hooks.guided?.()
+        if (g && g.ownerId !== pid) return
+        this.steerLive(pid, msg.x, msg.y, from)
+        this.hooks.onSteerLive?.(pid, msg.x, msg.y)
+        return
+      }
       case 'snapshot': // pedido del cliente (data vacío): se desincronizó o le falta un seq
         if (this.started) this.sendSnapshot(from)
         return
@@ -369,6 +511,13 @@ export class HostRoom {
       return
     }
     if (command.type === 'aim') return this.aim(pid, command.angle, command.power, from)
+    if (command.type === 'steer') {
+      // v3: solo el dueño del misil en vuelo, tandas bien formadas, y la sim decide (phase 'guiding')
+      const g = this.hooks.guided?.()
+      const ok = validDirs(command.dirs) && (!this.hooks.guided || g?.ownerId === pid)
+      if (!ok || !this.dispatch({ type: 'steer', playerId: pid, dirs: command.dirs })) this.transport.send(from, { t: 'reject', reason: STEER_REJECT })
+      return
+    }
     if (!this.dispatch(command)) this.transport.send(from, { t: 'reject', reason: 'Comando rechazado' })
     else if (this.timerPlayer === pid && command.type === 'fire') this.stopTimer()
   }
@@ -387,6 +536,8 @@ export class HostRoom {
     if (this.started && playerId !== null) {
       this.pendingAim.delete(playerId)
       if (this.timerPlayer === playerId) this.stopTimer()
+      // v3: se fue con el misil en el aire: se completa el guiado antes de que la sesión lo pase a IA
+      if (this.hooks.guided?.()?.ownerId === playerId) this.completeGuide(playerId)
     }
     this.hooks.onPeerLeft?.({ peerId, name: rec.name, slot, playerId: this.started ? playerId : null })
   }
@@ -398,8 +549,34 @@ export class HostRoom {
     s.owner = owner
     s.name = name
     s.connected = true
+    // v3: el perfil que eligió el peer viaja con él al casillero nuevo
+    const prof = owner === 'host' ? this.hostProfile : this.byPeer.get(owner)
+    if (prof && (prof.crew || prof.color !== undefined)) this.applyProfile(slot, { crew: prof.crew, color: prof.color }, owner)
     if (notify) this.lobbyChanged()
     return true
+  }
+
+  // v3: 'profile' de un cliente. Se recuerda en su registro (para el próximo casillero que tome) y se
+  // aplica al que ocupa ahora, si tiene uno.
+  private profileFrom(from: string, rec: PeerRec, msg: Extract<NetMessage, { t: 'profile' }>): void {
+    const name = cleanName(msg.name)
+    if (name) rec.name = name
+    if (isCrew(msg.crew)) rec.crew = msg.crew
+    if (isColor(msg.color)) rec.color = msg.color
+    const slot = this.state.slots.findIndex((s) => s.owner === from)
+    if (slot >= 0) this.applyProfile(slot, { name, crew: rec.crew, color: rec.color }, from)
+    this.lobbyChanged()
+  }
+
+  // Aplica nombre, tripulante y color a un casillero humano de ese dueño. Devuelve el color que le quedó.
+  private applyProfile(slot: number, p: ProfileInput, owner: string): number | null {
+    const s = this.state.slots[slot]
+    if (!s || s.owner !== owner || s.kind !== 'human') return null
+    const name = p.name === undefined ? '' : cleanName(p.name)
+    if (name) s.name = name
+    if (isCrew(p.crew)) assignCrew(this.state.slots, slot, p.crew) // v3: único, como el color
+    if (isColor(p.color)) assignColor(this.state.slots, slot, p.color)
+    return s.color ?? slot
   }
 
   // v2.3: al achicar el mapa se COMPACTA conservando la configuración (la misma regla que el menú
@@ -498,8 +675,4 @@ export class HostRoom {
       () => this.snapQueue.delete(peerId),
     )
   }
-}
-
-function cleanName(name: string): string {
-  return name.replace(/[^\p{L}\p{N} _.-]/gu, '').trim().slice(0, MAX_NAME)
 }

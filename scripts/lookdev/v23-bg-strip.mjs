@@ -23,6 +23,11 @@ const STRIP_W = 2400
 const manifest = JSON.parse(fs.readFileSync(path.join(assets, 'manifest.json'), 'utf8'))
 const withLayers = process.argv.includes('--layers')
 const withChico = process.argv.includes('--chico')
+// v3: --only <bioma> compone solo ese bioma y --prefix <p> cambia el nombre de salida (preview/<p>-bg-<bioma>.png).
+// La tira de verificación de la nieve sale con: node scripts/lookdev/v23-bg-strip.mjs --only snow --prefix v3
+const argOf = (k) => (process.argv.includes(k) ? process.argv[process.argv.indexOf(k) + 1] : null)
+const only = argOf('--only')
+const prefix = argOf('--prefix') ?? 'v23'
 
 // Decodificador mínimo: solo PNG RGBA de 8 bits sin entrelazado (lo que escribe encodePng), con los 5 filtros.
 function decodePng(file) {
@@ -80,6 +85,7 @@ function tileInto(dst, L, mode, y0 = 0) {
 }
 
 for (const [biome, bg] of Object.entries(manifest.backgrounds)) {
+  if (only && biome !== only) continue
   const layers = bg.layers.map((f) => decodePng(path.join(assets, f)))
   const modes = layers.map((_, i) => bg.repeat?.[i] ?? 'mirror')
   const H = layers[0].h
@@ -87,19 +93,19 @@ for (const [biome, bg] of Object.entries(manifest.backgrounds)) {
   layers.forEach((L, i) => tileInto(strip, L, modes[i]))
   // marquitas en las uniones (solo 4 px arriba, para no tapar nada)
   for (let x = layers[0].w; x < STRIP_W; x += layers[0].w) for (let y = 0; y < 4; y++) strip.put(x - 1, y, 0xff0000), strip.put(x, y, 0xff0000)
-  fs.writeFileSync(path.join(outDir, `v23-bg-${biome}.png`), strip.png())
-  console.log(`preview/v23-bg-${biome}.png  repeat: ${modes.join(' ')}`)
+  fs.writeFileSync(path.join(outDir, `${prefix}-bg-${biome}.png`), strip.png())
+  console.log(`preview/${prefix}-bg-${biome}.png  repeat: ${modes.join(' ')}`)
   if (withLayers) {
     const sheet = new Canvas(STRIP_W, H * layers.length)
     sheet.rect(0, 0, STRIP_W, H * layers.length, 0x808080)
     layers.forEach((L, i) => tileInto(sheet, L, modes[i], i * H))
-    fs.writeFileSync(path.join(outDir, `v23-bg-${biome}-layers.png`), sheet.png())
-    console.log(`preview/v23-bg-${biome}-layers.png`)
+    fs.writeFileSync(path.join(outDir, `${prefix}-bg-${biome}-layers.png`), sheet.png())
+    console.log(`preview/${prefix}-bg-${biome}-layers.png`)
   }
   if (withChico) {
     const chico = new Canvas(layers[0].w, H)
     for (const L of layers) chico.blit(L, 0, 0)
-    fs.writeFileSync(path.join(outDir, `v23-chico-${biome}.png`), chico.png())
-    console.log(`preview/v23-chico-${biome}.png`)
+    fs.writeFileSync(path.join(outDir, `${prefix}-chico-${biome}.png`), chico.png())
+    console.log(`preview/${prefix}-chico-${biome}.png`)
   }
 }

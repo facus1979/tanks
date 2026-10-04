@@ -1,6 +1,7 @@
 // Piezas compartidas por las vistas: etiquetas y retratos dibujados en canvas con la fuente pixel,
 // botones, íconos y entrada unificada (teclado + gamepad).
-import { ITEM_ORDER, type CrewId, type ItemId, type ShopId } from '../sim/types'
+import type { CrewId, ShopId } from '../sim/types'
+import { drawArsenalIcon } from './arsenal'
 import { uiAssets } from './assets'
 import { OUT, css, drawOutlined, drawText, measure } from './pixelfont'
 
@@ -140,15 +141,13 @@ function paintPortrait(box: PortraitBox): void {
   canvas.style.height = `${36 * s}px`
 }
 
-// Ícono de 12×12 de un arma o ítem de la tienda; sin asset, un cuadro con la inicial.
+// Ícono de 12×12 de un arma o ítem de la tienda; sin asset, el respaldo de ./arsenal.ts (16 armas, 9 ítems).
 interface IconBox {
   canvas: HTMLCanvasElement
   id: ShopId
   size: number
 }
 const icons: IconBox[] = []
-const WEAPON_STRIP = ['normal', 'heavy', 'dirt', 'cluster', 'napalm', 'digger', 'roller', 'nuke']
-
 export function icon(id: ShopId, size = 1): HTMLCanvasElement {
   const canvas = document.createElement('canvas')
   canvas.className = 'px-label'
@@ -165,20 +164,8 @@ function paintIcon(box: IconBox): void {
   const ctx = canvas.getContext('2d')
   if (!ctx) return
   ctx.imageSmoothingEnabled = false
-  const assets = uiAssets()
-  const isItem = (ITEM_ORDER as string[]).includes(id)
-  const strip = isItem ? assets.itemIcons : assets.weaponIcons
-  const index = isItem ? ITEM_ORDER.indexOf(id as ItemId) : WEAPON_STRIP.indexOf(id)
-  if (strip && index >= 0 && index < strip.frames) ctx.drawImage(strip.img, index * strip.w, 0, strip.w, strip.h, 0, 0, 12, 12)
-  else {
-    ctx.fillStyle = css(OUT)
-    ctx.fillRect(0, 0, 12, 12)
-    ctx.fillStyle = css(isItem ? 0x3d8cf0 : 0xb8b0a0)
-    ctx.fillRect(1, 1, 10, 10)
-    ctx.fillStyle = css(0x2a2220)
-    ctx.fillRect(2, 2, 8, 8)
-    drawText(ctx, assets.font, id[0].toUpperCase(), 4, 3, 0xffffff, null)
-  }
+  ctx.clearRect(0, 0, 12, 12)
+  drawArsenalIcon(ctx, uiAssets(), id, 0, 0)
   const s = uiScale() * box.size
   canvas.style.width = `${12 * s}px`
   canvas.style.height = `${12 * s}px`
@@ -244,6 +231,8 @@ export function bindNav(handler: (nav: Nav) => void, raw?: (e: KeyboardEvent) =>
     if (e.ctrlKey || e.metaKey || e.altKey) return
     // la vista se queda con todas las teclas: el juego no tiene que ver el espacio ni las flechas
     e.stopPropagation()
+    // v3: en un campo de nombre (táctil, teclado del sistema) las teclas son texto; el campo maneja Enter/Esc
+    if (e.target instanceof HTMLInputElement && e.target.classList.contains('name-input')) return
     if (raw?.(e)) {
       e.preventDefault()
       return

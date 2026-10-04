@@ -98,6 +98,41 @@ export class Sfx {
     if (weapon === 'nuke') this.tone({ freq: 880, to: 440, dur: 0.6, type: 'square', gain: 0.04, delay: 0.05 })
     if (weapon === 'napalm') this.noise({ dur: 0.35, type: 'bandpass', freq: 1400, q: 0.6, gain: 0.2, delay: 0.03 })
     if (weapon === 'roller') this.tone({ freq: 60, to: 50, dur: 0.3, type: 'sawtooth', gain: 0.06, delay: 0.05 })
+    // v3: capa propia de cada arma nueva encima del disparo
+    switch (weapon) {
+      case 'guided':
+        // encendido del cohete: soplido que crece y un silbido que sube
+        this.noise({ dur: 0.6, type: 'bandpass', freq: 600, to: 2400, q: 0.9, gain: 0.28, attack: 0.04, delay: 0.03 })
+        this.tone({ freq: 300, to: 900, dur: 0.5, type: 'sawtooth', gain: 0.035, delay: 0.05 })
+        break
+      case 'bouncer':
+        // resorte: "boing" que oscila
+        this.tone({ freq: 220, to: 520, dur: 0.18, type: 'triangle', gain: 0.12, delay: 0.04 })
+        this.tone({ freq: 520, to: 260, dur: 0.22, type: 'triangle', gain: 0.08, delay: 0.2 })
+        break
+      case 'laser':
+        // carga corta antes del rayo (el rayo suena con el evento beam)
+        this.tone({ freq: 400, to: 2400, dur: 0.16, type: 'sawtooth', gain: 0.05 })
+        break
+      case 'mine':
+        this.tone({ freq: 140, to: 90, dur: 0.12, type: 'square', gain: 0.05, delay: 0.04 })
+        break
+      case 'quake':
+        this.noise({ dur: 0.5, type: 'lowpass', freq: 200, to: 80, gain: 0.35, attack: 0.05 })
+        break
+      case 'blackhole':
+        // zumbido raro que baja
+        this.tone({ freq: 900, to: 120, dur: 0.6, type: 'sine', gain: 0.08, delay: 0.03 })
+        this.tone({ freq: 905, to: 118, dur: 0.6, type: 'sine', gain: 0.06, delay: 0.03 })
+        break
+      case 'acid':
+        // tubo que gorgotea
+        for (let i = 0; i < 4; i++) this.tone({ freq: 300 + i * 90, to: 600 + i * 90, dur: 0.05, type: 'sine', gain: 0.06, delay: 0.05 + i * 0.06 })
+        break
+      case 'wall':
+        this.tone({ freq: 120, to: 70, dur: 0.18, type: 'square', gain: 0.04, delay: 0.04 })
+        break
+    }
   }
 
   // Una bomba del racimo: explosión corta y seca, con altura que varía para que no suenen iguales.
@@ -198,9 +233,46 @@ export class Sfx {
         this.noise({ dur: 5.5, type: 'lowpass', freq: 70, to: 30, gain: 0.7, attack: 1.2, delay: 1 })
         this.tone({ freq: 34, to: 22, dur: 5, type: 'triangle', gain: 0.5, delay: 0.6 })
         break
+      // v3
+      case 'spark':
+        // rebote de la rebotadora o mina: estallido chico y chispeante
+        this.tone({ freq: 160, to: 60, dur: 0.18 * k, type: 'sine', gain: 0.55 })
+        this.noise({ dur: 0.25 * k, type: 'lowpass', freq: 3600 * b, to: 300, gain: 0.45 })
+        this.noise({ dur: 0.08, type: 'highpass', freq: 4500, gain: 0.2 })
+        break
+      case 'laser':
+        // impacto del rayo: chisporroteo eléctrico y siseo de material fundido
+        this.noise({ dur: 0.1, type: 'highpass', freq: 5000, gain: 0.35 })
+        this.tone({ freq: 1800, to: 300, dur: 0.25, type: 'square', gain: 0.05 })
+        this.noise({ dur: 0.45, type: 'bandpass', freq: 2600, to: 1200, q: 1.2, gain: 0.18, delay: 0.04 })
+        break
+      case 'quake':
+        // golpe del terremoto (el rumor largo lo pone el evento quake)
+        this.tone({ freq: 50, to: 25, dur: 0.8, type: 'sine', gain: 0.9 })
+        this.noise({ dur: 0.9, type: 'lowpass', freq: 260, to: 60, gain: 0.7 })
+        break
+      case 'blackhole':
+        // implosión: el ruido se cierra hacia adentro y un tono grave que se hunde
+        this.noise({ dur: 0.7, type: 'bandpass', freq: 3000, to: 120, q: 1.5, gain: 0.45, attack: 0.08 })
+        this.tone({ freq: 220, to: 30, dur: 0.9, type: 'sine', gain: 0.7 })
+        this.tone({ freq: 233, to: 31, dur: 0.9, type: 'sawtooth', gain: 0.04 })
+        break
+      case 'acid':
+        // salpicón espeso con siseo de corrosión y burbujeo
+        this.tone({ freq: 110, to: 50, dur: 0.25, type: 'sine', gain: 0.55 })
+        this.noise({ dur: 0.35, type: 'bandpass', freq: 1200, to: 600, q: 0.8, gain: 0.4 })
+        this.noise({ dur: 1.1, type: 'highpass', freq: 3000, to: 5200, gain: 0.16, attack: 0.1, delay: 0.1 })
+        this.acidBubble(0.8)
+        break
+      case 'wall':
+        // tierra que sube de golpe: empuje grave y terrones
+        this.tone({ freq: 60, to: 110, dur: 0.3, type: 'sine', gain: 0.6 })
+        this.noise({ dur: 0.5, type: 'lowpass', freq: 300, to: 700, gain: 0.5, attack: 0.04 })
+        this.noise({ dur: 0.3, type: 'bandpass', freq: 400, q: 0.6, gain: 0.2, delay: 0.25 })
+        break
     }
-    // la de tierra agrega terreno (no rompe nada audible); el taladro pesa menos que un estallido
-    if (blast !== 'dirt') this.material(m.voice, m.amount, blast === 'dig' ? 0.6 : blast === 'nuke' ? 1.3 : k)
+    // la de tierra y el muro agregan terreno (no rompen nada audible); el taladro pesa menos que un estallido
+    if (blast !== 'dirt' && blast !== 'wall' && blast !== 'quake') this.material(m.voice, m.amount, blast === 'dig' ? 0.6 : blast === 'nuke' ? 1.3 : k)
   }
 
   // Capa del material roto: tierra sorda, piedra y metal agudos con chasquido, madera crujiente,
@@ -632,6 +704,179 @@ export class Sfx {
     }
     this.tone({ freq: 1047, dur: 0.8, type: 'square', gain: 0.03, delay: 1.2 })
     this.noise({ dur: 1.2, type: 'highpass', freq: 5000, gain: 0.05, attack: 0.3, delay: 1.2 })
+  }
+
+  // ---------- v3: armas, ítems y recompensas ----------
+
+  // Misil teledirigido: soplido corto del cohete en cada corrección. dir: -1/1 gira (más agudo de un lado
+  // que del otro, con un chasquido de aleta), 0 sigue derecho (más suave). left: fracción de guiado que
+  // queda (0..1): a medida que se acaba, el soplido se apaga.
+  missile(dir: -1 | 0 | 1, left = 1): void {
+    if (!this.ready) return
+    const g = 0.05 + 0.07 * Math.max(0, Math.min(1, left))
+    this.noise({ dur: 0.14, type: 'bandpass', freq: 1400 + dir * 350, q: 1.1, gain: dir ? g * 1.4 : g, attack: 0.02 })
+    if (dir) this.tone({ freq: dir > 0 ? 990 : 740, to: dir > 0 ? 1180 : 620, dur: 0.06, type: 'triangle', gain: 0.03 })
+  }
+
+  // El misil llega al apogeo y empieza el guiado: pitido de "fijado" y el motor que se enciende.
+  guideStart(): void {
+    if (!this.ready) return
+    this.tone({ freq: 1320, dur: 0.05, type: 'square', gain: 0.04 })
+    this.tone({ freq: 1760, dur: 0.07, type: 'square', gain: 0.04, delay: 0.07 })
+    this.noise({ dur: 0.35, type: 'bandpass', freq: 800, to: 1600, q: 0.8, gain: 0.22, attack: 0.05, delay: 0.05 })
+  }
+
+  // Rayo láser: zumbido brillante que dura lo que el rayo, con un chasquido al salir. len: largo en px.
+  beam(len = 200): void {
+    if (!this.ready) return
+    const d = Math.max(0.2, Math.min(0.6, len / 900))
+    this.noise({ dur: 0.04, type: 'highpass', freq: 5500, gain: 0.3 })
+    this.tone({ freq: 2200, to: 1400, dur: d, type: 'sawtooth', gain: 0.05 })
+    this.tone({ freq: 3300, to: 2100, dur: d, type: 'square', gain: 0.025 })
+    this.tone({ freq: 110, dur: d, type: 'sawtooth', gain: 0.04 })
+  }
+
+  // Terremoto: rumor grave largo que crece y se apaga, con golpes y crujidos sueltos. radius escala.
+  quake(radius = 70): void {
+    if (!this.ready) return
+    const r = Math.random
+    const k = Math.max(0.6, Math.min(1.4, radius / 70))
+    const d = 1.6 * k
+    this.noise({ dur: d, type: 'lowpass', freq: 140, to: 50, gain: 0.7, attack: 0.25 })
+    this.tone({ freq: 34, to: 26, dur: d, type: 'triangle', gain: 0.5, delay: 0.05 })
+    // temblor: golpes graves cortos y crujidos repartidos en el rumor
+    for (let i = 0; i < Math.round(10 * k); i++) {
+      this.tone({ freq: 55 + r() * 25, to: 30, dur: 0.12, type: 'sine', gain: 0.25 + r() * 0.2, delay: r() * d })
+      if (r() < 0.6) this.noise({ dur: 0.03, type: 'bandpass', freq: 900 + r() * 1500, q: 3, gain: 0.08 + r() * 0.08, delay: r() * d })
+    }
+  }
+
+  // Agujero negro: succión que gira (dos tonos que baten y bajan) durante duration, con aire que entra.
+  blackhole(duration = 1): void {
+    if (!this.ready) return
+    const d = Math.max(0.6, Math.min(3, duration + 0.3))
+    this.tone({ freq: 160, to: 45, dur: d, type: 'sine', gain: 0.35 })
+    this.tone({ freq: 167, to: 47, dur: d, type: 'sine', gain: 0.25 })
+    this.noise({ dur: d, type: 'bandpass', freq: 2400, to: 300, q: 2, gain: 0.25, attack: 0.15 })
+    this.noise({ dur: d * 0.8, type: 'lowpass', freq: 400, to: 90, gain: 0.3, attack: 0.3 })
+  }
+
+  // Ácido burbujeando (charco nuevo o que daña): blups ácidos con siseo. k escala.
+  acidBubble(k = 1): void {
+    if (!this.ready) return
+    const r = Math.random
+    this.noise({ dur: 0.7 * k + 0.2, type: 'highpass', freq: 3500, gain: 0.08 * k, attack: 0.05 })
+    for (let i = 0; i < Math.round(8 * k); i++) {
+      const f = 380 + r() * 520
+      this.tone({ freq: f, to: f * 1.8, dur: 0.04 + r() * 0.04, type: 'sine', gain: (0.05 + r() * 0.05) * k, delay: r() * 0.8 * k })
+    }
+  }
+
+  // Mina clavada y armada: chasquido metálico y dos bips.
+  mineArm(): void {
+    if (!this.ready) return
+    this.noise({ dur: 0.03, type: 'highpass', freq: 4000, gain: 0.2 })
+    this.tone({ freq: 160, to: 110, dur: 0.08, type: 'square', gain: 0.05 })
+    this.tone({ freq: 1900, dur: 0.04, type: 'square', gain: 0.03, delay: 0.15 })
+    this.tone({ freq: 1900, dur: 0.04, type: 'square', gain: 0.03, delay: 0.3 })
+  }
+
+  // Mina que se activa (un tanque pasó cerca o venció): bips que se aceleran antes de la explosión.
+  mineTrigger(): void {
+    if (!this.ready) return
+    const at = [0, 0.12, 0.21, 0.27, 0.31]
+    at.forEach((d, i) => this.tone({ freq: 2100 + i * 120, dur: 0.035, type: 'square', gain: 0.045, delay: d }))
+  }
+
+  // Deflector: el proyectil rebota en el campo con un "ping" metálico que se desvía.
+  deflect(): void {
+    if (!this.ready) return
+    this.noise({ dur: 0.04, type: 'highpass', freq: 5000, gain: 0.3 })
+    this.tone({ freq: 1600, to: 2600, dur: 0.18, type: 'triangle', gain: 0.1 })
+    this.tone({ freq: 2400, to: 3600, dur: 0.12, type: 'sine', gain: 0.05, delay: 0.02 })
+    this.noise({ dur: 0.3, type: 'bandpass', freq: 3000, to: 1500, q: 3, gain: 0.08, delay: 0.03 })
+  }
+
+  // Ancla y deflector al activarse.
+  itemOn(item: 'anchor' | 'deflector'): void {
+    if (!this.ready) return
+    if (item === 'anchor') {
+      // cadena que corre y el ancla que se clava
+      for (let i = 0; i < 7; i++) this.noise({ dur: 0.025, type: 'bandpass', freq: 2600 + i * 120, q: 4, gain: 0.1, delay: i * 0.045 })
+      this.tone({ freq: 90, to: 45, dur: 0.3, type: 'sine', gain: 0.55, delay: 0.32 })
+      this.tone({ freq: 420, to: 400, dur: 0.4, type: 'triangle', gain: 0.05, delay: 0.32 })
+    } else {
+      // campo que se arma: barrido con batido
+      this.tone({ freq: 330, to: 1320, dur: 0.4, type: 'triangle', gain: 0.07 })
+      this.tone({ freq: 336, to: 1340, dur: 0.4, type: 'triangle', gain: 0.05 })
+      this.noise({ dur: 0.45, type: 'bandpass', freq: 2000, to: 4000, q: 4, gain: 0.07 })
+    }
+  }
+
+  // Jetpack: encendido y empuje durante dur segundos, con el aterrizaje al final.
+  jetpack(dur = 0.8): void {
+    if (!this.ready) return
+    const d = Math.max(0.3, Math.min(2.5, dur))
+    this.tone({ freq: 90, to: 60, dur: 0.15, type: 'sine', gain: 0.5 })
+    this.noise({ dur: d, type: 'bandpass', freq: 900, to: 500, q: 0.7, gain: 0.35, attack: 0.05 })
+    this.noise({ dur: d, type: 'lowpass', freq: 300, gain: 0.25, attack: 0.05 })
+    this.tone({ freq: 70, to: 40, dur: 0.2, type: 'sine', gain: 0.5, delay: d })
+    this.noise({ dur: 0.18, type: 'lowpass', freq: 500, to: 120, gain: 0.3, delay: d })
+  }
+
+  // Teletransporte: barrido que se desarma (sale) y otro que se arma (llega).
+  teleport(): void {
+    if (!this.ready) return
+    this.tone({ freq: 400, to: 2400, dur: 0.22, type: 'square', gain: 0.04 })
+    this.tone({ freq: 600, to: 3200, dur: 0.22, type: 'sine', gain: 0.06 })
+    this.tone({ freq: 2400, to: 400, dur: 0.25, type: 'square', gain: 0.04, delay: 0.25 })
+    this.noise({ dur: 0.5, type: 'bandpass', freq: 4000, to: 1500, q: 5, gain: 0.08 })
+  }
+
+  // Caja de botín cayendo en paracaídas: tela que se infla y un silbido suave que baja.
+  lootDrop(): void {
+    if (!this.ready) return
+    this.parachute()
+    this.tone({ freq: 1200, to: 700, dur: 0.9, type: 'sine', gain: 0.03, delay: 0.2 })
+  }
+
+  // Caja de botín rota: madera que se quiebra y monedas que saltan.
+  lootBreak(): void {
+    if (!this.ready) return
+    const r = Math.random
+    this.material('wood', 120, 0.7)
+    for (let i = 0; i < 9; i++) {
+      const f = 2600 + r() * 1800
+      const at = 0.08 + r() * 0.5
+      this.tone({ freq: f, to: f * 0.97, dur: 0.07, type: 'square', gain: 0.025, delay: at })
+      this.tone({ freq: f * 1.5, dur: 0.04, type: 'sine', gain: 0.02, delay: at })
+    }
+  }
+
+  // Objetivo pago destruido: sirena corta que se corta y monedas.
+  targetDown(): void {
+    if (!this.ready) return
+    this.tone({ freq: 880, to: 660, dur: 0.18, type: 'square', gain: 0.05 })
+    this.tone({ freq: 880, to: 440, dur: 0.3, type: 'square', gain: 0.05, delay: 0.2 })
+    this.lootBreak()
+  }
+
+  // Bono arcade ("cha-ching"): dos campanas y el cajón, con la altura y un remate distintos por tipo.
+  bonus(kind: string): void {
+    if (!this.ready) return
+    const STEP: Record<string, number> = { longshot: 1, double: 1.26, abyss: 0.89, lava: 0.84, collapse: 0.94, firstblood: 1.12, loot: 1.06, target: 1.33 }
+    const k = STEP[kind] ?? 1
+    this.tone({ freq: 1568 * k, dur: 0.09, type: 'square', gain: 0.05 })
+    this.tone({ freq: 2093 * k, dur: 0.26, type: 'square', gain: 0.05, delay: 0.08 })
+    this.tone({ freq: 1046 * k, dur: 0.3, type: 'triangle', gain: 0.08, delay: 0.08 })
+    this.noise({ dur: 0.08, type: 'bandpass', freq: 3200, q: 2, gain: 0.12, delay: 0.02 })
+    // remate: kill doble y objetivo suben un arpegio; los kills "ambientales" suman un golpe grave
+    if (kind === 'double' || kind === 'target') {
+      const arp = [1, 1.26, 1.5]
+      arp.forEach((m, i) => this.tone({ freq: 2093 * k * m, dur: 0.08, type: 'square', gain: 0.035, delay: 0.3 + i * 0.07 }))
+    } else if (kind === 'abyss' || kind === 'lava' || kind === 'collapse') {
+      this.tone({ freq: 110, to: 70, dur: 0.25, type: 'sine', gain: 0.3, delay: 0.3 })
+    }
   }
 
   // Viento ambiente suave: ruido filtrado cuyo volumen sigue a |viento|.

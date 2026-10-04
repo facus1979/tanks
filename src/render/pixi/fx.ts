@@ -6,6 +6,7 @@
 import type { BlastStyle, Terrain } from '../../sim/types'
 import { AIR, STONE, WATER, WEAPONS } from '../../sim/types'
 import { DEBRIS_COLORS, OUT } from './fallback'
+import type { FxKit } from './fxkit'
 import { LIQ, solidCell } from './liquids'
 import type { Texture } from 'pixi.js'
 import { rasterTexture, uploadRect, type RasterSource } from './gpu'
@@ -279,6 +280,17 @@ export class Fx {
   private occ: number[] = [] // x, y, r de fuego y humo del último draw
   private terrain: Terrain | null = null
   wreckPos: (id: number) => { x: number; y: number } | null = () => null
+
+  // v3 (render-armas): gancho hacia las partículas para los efectos de las armas e ítems nuevos (ver fxkit.ts).
+  readonly kit: FxKit = {
+    blob: (b) => this.blob(b),
+    soft: (s) => this.soft(s),
+    spark: (x, y, vx, vy, life) => this.sparks.push({ x, y, vx, vy, life, age: 0 }),
+    debris: (x, y, vx, vy, color, shape, life) => this.debris.push({ x, y, vx, vy, color, shape, life, age: 0, rest: false }),
+    light: (x, y, R, tint, k, life) => this.lights.push({ x, y, R, tint, k, life, age: 0 }),
+    fireball: (x, y, s, L, debris, amount, mini = false) => this.fire(x, y, s, L, debris, amount, mini),
+    cap: () => this.capParticles(),
+  }
 
   // w × h: tamaño de los buffers (la pantalla más un margen), no del mundo.
   constructor(w: number, h: number) {
