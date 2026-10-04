@@ -54,6 +54,7 @@ import {
   biomeFor,
   owned,
   roundSeed,
+  aiShop,
   abyssAhead,
   materialAt,
   ABYSS_DROP,
@@ -3935,6 +3936,48 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
   const newOnes = ['guided', 'bouncer', 'laser', 'acid', 'quake', 'blackhole', 'mine', 'wall'].filter((id) => (used[id] ?? 0) > 0)
   check(newOnes.length >= 5, `IA: usa las armas nuevas (${newOnes.join(', ')})`)
   check(fullMs < 3 * baseMs, `IA: el arsenal cuesta ${(fullMs / Math.max(1, baseMs)).toFixed(2)} veces el turno de siempre (tope 3)`)
+}
+{
+  // balance por tamaño con las armas nuevas en la tienda: cada IA entra a la partida con ARSENAL_MONEY y compra
+  // (aiShop de la normal, que ahora incluye las 8 armas y los 4 ítems nuevos) antes de jugar una ronda. Mismos
+  // topes que el balance de siempre (sección 10). 10 partidas por caso (con --balance, 20).
+  const ARSENAL_MONEY = 1600
+  const games = process.argv.includes('--balance') ? 20 : 10
+  const t0 = performance.now()
+  for (const size of MAP_SIZE_ORDER) {
+    for (const bots of [1, 3]) {
+      const shots: number[] = []
+      const used: Record<string, number> = {}
+      let unfinished = 0
+      let walked = 0
+      for (let g = 1; g <= games; g++) {
+        let s = createMatch(mk(bots, 'normal', BIOMES[g % 3], 900 + g, 1, 0, size))
+        for (const p of s.players) {
+          p.money = ARSENAL_MONEY
+          aiShop(p, 'normal', s.seed, 1)
+        }
+        let n = 0
+        while (s.phase === 'aiming' && n < 120) {
+          const r = aiTurn(s, 'normal')
+          if (r.events.some((e) => e.type === 'death' && e.cause === 'abyss') && !r.flights) walked++
+          if (r.flights) {
+            n++
+            used[r.plan.weapon] = (used[r.plan.weapon] ?? 0) + 1
+          }
+          for (const it of r.plan.items ?? []) used[it] = (used[it] ?? 0) + 1
+          s = r.state
+        }
+        if (s.phase === 'aiming') unfinished++
+        shots.push(n)
+      }
+      const avg = shots.reduce((a, b) => a + b, 0) / shots.length
+      console.log(`v3 balance con arsenal ${size} ${bots + 1} tanques: ${avg.toFixed(1)} tiros/partida (min ${Math.min(...shots)}, max ${Math.max(...shots)}, ${games} partidas), uso ${JSON.stringify(used)}`)
+      check(unfinished === 0 && walked === 0, `v3 balance con arsenal ${size}: ${unfinished} sin terminar, ${walked} caminó al abismo`)
+      if (bots === 1) check(avg >= 8 && avg <= (size === 'small' ? 15 : 16), `v3 balance con arsenal ${size} 2 tanques fuera de rango (${avg.toFixed(1)})`)
+      else check(avg <= (size === 'small' ? 27 : 30), `v3 balance con arsenal ${size} 4 tanques: ${avg.toFixed(1)} tiros/partida`)
+    }
+  }
+  console.log(`v3 balance con arsenal: ${((performance.now() - t0) / 1000).toFixed(1)} s`)
 }
 console.log(`IA peor caso: ${worstMs.toFixed(0)} ms`)
 console.log(`${checks - failures}/${checks} chequeos OK`)
