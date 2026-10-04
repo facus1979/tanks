@@ -30,7 +30,7 @@ const SNOW_SIDE = 0x9fb4cc
 const SNOW_UNDER = 0x8196b4 // cara de abajo (techo de una cueva en nieve)
 const ICE_BODY_A = 0x8cc4e2
 const ICE_BODY_B = 0xb4e0f4
-const ICE_TOP = 0xf4fcff
+const ICE_TOP = 0xdcf4ff // no blanco puro: los brillos que corren por encima tienen que verse
 const ICE_UNDER = 0x6c9ec2
 const ICE_CRACK = 0x5d8fb3
 const ICE_ALPHA = 205 // el cuerpo del hielo deja ver el fondo (y el agua de abajo se ve sin borde de superficie)
@@ -351,20 +351,24 @@ class Glints {
 
   constructor() {
     const a = motesAtlas()
-    this.layer = new ParticleContainer({ texture: a.px, roundPixels: true, dynamicProperties: { position: true, color: true, vertex: false, rotation: false, uvs: false } })
+    this.layer = new ParticleContainer({ texture: a.px, roundPixels: true, dynamicProperties: { position: true, color: true, vertex: true, rotation: false, uvs: true } })
   }
 
   begin(): void {
     this.n = 0
   }
 
-  add(x: number, y: number, color: number, alpha: number): void {
+  add(x: number, y: number, color: number, alpha: number, star = false): void {
     if (this.n >= 400) return
     let p = this.pool[this.n]
     if (!p) {
       p = new Particle({ texture: motesAtlas().px })
       this.pool.push(p)
     }
+    const a = motesAtlas()
+    p.texture = star ? a.star : a.px
+    p.anchorX = star ? 0.34 : 0
+    p.anchorY = star ? 0.34 : 0
     p.x = x
     p.y = y
     p.tint = color
@@ -603,11 +607,12 @@ export class SnowView {
       if (x < x0 || x >= x1 || y < y0 || y >= y1) continue
       let ph = (x + (y >> 1) - tt * GLINT_SPEED) % GLINT_PERIOD
       if (ph < 0) ph += GLINT_PERIOD
-      if (ph >= 4) continue
-      g.add(x, y, 0xffffff, ph < 2 ? 0.95 : 0.5)
-      for (let d = 1; d <= 4; d++) {
+      if (ph >= 3) continue
+      // franja diagonal de luz que baja por el hielo; donde nace, un destello en cruz
+      g.add(x, y, 0xffffff, 1, ph < 1)
+      for (let d = 1; d <= 7; d++) {
         if (f[k + d * W + d] !== ICE) break
-        g.add(x + d, y + d, 0xf0fbff, (ph < 2 ? 0.55 : 0.3) * (1 - d / 5))
+        g.add(x + d, y + d, 0xffffff, (ph < 2 ? 0.6 : 0.35) * (1 - d / 8))
       }
     }
     const snow = this.snowTop
@@ -618,7 +623,7 @@ export class SnowView {
       const y = (k / W) | 0
       const x = k - y * W
       if (x < x0 || x >= x1 || y < y0 || y >= y1) continue
-      g.add(x, y - 1, 0xffffff, 0.9)
+      g.add(x, y - 1, 0xfffbe8, 0.95, true) // destello de la nieve: cruz chica que asoma sobre el borde
     }
     g.end()
   }
