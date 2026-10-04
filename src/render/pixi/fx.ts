@@ -275,7 +275,7 @@ export class Fx {
 
   // w × h: tamaño de los buffers (la pantalla más un margen), no del mundo.
   constructor(w: number, h: number) {
-    this.fx = new Raster(w, h)
+    this.fx = new Raster(w, h, true)
     this.light = new LightLayer(w, h)
     this.fxTexture = rasterTexture(this.fx)
   }
@@ -1439,14 +1439,25 @@ export class Fx {
     const edge = Math.max(0, rad + w - 1.5) ** 2
     const a = 0.55 + 0.4 * dither
     const body = u < 0.25 ? 0xffffff : 0xfff1c0
-    for (let y = y0; y <= y1; y++) {
-      const dy2 = (y - g.y) * (y - g.y)
-      if (dy2 > outer) continue
-      for (let x = x0; x <= x1; x++) {
+    // v3: cada fila recorre solo las dos cuerdas del anillo (antes, el cuadrado entero: con el de la nuke eran
+    // ~370 mil pixels por frame); el criterio por pixel es el mismo.
+    const ring = (y: number, xa: number, xb: number, dy2: number): void => {
+      for (let x = Math.max(x0, xa); x <= Math.min(x1, xb); x++) {
         const d2 = (x - g.x) * (x - g.x) + dy2
         if (d2 > outer || d2 < inner) continue
         if (bayer(x, y) > dither) continue
         fx.put(x, y, d2 > edge ? 0xffb43e : body, a)
+      }
+    }
+    for (let y = y0; y <= y1; y++) {
+      const dy2 = (y - g.y) * (y - g.y)
+      if (dy2 > outer) continue
+      const xo = Math.sqrt(outer - dy2) + 1
+      const xi = dy2 < inner ? Math.sqrt(inner - dy2) - 1 : -1
+      if (xi <= 2) ring(y, Math.floor(g.x - xo), Math.ceil(g.x + xo), dy2)
+      else {
+        ring(y, Math.floor(g.x - xo), Math.ceil(g.x - xi), dy2)
+        ring(y, Math.floor(g.x + xi), Math.ceil(g.x + xo), dy2)
       }
     }
   }

@@ -77,9 +77,12 @@ export class Raster {
   bx1 = -1
   by1 = -1
 
+  // premul: el color se guarda multiplicado por el alfa (listo para la GPU sin convertir). Solo cambia la mezcla
+  // de put() con alfa < 1; lo opaco y lo vacío es igual en los dos formatos. flush() a canvas espera premul = false.
   constructor(
     readonly w: number,
     readonly h: number,
+    readonly premul = false,
   ) {
     this.data = new Uint8ClampedArray(w * h * 4)
     this.bytes = new Uint8Array(this.data.buffer)
@@ -183,6 +186,15 @@ export class Raster {
       d[i + 1] = g
       d[i + 2] = b
       d[i + 3] = 255
+      return
+    }
+    if (this.premul) {
+      // "over" premultiplicado: el mismo resultado que la rama de abajo, multiplicado por el alfa final
+      const ia = 1 - a
+      d[i] = r * a + d[i] * ia
+      d[i + 1] = g * a + d[i + 1] * ia
+      d[i + 2] = b * a + d[i + 2] * ia
+      d[i + 3] = a * 255 + d[i + 3] * ia
       return
     }
     const da = d[i + 3] / 255

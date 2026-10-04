@@ -21,7 +21,9 @@ export class RasterSource extends BufferImageSource {
       width: raster.w,
       height: raster.h,
       format: 'rgba8unorm',
-      alphaMode: 'premultiply-alpha-on-upload',
+      // el buffer de efectos guarda el color ya premultiplicado (Raster.premul): premultiplicar al subir
+      // costaba más que la subida en sí (~6% del CPU en el celular emulado durante la nuke)
+      alphaMode: raster.premul ? 'premultiplied-alpha' : 'premultiply-alpha-on-upload',
       scaleMode: 'nearest',
       autoGenerateMipmaps: false,
     })
