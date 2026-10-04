@@ -7,6 +7,8 @@ import { columnTop, hasLiquid, takeDirty } from './terrain'
 import { Rng, hashSeed } from './rng'
 import { SLIDE_MAX } from './slide'
 import { NAPALM_DPS, NAPALM_SPREAD, resolveShot } from './weapons'
+import { iceRisk } from './snow'
+import { diggerPlan, personalCost, personalPriority, personalScore, propAims, traitsOf } from './ai-personality'
 import {
   KNOCKBACK_MAX,
   LAVA,
@@ -102,7 +104,7 @@ const LEADER_W = 0.1
 const DUTY_W = 0.15
 const EDGE_W = 0.12
 const KILL_BONUS = 40 // en puntos de daño (· 10 en el puntaje; simulate suma lo mismo por kill)
-function priorities(actor: Player, targets: Player[]): Map<number, number> {
+function priorities(actor: Player, targets: Player[], width = WORLD_W): Map<number, number> {
   const out = new Map<number, number>()
   if (targets.length < 2) {
     for (const t of targets) out.set(t.id, 1)
@@ -122,13 +124,16 @@ function priorities(actor: Player, targets: Player[]): Map<number, number> {
     if (actor.x > t.x ? targets.every((o) => o.x >= t.x) : targets.every((o) => o.x <= t.x)) w += EDGE_W
     w += (STRONG_W * Math.min(PLAYER_HP, t.hp + t.shield)) / PLAYER_HP
     if (topWins > 0 && leaders === 1 && t.roundsWon === topWins) w += LEADER_W
-    out.set(t.id, w)
+    // v3: la personalidad corre el orden (ver ai-personality.ts)
+    out.set(t.id, personalPriority(actor, t, targets, w, width))
   }
   return out
 }
 
 function costOf(state: GameState, id: WeaponId): number {
-  return state.lava !== null ? COST[id] * LAVA_COST_SCALE : COST[id]
+  // v3: cada personalidad gasta la munición especial a su manera
+  const base = personalCost(state.players[state.current], id, COST[id])
+  return state.lava !== null ? base * LAVA_COST_SCALE : base
 }
 
 // Daño de lava (en puntos de puntaje) que recibiría un tanque con el piso en y antes de su próximo
@@ -218,11 +223,13 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
   // a veces se mueve: siempre que el tiro esté bloqueado o no llegue, y de vez en cuando igual.
   // Con la lava cerca (muerte súbita) también, y cada posición se paga con la lava que la alcanzaría:
   // así sale de la lava o se aleja de ella (hacia arriba) si puede, y no se mete caminando.
-  const wander = rand() < 0.15
-  const risk = lavaRisk(state, actor.y) + poolRisk(state, actor)
+  // v3: cuánto y cómo se mueve depende de la personalidad; en la nieve pesa quedar sobre hielo cerca de un peligro
+  const traits = traitsOf(actor)
+  const wander = rand() < traits.wander
+  const risk = lavaRisk(state, actor.y) + poolRisk(state, actor) + iceRisk(state, actor)
   const total = best.score - risk
   if (actor.fuel > 0 && (best.score < 1000 || wander || risk > 0)) {
-    const steps = risk > 0 ? [-60, -40, -20, 20, 40, 60] : best.score < 1000 ? [-40, -20, 20, 40] : [-20, 20]
+    const steps = risk > 0 ? [-60, -40, -20, 20, 40, 60] : best.score < 1000 ? [-40, -20, 20, 40] : traits.steps
     // v5: se queda con la mejor posición de todas (antes, la primera que superaba por 60 a la actual, y
     // como las de la izquierda se prueban primero, ganaban los empates: otro sesgo hacia un lado)
     let top = total + 60
@@ -231,7 +238,7 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
       if (!moved) continue
       const c = search(moved.state, weapons, false).best
       const mp = moved.state.players[moved.state.current]
-      const score = c.score - lavaRisk(state, mp.y) - poolRisk(moved.state, mp)
+      const score = c.score - lavaRisk(state, mp.y) - poolRisk(moved.state, mp) - iceRisk(moved.state, mp) - traits.moveCost * Math.abs(mp.x - actor.x)
       if (score > top) {
         best = c
         top = score
@@ -254,6 +261,12 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
       best = search(b.state, weapons, false).best
       move = b.move
     }
+  }
+
+  // v3 cavadora: se cubre con Tierra o Muro, o cava hacia el rival (ver diggerPlan)
+  if (move === 0) {
+    const dp = diggerPlan(state, actor, targets, best.score, rand)
+    if (dp) return { ...dp, ...extra }
   }
 
   // tapado y sin tiro: excavadora hacia el rival más cercano
@@ -403,7 +416,7 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   let total = 0
   let blocked = 0
   const sky = skylineOf(state.terrain, state.players, state.props)
-  const prio = priorities(actor, targets)
+  const prio = priorities(actor, targets, state.width)
   // v3: rivales que se sostienen sobre un abismo (ver ledgeOf): la estimación suma el tiro que les
   // rompe el piso, y la simulación completa confirma si de verdad caen.
   const ledges = ledgesOf(state.terrain, targets)
@@ -425,6 +438,9 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   // empuja adentro (se verifica con la simulación completa, que resuelve el empuje)
   const brinks = brinksOf(state.terrain, targets)
   const brinkAim = brinks.map(() => ({ angle: 0, power: 0, d: Infinity }))
+  // v3: botín y objetivos pagos: el tiro que cae más cerca de cada uno también se verifica
+  const loot = propAims(state)
+  const lootAim = loot.map(() => ({ angle: 0, power: 0, d: Infinity }))
   let direct = false // algún tiro de la búsqueda pega directo en un rival
   const consider = (angle: number, power: number) => {
     const r = estimate(state, actor, targets, weapons, angle, power, sky, ledges, prio)
@@ -441,6 +457,10 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
       for (let i = 0; i < brinks.length; i++) {
         const d = Math.abs(r.at.x - brinks[i].x) + Math.abs(r.at.y - brinks[i].y)
         if (d < brinkAim[i].d) brinkAim[i] = { angle, power, d }
+      }
+      for (let i = 0; i < loot.length; i++) {
+        const d = Math.abs(r.at.x - loot[i].x) + Math.abs(r.at.y - loot[i].y)
+        if (d < lootAim[i].d) lootAim[i] = { angle, power, d }
       }
     }
     if (r.blocked) blocked++
@@ -497,6 +517,7 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   }
   const lipWeapon: WeaponId = weapons.includes('heavy') ? 'heavy' : weapons[0]
   for (const la of lipAim) if (la.d < 16) pool.push({ angle: la.angle, power: la.power, weapon: lipWeapon, score: 0 })
+  for (const la of lootAim) if (la.d < 20) pool.push({ angle: la.angle, power: la.power, weapon: weapons[0], score: 0 })
   let verified: Candidate = { ...best, score: -Infinity }
   for (const c of pool) {
     const score = simulate(state, c, prio)
@@ -722,6 +743,7 @@ function simulate(state: GameState, c: Candidate, prio?: Map<number, number>): n
   actor.power = c.power
   const before = s.players.map((p) => ({ hp: p.hp, alive: p.alive, x: p.x, y: p.y }))
   const { events } = resolveShot(s, actor, c.weapon)
+  const extra = personalScore(actor, before, s.players, events) // v3: botín, objetivos y distancia según la personalidad
   // v2.4: el derrumbe, con el mismo resolver que fire (sin parches): un terrón que cae sobre un rival lo aplasta
   collapseAfterShot(s, events, 0, false)
   // v4: si el tiro tocó cerca de lava, la deja correr (como fire) y el rival que quede en ella cuenta
@@ -756,10 +778,10 @@ function simulate(state: GameState, c: Candidate, prio?: Map<number, number>): n
     const d0 = hazardDist(mask, before[p.id].x, before[p.id].y)
     const d1 = hazardDist(mask, p.x, p.y)
     if (d1 >= d0) continue
-    drift += p.id === actor.id ? -2 * (d0 - d1) * HAZARD_PULL : (d0 - d1) * HAZARD_PULL
+    drift += p.id === actor.id ? -2 * (d0 - d1) * HAZARD_PULL : (d0 - d1) * HAZARD_PULL * traitsOf(actor).hazard
   }
   const cost = costOf(state, c.weapon)
-  return (dmg > 0 ? 1000 + dmg * 10 + kills * KILL_BONUS * 10 - self * SELF_WEIGHT - cost : -near - self * SELF_WEIGHT - cost * 0.01) + drift + flatTie(c.angle)
+  return (dmg > 0 ? 1000 + dmg * 10 + kills * KILL_BONUS * 10 - self * SELF_WEIGHT - cost : -near - self * SELF_WEIGHT - cost * 0.01) + drift + extra + flatTie(c.angle)
 }
 
 // Pulido v2: columnas peligrosas (abismo o lava arriba de todo) por grilla. Se calcula una vez por grilla
