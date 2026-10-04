@@ -205,25 +205,45 @@ async function layerTest() {
       1000,
     )
   }
+  // v3: la sim de juguete tiene teledirigido: selectWeapon 'guided' y fire → 10 ticks de guiado del que
+  // disparó; 'steer' (solo del dueño) los consume y mezcla cada dirección en la suma. Aplicar [a] y [b]
+  // da lo mismo que [a, b], como se le pide a la sim real.
   const toy = `
-    window.__toy = { sum: 0 }
+    window.__toy = { sum: 0, g: null, sel: -1 }
+    window.__steerAt = []
     window.__apply = (c) => {
+      const T = window.__toy
+      const mix = (v) => (T.sum = (Math.imul(T.sum, 31) + v) >>> 0)
+      if (c.type === 'selectWeapon') { T.sel = c.weapon === 'guided' ? c.playerId : -1; mix(c.playerId + 11); return true }
+      if (c.type === 'steer') {
+        if (!T.g || T.g.owner !== c.playerId) return false
+        for (const d of c.dirs) mix(d + 2)
+        T.g.left -= c.dirs.length
+        if (T.g.left <= 0) T.g = null
+        window.__steerAt.push(Date.now())
+        return true
+      }
       if (c.type !== 'aim' && c.type !== 'fire' && c.type !== 'setKind') return false
-      window.__toy.sum = (Math.imul(window.__toy.sum, 31) + (c.playerId + 1) * 7 + (c.angle ?? 3)) >>> 0
+      if (c.type === 'fire' && T.g) return false
+      if (c.type === 'fire' && T.sel === c.playerId) { T.g = { owner: c.playerId, left: 10 }; T.sel = -1 }
+      mix((c.playerId + 1) * 7 + (c.angle ?? 3))
       return true
     }
+    window.__toyT = 30
     window.__log = []`
   const roomCode = await evaluate(
     a,
     `(async () => {
       ${toy}
       const net = await import('/src/net/index.ts')
-      const room = new net.HostRoom(net.createTransport('local'), {
+      const room = new net.HostRoom(net.createTransport('${TRANSPORT}'), {
         apply: window.__apply,
         hash: () => window.__toy.sum,
         snapshot: () => JSON.stringify(window.__toy),
         onPeerLeft: (p) => window.__log.push('left:' + p.slot),
         onPeerBack: (p) => window.__log.push('back:' + p.slot),
+        guided: () => (window.__toy.g ? { ownerId: window.__toy.g.owner, t: window.__toyT, guide: window.__toy.g.left * 0.05 } : null),
+        onSteerLive: (id, x, y) => window.__log.push('live:' + id + ':' + x + ':' + y),
       }, { name: 'Ana', hashEvery: 4 })
       window.__room = room
       return room.open()
@@ -235,10 +255,10 @@ async function layerTest() {
     `(async () => {
       ${toy}
       const net = await import('/src/net/index.ts')
-      const room = new net.ClientRoom(net.createTransport('local'), {
+      const room = new net.ClientRoom(net.createTransport('${TRANSPORT}'), {
         apply: window.__apply,
         hash: () => window.__toy.sum,
-        onStart: (config, info) => window.__log.push('start:' + info.myPlayerId + ':' + config.slots.length),
+        onStart: (config, info) => { window.__cfg = config; window.__log.push('start:' + info.myPlayerId + ':' + config.slots.length) },
         onSnapshot: (seq, data) => { window.__toy = JSON.parse(new TextDecoder().decode(data)); window.__log.push('snap:' + seq) },
         onDesync: (seq) => window.__log.push('desync:' + seq),
         onAimLive: (id, angle) => window.__log.push('aim:' + id + ':' + angle),
@@ -304,12 +324,21 @@ async function layerTest() {
   await waitFor(async () => (await evaluate(b, 'window.__room.mySlot')) === 1 || null, 20000, () => 'B no volvió al casillero 1')
   await evaluate(a, `(() => { const r = window.__room; for (let i = 2; i < 8; i++) r.setSlot(i, 'off'); r.setOption('size', 'small') })()`)
   log('compactación al achicar OK:', drop)
+  await profileTest(a, b)
   const started = await evaluate(
     a,
-    `(() => { const r = window.__room; r.setSlot(2, 'ai'); if (!r.canStart()) return 'no puede empezar'; const s = r.start(42); return s.config.slots.length })()`,
+    `(() => { const r = window.__room; r.setSlot(2, 'ai'); r.setPersonality(2, 'sniper'); if (!r.canStart()) return 'no puede empezar'; const s = r.start(42); return s.config.slots.length })()`,
   )
   if (started !== 3) throw new Error('start: ' + started)
   await waitFor(async () => (await evaluate(b, 'window.__log.includes("start:1:3")')) || null, 20000, () => 'B no recibió start')
+  const cfg = await evaluate(b, 'JSON.parse(JSON.stringify(window.__cfg.slots))')
+  const lob = await evaluate(a, 'window.__room.lobby.slots.slice(0, 3).map((s) => s.color)')
+  if (cfg[1].name !== 'Beto Perez' || cfg[0].name !== 'Ana Nandu' || cfg[0].crew !== 'sarge' || cfg[1].crew !== 'rookie')
+    throw new Error('start sin el perfil: ' + JSON.stringify(cfg))
+  if (cfg.map((s) => s.color).join() !== lob.join() || new Set(cfg.map((s) => s.color)).size !== 3)
+    throw new Error('start con colores mal: ' + JSON.stringify(cfg) + ' lobby ' + lob)
+  if (cfg[2].personality !== 'sniper' || cfg[0].personality || cfg[1].personality) throw new Error('start sin la personalidad de la IA: ' + JSON.stringify(cfg))
+  log('perfil en el start OK:', cfg.map((s) => `${s.name}/${s.crew}/${s.color}${s.personality ? '/' + s.personality : ''}`).join(', '))
 
   // comandos de los dos lados, con un aim pendiente que entra antes del fire
   await evaluate(a, `window.__room.dispatch({ type: 'aim', playerId: 0, angle: 50, power: 60 }); window.__room.dispatch({ type: 'fire', playerId: 0 })`)
@@ -336,11 +365,13 @@ async function layerTest() {
     `(async () => {
       window.__log = []
       const net = await import('/src/net/index.ts')
-      const room = new net.ClientRoom(net.createTransport('local'), {
+      const room = new net.ClientRoom(net.createTransport('${TRANSPORT}'), {
         apply: window.__apply,
         hash: () => window.__toy.sum,
         onStart: (config, info) => window.__log.push('start:' + info.myPlayerId + ':' + info.seq),
         onSnapshot: (seq, data) => { window.__toy = JSON.parse(new TextDecoder().decode(data)); window.__log.push('snap:' + seq) },
+        onSteerCorrect: (r) => window.__log.push('correct:' + r),
+        onReject: (reason) => window.__log.push('reject:' + reason),
       }, { name: 'Beto' })
       window.__room = room
       await room.join(${JSON.stringify(roomCode)})
@@ -353,7 +384,100 @@ async function layerTest() {
   const log3 = await evaluate(b, 'window.__log.join(" ")')
   if (!log3.includes('start:1:10') || !log3.includes('snap:10')) throw new Error('La reconexión no trajo start + snapshot: ' + log3)
   log('reconexión con token OK')
+  await steerLayerTest(a, b)
   log('OK: capa de red')
+}
+
+// v3 perfil en la sala de juguete: nombre saneado, color tomado → el siguiente libre, color de un 'off' →
+// intercambio, el anfitrión edita el suyo. Los 8 colores siguen siendo una permutación.
+async function profileTest(a, b) {
+  const colors = () => evaluate(a, 'window.__room.lobby.slots.map((s) => s.color)')
+  const perm = (cs) => cs.length === 8 && new Set(cs).size === 8 && cs.every((c) => c >= 0 && c < 8)
+  let cs = await colors()
+  if (!perm(cs)) throw new Error('colores de la sala sin permutación: ' + cs)
+  // B pide el color del anfitrión: no se rechaza, le queda otro (y distinto del anfitrión)
+  await evaluate(b, `window.__room.profile('  Beto   Pérez Ñandú!!', 'rookie', ${cs[0]})`)
+  await waitFor(async () => (await evaluate(a, 'window.__room.lobby.slots[1].name')) === 'Beto Perez' || null, 20000, async () => 'B: perfil sin aplicar ' + JSON.stringify(await evaluate(a, 'window.__room.lobby.slots[1]')))
+  cs = await colors()
+  if (!perm(cs) || cs[1] === cs[0]) throw new Error('color tomado: ' + cs)
+  const crewB = await evaluate(a, 'window.__room.lobby.slots[1].crew')
+  if (crewB !== 'rookie') throw new Error('B: tripulante ' + crewB)
+  // B pide el color de un casillero 'off': se intercambian
+  const offColor = cs[5]
+  const oldB = cs[1]
+  await evaluate(b, `window.__room.profile('Beto Pérez', 'rookie', ${offColor})`)
+  await waitFor(async () => (await colors())[1] === offColor || null, 20000, async () => 'B no tomó el color libre: ' + (await colors()))
+  cs = await colors()
+  if (!perm(cs) || cs[5] !== oldB) throw new Error('intercambio con el off: ' + cs)
+  // el anfitrión pide el color de B: le queda el siguiente libre
+  const got = await evaluate(a, `window.__room.setProfile({ name: 'Ana Ñandú', crew: 'sarge', color: ${offColor} })`)
+  cs = await colors()
+  if (got === offColor || got !== cs[0] || !perm(cs)) throw new Error('anfitrión con color tomado: ' + got + ' ' + cs)
+  // B ve el lobby con su nombre y su color
+  await waitFor(async () => (await evaluate(b, `window.__room.lobby.slots[1].color === ${offColor} && window.__room.lobby.slots[0].name === 'Ana Nandu'`)) || null, 20000, () => 'B no vio los perfiles en el lobby')
+  log('perfil OK: nombre saneado, color tomado → siguiente libre, intercambio con un off, colores', cs.join(','))
+}
+
+// v3 teledirigido con la sala de juguete: tandas confirmadas, latencia, steerLive, predicción que falla
+// (tanda perdida + ceros del anfitrión, y tanda rechazada) y guiado colgado completado con ceros.
+async function steerLayerTest(a, b) {
+  const seqOf = (tab) => evaluate(tab, 'window.__room.seq')
+  const same = async (what) => {
+    const want = await seqOf(a)
+    await sync(a, b, want, what)
+    return want
+  }
+  // B elige el teledirigido y dispara: guiado de 10 ticks
+  await evaluate(b, `window.__room.input({ type: 'selectWeapon', playerId: 1, weapon: 'guided' }); window.__room.input({ type: 'fire', playerId: 1 })`)
+  await waitFor(async () => (await evaluate(b, 'window.__toy.g && window.__toy.g.owner === 1')) || null, 20000, () => 'B no entró en guiado')
+  await same('teledirigido disparado')
+  // 6 ticks en tiempo real (uno cada 50 ms): 3 tandas de 2
+  const sendAt = await evaluate(
+    b,
+    `new Promise((res) => {
+      const r = window.__room, at = []
+      let i = 0
+      const id = setInterval(() => {
+        if (i % 2 === 0) at.push(Date.now())
+        r.steer(1, i < 4 ? 1 : -1)
+        if (++i === 6) { clearInterval(id); res(at) }
+      }, 50)
+    })`,
+  )
+  await same('3 tandas de guiado')
+  const st = await evaluate(b, 'JSON.parse(JSON.stringify({ s: window.__room.steerStats(), p: window.__room.pendingSteers().length }))')
+  if (st.p !== 0 || st.s.confirmed !== 3 || st.s.corrected !== 0) throw new Error('tandas sin confirmar: ' + JSON.stringify(st))
+  const hostAt = await evaluate(a, 'window.__steerAt.slice(-3)')
+  // la tanda sale al llenarse (2º tick): llega al anfitrión ~50 ms después del 1º tick + el viaje
+  const toHost = hostAt.map((t, i) => t - sendAt[i] - 50)
+  log(
+    `steer ${TRANSPORT}: ida y vuelta de la tanda ${st.s.avgMs.toFixed(1)} ms (máx ${st.s.maxMs.toFixed(1)}), ` +
+      `hasta el anfitrión ${toHost.map((v) => v.toFixed(0)).join('/')} ms; el que dirige ve su misil al instante (predicción)`,
+  )
+  // steerLive del cliente → el anfitrión (y de ahí a los demás)
+  await evaluate(b, 'window.__room.steerLive(1, 12, 34)')
+  await waitFor(async () => (await evaluate(a, 'window.__log.includes("live:1:12:34")')) || null, 20000, () => 'A no recibió steerLive')
+  // falla la predicción: una tanda que no llega al anfitrión (se tira el envío) y el anfitrión completa
+  // el guiado con ceros → al volver el log no coincide, se descarta lo pendiente
+  await evaluate(b, `(() => { const r = window.__room, t = r.transport, send = t.send; t.send = () => {}; r.steerBatch(1, [1]); t.send = send; return r.pendingSteers().length })()`)
+  await evaluate(a, 'window.__room.completeGuide(1)')
+  await waitFor(async () => (await evaluate(b, 'window.__log.includes("correct:mismatch") && window.__room.pendingSteers().length === 0')) || null, 20000, async () => 'B no corrigió la tanda perdida: ' + (await evaluate(b, 'window.__log.join(" ")')))
+  await same('ceros del anfitrión')
+  if (await evaluate(a, 'window.__toy.g !== null')) throw new Error('el guiado no terminó con los ceros')
+  // tanda fuera de guiado: el anfitrión la rechaza y el cliente corrige sin mostrar un error
+  await evaluate(b, 'window.__room.steerBatch(1, [1, 1])')
+  await waitFor(async () => (await evaluate(b, 'window.__log.includes("correct:reject") && window.__room.pendingSteers().length === 0')) || null, 20000, () => 'B no corrigió la tanda rechazada')
+  if (await evaluate(b, `window.__log.some((l) => l.startsWith('reject:'))`)) throw new Error('el rechazo del guiado se mostró como error')
+  // guiado colgado: B dispara y no dirige; el anfitrión completa con ceros a los t + guide + GUIDE_SLACK s
+  await evaluate(a, 'window.__toyT = 0.2')
+  const t0 = Date.now()
+  await evaluate(b, `window.__room.input({ type: 'selectWeapon', playerId: 1, weapon: 'guided' }); window.__room.input({ type: 'fire', playerId: 1 })`)
+  await waitFor(async () => (await evaluate(b, 'window.__toy.g && window.__toy.g.owner === 1')) || null, 20000, () => 'B no entró en guiado (2)')
+  await waitFor(async () => (await evaluate(a, 'window.__toy.g === null')) || null, 20000, () => 'el anfitrión no completó el guiado colgado')
+  const waited = (Date.now() - t0) / 1000
+  await same('guiado colgado completado')
+  if (waited < 4) throw new Error(`completó el guiado demasiado pronto (${waited.toFixed(1)} s)`)
+  log(`guiado colgado completado con ceros a los ${waited.toFixed(1)} s (0,2 + 0,5 + GUIDE_SLACK 4)`)
 }
 
 // ---------- snapshot con la sim real (v2.3: formato comprimido) ----------
