@@ -601,7 +601,7 @@ export class PixiRenderer implements GameRenderer {
           // v4: bien sumergida, la explosión no hace fuego ni humo (fogonazo ahogado, burbujas y géiser).
           // v2.4: si el sim lo dice (impact.water) se usa eso; si no, se detecta con la grilla (respaldo).
           // (el evento 'impact' todavía no declara water en GameEvent: se lee si llega)
-          const water = (ev as { water?: boolean }).water
+          const water = ev.water
           let wet: boolean
           if (water !== undefined) wet = water
           else {
@@ -611,8 +611,8 @@ export class PixiRenderer implements GameRenderer {
           if (wet) this.fx.underwater(ev.x, ev.y, ev.radius)
           else this.fx.explosion(ev.blast, ev.x, ev.y, ev.radius, ev.debris, dir.dx, dir.dy)
         }
-        if (SCORCH_STYLES.has(ev.blast) && (ev as { water?: boolean }).water !== true) this.painter?.addCrater(ev.x, ev.y, ev.radius)
-        this.liquids.impact(this.fx, ev.x, ev.y, ev.radius, (ev as { water?: boolean }).water) // v4: burbujas y géiser si explotó bajo el agua
+        if (SCORCH_STYLES.has(ev.blast) && ev.water !== true) this.painter?.addCrater(ev.x, ev.y, ev.radius)
+        this.liquids.impact(this.fx, ev.x, ev.y, ev.radius, ev.water) // v4: burbujas y géiser si explotó bajo el agua
         this.impactSeen = true
         // el tanque más amenazado grita '!', los otros cercanos se preguntan '?'
         {
