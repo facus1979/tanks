@@ -13,6 +13,7 @@ import type { Art, BiomePalette } from './assets'
 import { MATERIAL_FLAT, OUT } from './fallback'
 import { LIQ, W_ALPHA, W_LIGHT, W_LIGHT_ALPHA, W_SURF, baked, lavaBody, waterBody } from './liquids'
 import { bayer, mix, mul, rnd } from './raster'
+import { COLD, coldAlpha, coldCraters, coldPixel, frost } from './snow'
 
 export const CHUNK_W = 256
 
@@ -147,6 +148,7 @@ export class TerrainPainter {
   // v3: columnas de abismo (peso, labio, pared de fondo); vacío en mapas sin abismos (Chico queda igual)
   readonly pits = new PitMap()
   fog = 0xf0dfc8 // color de la niebla del bioma (la pone el renderer): flota sobre la boca de los abismos
+  snowy = false // v3: bioma nieve (lo pone el renderer): capa de nieve, cornisas y carámbanos (snow.ts)
   private prevFront: Uint8Array | null = null
   private prevBack: Uint8Array | null = null
   private pending: (Rect | null)[] // por trozo, ya con el margen de los bordes
@@ -662,6 +664,8 @@ export class TerrainPainter {
         }
 
         let c = matColor(m, x, y)
+        let a = 255 // v3: el hielo es translúcido
+        const cold = COLD[m] // v3: nieve (1) o hielo (2), ver snow.ts
         const up = !S(x, y - 1)
         const down = !S(x, y + 1)
         const left = !S(x - 1, y)
@@ -674,11 +678,15 @@ export class TerrainPainter {
           else if (!S(x, y - 2)) c = rimC
           else if (down) c = 0x100a07
           else if (left || right) c = mul(c, 0.7)
+        } else if (cold) {
+          c = coldPixel(m, c, !!materials[m], x, y, up, down, left, right, S)
+          a = coldAlpha
         } else {
           if (down) c = mul(c, 0.5)
           else if (left || right) c = mul(c, 0.72)
         }
-        for (const cr of craters) {
+        if (cold) c = coldCraters(c, m, x, y, craters)
+        else for (const cr of craters) {
           const d = Math.hypot(x - cr.x, y - cr.y)
           if (d < cr.r + 6) {
             const k = 1 - (d - cr.r) / 6
@@ -694,10 +702,10 @@ export class TerrainPainter {
             }
           }
         }
-        if (!up && (hole(x, y - 1) || hole(x - 1, y) || hole(x + 1, y))) c = m === DIRT ? rimLight : mix(c, 0xb0a68c, 0.35)
+        if (!up && (hole(x, y - 1) || hole(x - 1, y) || hole(x + 1, y))) c = m === DIRT ? rimLight : mix(c, cold ? 0xe8f4ff : 0xb0a68c, 0.35)
         else if (hole(x, y + 1)) c = 0x0a0605
         if (pw !== null && pw[x] > 0) c = pits.shade(c, x, y, H, fog, true)
-        set(fd, x, y, c)
+        set(fd, x, y, c, a)
       }
     }
 
@@ -732,6 +740,7 @@ export class TerrainPainter {
       }
     }
     if (pw !== null) this.pitRoots(t, r, put)
+    if (this.snowy) frost(t, r, put, craters)
     return found
   }
 

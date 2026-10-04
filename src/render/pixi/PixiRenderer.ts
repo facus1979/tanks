@@ -17,6 +17,8 @@ import { Extras } from './extras'
 import { Fx } from './fx'
 import { LavaView } from './lava'
 import { LiquidView, solidCell } from './liquids'
+import { LootKit, LootProp, isLootKind } from './loot'
+import { SnowView } from './snow'
 import { DMG_BIG, DMG_COLOR, DMG_LAVA, DMG_SHIELD, DamageNumbers } from './numbers'
 import { Raster, Rng } from './raster'
 import { CHUNK_W, TerrainPainter } from './terrain'
@@ -129,6 +131,9 @@ export class PixiRenderer implements GameRenderer {
   private flowNew = false // el frame en que llega el evento el diff es completo (puede haber otros cambios)
   // v2.4: derrumbes en curso (evento 'collapse'): polvo de los bordes, piedritas y nube al asentarse
   private collapse = new CollapseView()
+  // v3 nieve: nevada, niebla fría, brillos del hielo, aliento y patinazos; y el botín y los objetivos pagos
+  private snow = new SnowView()
+  private loot = new LootKit()
 
   private fx = new Fx(BUF_W, BUF_H)
   private extras = new Extras(this.fx)
@@ -152,7 +157,7 @@ export class PixiRenderer implements GameRenderer {
   private camZ = 1
 
   private tanks = new Map<number, TankView>()
-  private props = new Map<number, PropView>()
+  private props = new Map<number, PropView | LootProp>()
   private arrows: Sprite[] = []
 
   private biome: Biome | null = null
@@ -174,6 +179,7 @@ export class PixiRenderer implements GameRenderer {
   private shakeX = 0
   private shakeY = 0
   private wasFrozen = false
+  private lastTerrain: Terrain | null = null
   private stats: FxStats | null = FX_STATS ? new FxStats() : null
   private blocked = (x: number, y: number, w: number, h: number): boolean => this.fx.blocks(x, y, w, h)
 
@@ -193,6 +199,11 @@ export class PixiRenderer implements GameRenderer {
     this.app.canvas.style.imageRendering = 'pixelated'
     host.appendChild(this.app.canvas)
     this.art = await loadArt()
+    await this.loot.load()
+    this.loot.dust = (x, y, n, w) => {
+      if (this.painter && this.lastTerrain && this.snow.landing(this.lastTerrain, x, y, n)) return
+      this.fx.dust(x, y, n, w)
+    }
 
     this.fxTex = canvasTexture(this.fx.fx.canvas)
     this.lightTex = canvasTexture(this.fx.light.canvas)
@@ -211,11 +222,13 @@ export class PixiRenderer implements GameRenderer {
     this.warmG.alpha = 0
     this.warmG.visible = false
     this.world.addChild(
+      this.snow.mist,
       this.backLayer,
       this.propLayer,
       this.lampLayer,
       this.abyss.layer,
       this.frontLayer,
+      this.snow.surface,
       this.tankLayer,
       this.liquidLayer,
       this.liquids.layer,
@@ -225,10 +238,11 @@ export class PixiRenderer implements GameRenderer {
       this.lightSprite,
       this.fxSprite,
       this.extras.layer,
+      this.loot.overlay,
       this.numbers.root,
       this.overlayLayer,
     )
-    this.app.stage.addChild(this.bg, this.world, this.warmG, this.glowG, this.arrowLayer, this.flashG, this.extras.curtain)
+    this.app.stage.addChild(this.bg, this.snow.behind, this.world, this.snow.ahead, this.warmG, this.glowG, this.arrowLayer, this.flashG, this.extras.curtain)
     this.fx.wreckPos = (id) => {
       const p = this.players.find((q) => q.id === id)
       return p && !p.alive && !this.lost.has(id) ? { x: Math.round(p.x), y: Math.round(p.y) } : null
@@ -285,6 +299,7 @@ export class PixiRenderer implements GameRenderer {
       if (this.flyT >= FLY_PEEK) this.flyHeld = true
     }
     this.players = frame.players
+    this.lastTerrain = frame.terrain
 
     if (frame.matchId !== this.matchId || frame.terrainVersion < this.version) {
       if (this.matchId !== -1) this.reset()
@@ -353,6 +368,15 @@ export class PixiRenderer implements GameRenderer {
     this.placeWorld()
     this.updateLava(frame, step, events)
     this.updateLiquids(frame, step, events)
+    {
+      // v3: nieve (nevada, niebla, brillos, partículas) sobre la vista con sacudón
+      const z = this.camZ
+      const wx = this.camX + this.shakeX
+      const wy = this.camY + this.shakeY
+      const x0 = -wx / z
+      const y0 = -wy / z
+      this.snow.update(frame.terrain, frame.players, changed, step, frame.wind, wx, wy, x0, x0 + VIEW_W / z, y0, y0 + VIEW_H / z, art.crewInBody)
+    }
 
     this.fx.draw(this.shotViews(frame))
     this.stats?.sample(this.fx.count, dt, performance.now() - t0, this.fx.trails)
@@ -362,7 +386,13 @@ export class PixiRenderer implements GameRenderer {
     this.extras.update(art, frame, step, this.time, (id) => this.tanks.get(id)?.dropOff ?? 0)
     this.numbers.font = art.font
     this.numbers.update(step)
+    this.loot.dt = step
+    this.loot.time = this.time
+    this.loot.viewTop = this.viewTop
+    this.loot.biome = frame.biome
+    this.loot.terrain = frame.terrain
     this.syncProps(art, frame.props, frame.wind)
+    this.loot.endFrame()
     this.syncLamps(frame.props)
     this.upload()
     this.syncArrows(art, frame)
@@ -428,6 +458,8 @@ export class PixiRenderer implements GameRenderer {
     this.flowRect = null
     this.flowLeft = 0
     this.collapse.reset()
+    this.snow.reset()
+    this.loot.reset()
     this.abyss.reset()
     this.lost.clear()
     this.lastAlive.clear()
@@ -460,8 +492,12 @@ export class PixiRenderer implements GameRenderer {
     })
     this.app.renderer.background.color = def.fog
     this.fx.fog = def.fog
+    this.snow.setBiome(biome)
     const p = this.painter
-    if (p) p.markDirty({ x0: 0, y0: 0, x1: p.w, y1: p.h })
+    if (p) {
+      p.snowy = biome === 'snow'
+      p.markDirty({ x0: 0, y0: 0, x1: p.w, y1: p.h })
+    }
   }
 
   // Pintor y trozos del terreno del tamaño del mundo de esta partida (se rehacen si cambia el tamaño).
@@ -471,6 +507,7 @@ export class PixiRenderer implements GameRenderer {
     for (const s of this.backChunks.concat(this.frontChunks, this.liquidChunks)) s.destroy({ texture: true, textureSource: true })
     const p = new TerrainPainter(t.w, t.h)
     if (old) p.craters = old.craters
+    p.snowy = this.biome === 'snow'
     const make = (c: { x0: number; canvas: HTMLCanvasElement }): Sprite => {
       const s = new Sprite(canvasTexture(c.canvas))
       s.x = c.x0
@@ -579,6 +616,7 @@ export class PixiRenderer implements GameRenderer {
     }
     // v3: el tanque que cae al abismo se marca antes de que Extras eyecte al tripulante desde los restos
     if (ev.type === 'death' || ev.type === 'fall') this.checkAbyss(ev, frame)
+    this.snow.onEvent(ev, frame.terrain)
     if (this.art) this.extras.onEvent(ev, frame, this.art)
     if (FX_TEST && ev.type === 'impact' && ev.source !== 'barrel') {
       const w = WEAPONS[FX_TEST]
@@ -672,7 +710,7 @@ export class PixiRenderer implements GameRenderer {
         const p = frame.players.find((q) => q.id === ev.playerId)
         if (ev.parachute) this.view(ev.playerId).startChute(ev.from - ev.to)
         else if (p && ev.water) this.liquids.tankSplash(this.fx, p.x, ev.to) // v4: cayó al agua
-        else if (p) this.fx.dust(p.x, ev.to, 12, TANK_W)
+        else if (p && !this.snow.landing(frame.terrain, p.x, ev.to, 12)) this.fx.dust(p.x, ev.to, 12, TANK_W) // v3: en la nieve, polvo blanco
         break
       }
       case 'slide': {
@@ -696,6 +734,7 @@ export class PixiRenderer implements GameRenderer {
         break
       case 'prop':
         if (ev.destroyed && this.propToAbyss(ev, frame)) break
+        if (ev.destroyed && this.loot.burst(ev, frame.props, this.fx)) break // v3: monedas, billetes y la explosión del objetivo
         if (ev.destroyed) {
           const cols = ev.kind === 'barrel' ? [0xd0362c, 0x8e1e1a, 0x8a8a84] : DEBRIS_COLORS[4].concat(DEBRIS_COLORS[5])
           const prop = frame.props.find((q) => q.id === ev.propId)
@@ -964,7 +1003,7 @@ export class PixiRenderer implements GameRenderer {
       v.stepChute(dt, p.alive)
       if (v.landed) {
         v.landed = false
-        this.fx.dust(p.x, p.y, 8, TANK_W)
+        if (!this.snow.landing(frame.terrain, p.x, p.y, 8)) this.fx.dust(p.x, p.y, 8, TANK_W)
       }
       if (this.lost.has(p.id)) {
         // se perdió en el abismo: lo dibuja AbyssFalls mientras cae; acá no queda nada
@@ -974,8 +1013,11 @@ export class PixiRenderer implements GameRenderer {
       }
       if (p.alive && p.y < frame.terrain.h) this.lastAlive.set(p.id, { x: p.x, y: p.y })
       v.update(art, p, p.id === currentId, this.time, frame.wind, this.blocked, frame.terrain, dt)
-      // polvo de las orugas: una bocanada cada pocos pixels, desde la cola del tanque
-      if (v.moved !== 0 && dt > 0) {
+      // v3: oruga sin tracción patinando en el hielo
+      v.slip = this.snow.slip(p.id)
+      // polvo de las orugas: una bocanada cada pocos pixels, desde la cola del tanque (v3: en nieve o hielo,
+      // nieve en polvo o astillas de hielo de snow.ts)
+      if (v.moved !== 0 && dt > 0 && !this.snow.tread(frame.terrain, p, v.moved, v.sliding, dt)) {
         v.dustAcc += Math.abs(v.moved)
         const dir = Math.sign(v.moved)
         if (v.sliding) {
@@ -1004,7 +1046,7 @@ export class PixiRenderer implements GameRenderer {
       seen.add(p.id)
       let v = this.props.get(p.id)
       if (!v) {
-        v = new PropView(p)
+        v = isLootKind(p.kind) ? this.loot.make() : new PropView(p)
         this.props.set(p.id, v)
         this.propLayer.addChild(v.root)
       }
