@@ -330,7 +330,7 @@ class LobbyScreen implements LobbyView, LobbyProfileHooks {
   private owner(slot: LobbySlot, i: number): { text: string; color: number } {
     const m = this.model
     if (slot.kind === 'off') return { text: '', color: 0x6a625a }
-    if (slot.kind === 'ai') return { text: `IA ${personalityName(slot.personality)}`, color: 0x9ad0ff }
+    if (slot.kind === 'ai') return { text: personalityName(slot.personality), color: 0x9ad0ff } // v3: el tipo ya dice IA
     if (m && m.mySlot === i) return { text: 'VOS', color: 0xffd23a }
     if (slot.owner === 'host') return { text: m?.role === 'host' ? 'VOS' : 'ANFITRION', color: 0xffd23a }
     if (slot.owner == null) return { text: 'LIBRE', color: 0x8a8078 }

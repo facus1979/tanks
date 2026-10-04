@@ -533,3 +533,5 @@ html.touch .slots8 .slot .cell.color { min-width: 36px; }
 .lobby-slot.editable .who, .lobby-slot.editable .cell.crew, .lobby-slot.editable .cell.color { cursor: pointer; }
 .lobby-slot .who.sel { outline: var(--px) solid var(--gold); outline-offset: var(--px); }
 html.touch .lobby-slot .cell.color { min-width: 32px; }
+html.touch .lobby-slot .cell.kind { min-height: 38px; }
+html.touch .lobby-frame .msg { min-height: 0; }
