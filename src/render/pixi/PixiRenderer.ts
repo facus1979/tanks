@@ -6,6 +6,7 @@ import type { Terrain } from '../../sim/types'
 import type { GameRenderer, RenderFrame, Viewport } from '../types'
 import { VIEW_H, VIEW_W } from '../types'
 import { AbyssFalls } from './abyss'
+import { ArmasFx } from './armas'
 import { CollapseView } from './collapse'
 import type { Part } from './abyss'
 import { BUBBLE_HOLD, BUBBLE_TIME, PropView, RECOIL_TIME, TankView } from './actors'
@@ -24,7 +25,7 @@ import { Raster, Rng } from './raster'
 import { CHUNK_W, TerrainPainter } from './terrain'
 import type { Rect } from './terrain'
 
-const SCORCH_STYLES = new Set(['fire', 'bigfire', 'napalm', 'nuke'])
+const SCORCH_STYLES = new Set(['fire', 'bigfire', 'napalm', 'nuke', 'spark', 'laser', 'acid']) // v3: rebotadora, mina, láser y ácido también chamuscan
 const NEAR_MISS = 40
 const THREAT_MARGIN = 70
 const TRAIL_STEP = 7 // px entre puntos de la estela
@@ -139,6 +140,8 @@ export class PixiRenderer implements GameRenderer {
   private extras = new Extras(this.fx)
   // v3: lo que cae al abismo (tanques, tripulantes, utilería)
   private abyss = new AbyssFalls(this.fx, () => this.painter?.pits ?? null)
+  // v3 (render-armas): armas e ítems nuevos, minas y charcos, carteles de bonos (ver armas.ts)
+  private armas = new ArmasFx(this.fx, (x, y, r) => this.painter?.addCrater(x, y, r))
   private fxSprite = new Sprite()
   private lightSprite = new Sprite()
   private fxTex: Texture | null = null
@@ -229,6 +232,7 @@ export class PixiRenderer implements GameRenderer {
       this.abyss.layer,
       this.frontLayer,
       this.snow.surface,
+      this.armas.under.root,
       this.tankLayer,
       this.liquidLayer,
       this.liquids.layer,
@@ -237,9 +241,12 @@ export class PixiRenderer implements GameRenderer {
       this.lava.layer,
       this.lightSprite,
       this.fxSprite,
+      this.armas.glow.root,
+      this.armas.over.root,
       this.extras.layer,
       this.loot.overlay,
       this.numbers.root,
+      this.armas.signs.root,
       this.overlayLayer,
     )
     this.app.stage.addChild(this.bg, this.snow.behind, this.world, this.snow.ahead, this.warmG, this.glowG, this.arrowLayer, this.flashG, this.extras.curtain)
@@ -391,6 +398,12 @@ export class PixiRenderer implements GameRenderer {
     this.loot.viewTop = this.viewTop
     this.loot.biome = frame.biome
     this.loot.terrain = frame.terrain
+    {
+      const z = this.camZ
+      const vx0 = -(this.camX + this.shakeX) / z
+      this.armas.font = art.font
+      this.armas.update(frame, step, this.shotWeapon(frame), { x0: vx0, x1: vx0 + VIEW_W / z })
+    }
     this.syncProps(art, frame.props, frame.wind)
     this.loot.endFrame()
     this.syncLamps(frame.props)
@@ -466,6 +479,7 @@ export class PixiRenderer implements GameRenderer {
     this.painter?.reset()
     this.fx.reset()
     this.extras.reset()
+    this.armas.reset()
     for (const v of this.tanks.values()) v.destroy()
     this.tanks.clear()
     for (const v of this.props.values()) v.destroy()
@@ -622,6 +636,7 @@ export class PixiRenderer implements GameRenderer {
       const w = WEAPONS[FX_TEST]
       ev = { ...ev, blast: w.blast, radius: w.radius }
     }
+    this.armas.onEvent(ev, frame) // v3: beam, quake, pull, hazard, deflect, jetpack, teleport, bonus
     switch (ev.type) {
       case 'impact':
         if (ev.y > frame.terrain.h + 30 || ev.x < -60 || ev.x > frame.terrain.w + 60) return
@@ -647,7 +662,7 @@ export class PixiRenderer implements GameRenderer {
             wet = sy >= 0 && ev.y - sy > ev.radius * 0.5
           }
           if (wet) this.fx.underwater(ev.x, ev.y, ev.radius)
-          else this.fx.explosion(ev.blast, ev.x, ev.y, ev.radius, ev.debris, dir.dx, dir.dy)
+          else if (!this.armas.blast(ev, dir.dx, dir.dy, frame)) this.fx.explosion(ev.blast, ev.x, ev.y, ev.radius, ev.debris, dir.dx, dir.dy)
         }
         if (SCORCH_STYLES.has(ev.blast) && ev.water !== true) this.painter?.addCrater(ev.x, ev.y, ev.radius)
         this.liquids.impact(this.fx, ev.x, ev.y, ev.radius, ev.water) // v4: burbujas y géiser si explotó bajo el agua
@@ -859,8 +874,9 @@ export class PixiRenderer implements GameRenderer {
   private shotViews(frame: RenderFrame): ShotView[] {
     const out = this.shots
     out.length = 0
-    const shooter = frame.players.find((q) => q.id === frame.shooterId)
-    const weapon = FX_TEST ?? frame.weapon ?? shooter?.weapon
+    const weapon = this.shotWeapon(frame)
+    // v3: los proyectiles de las armas nuevas los dibuja ArmasFx
+    if (this.armas.ownsShot(weapon)) return out
     const n = frame.projectiles.length
     frame.projectiles.forEach((p, i) => {
       const st = this.trailLast.length === n ? this.trailLast[i] : undefined
@@ -872,6 +888,11 @@ export class PixiRenderer implements GameRenderer {
       else out.push({ x: p.x, y: p.y, kind: 'shell' })
     })
     return out
+  }
+
+  // Arma del tiro en curso (la de ?fxtest manda).
+  private shotWeapon(frame: RenderFrame): WeaponId | null {
+    return FX_TEST ?? frame.weapon ?? frame.players.find((q) => q.id === frame.shooterId)?.weapon ?? null
   }
 
   private view(id: number): TankView {
