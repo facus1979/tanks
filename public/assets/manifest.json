@@ -394,7 +394,23 @@
       },
       "frames": 7
     },
-    "parachute": "props/parachute.png"
+    "parachute": "props/parachute.png",
+    "loot": "props/loot.png",
+    "target": {
+      "forest": "props/target-forest.png",
+      "jungle": "props/target-jungle.png",
+      "industrial": "props/target-industrial.png",
+      "snow": "props/target-snow.png"
+    },
+    "mine": {
+      "file": "props/mine.png",
+      "cell": {
+        "w": 10,
+        "h": 6
+      },
+      "frames": 2
+    },
+    "missile": "props/missile.png"
   },
   "ui": {
     "bubbleAlert": "ui/bubble-alert.png",
@@ -421,7 +437,7 @@
         "w": 12,
         "h": 12
       },
-      "frames": 8
+      "frames": 16
     },
     "itemIcons": {
       "file": "ui/items.png",
@@ -429,7 +445,7 @@
         "w": 12,
         "h": 12
       },
-      "frames": 5
+      "frames": 9
     },
     "logo": "ui/logo.png"
   }

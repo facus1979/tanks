@@ -10,6 +10,7 @@ import * as TX from './lookdev/textures.mjs'
 import { BIOME_PAINTERS, BIOME_BG, BIOME_REPEAT, BIOME_PALETTE, BG_W, BG_H } from './lookdev/biomes.mjs'
 import * as UI from './lookdev/ui.mjs'
 import * as F10 from './lookdev/f10.mjs'
+import * as V3 from './lookdev/v3-props.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const outDir = path.join(root, 'public', 'assets')
@@ -193,6 +194,11 @@ const props = {
   flag: strip('props/flag.png', UI.flagStrip(), UI.FLAG_CELL, UI.FLAG_FRAMES),
   windsock: strip('props/windsock.png', UI.windsockStrip(), UI.SOCK_CELL, UI.SOCK_FRAMES),
   parachute: save('props/parachute.png', F10.parachuteProp()),
+  // v3: botín, objetivos pagos por bioma, mina y misil teledirigido
+  loot: save('props/loot.png', V3.lootProp()),
+  target: Object.fromEntries(BIOMES.map((b) => [b, save(`props/target-${b}.png`, V3.targetProp(b))])),
+  mine: strip('props/mine.png', V3.mineStrip(), V3.MINE_CELL, V3.MINE_FRAMES),
+  missile: save('props/missile.png', V3.missileProp()),
 }
 
 const fontCv = UI.fontStrip()
@@ -203,8 +209,8 @@ const ui = {
   font: { file: save('ui/font.png', fontCv), glyphW: UI.GLYPH.w, glyphH: UI.GLYPH.h, chars: UI.FONT_CHARS },
   arrow: save('ui/arrow.png', UI.arrowUp()),
   pip: strip('ui/pip.png', UI.pipStrip(), { w: 4, h: 5 }, 2),
-  weaponIcons: strip('ui/weapons.png', UI.weaponIconStrip(), { w: 12, h: 12 }, 8),
-  itemIcons: strip('ui/items.png', F10.itemIconStrip(), { w: 12, h: 12 }, 5),
+  weaponIcons: strip('ui/weapons.png', UI.weaponIconStrip(), { w: 12, h: 12 }, 16), // v3: orden de WEAPON_ORDER
+  itemIcons: strip('ui/items.png', F10.itemIconStrip(), { w: 12, h: 12 }, 9), // v3: orden de ITEM_ORDER
   logo: save('ui/logo.png', F10.logo()),
 }
 
@@ -416,7 +422,51 @@ function hudPanel(cv, x, y, color, name, crew, pips) {
   for (let i = 0; i < 6; i++) cv.blit(cellOf(pip, ui.pip, i < pips ? 0 : 1), bx + 5 + i * 7, y + 25)
 }
 
+// v3: hoja de revisión de íconos y utilería nuevos (preview/v3-sprites.png). Arriba sobre el HUD oscuro,
+// abajo sobre el cielo de cada bioma para ver contraste.
+function sheetV3() {
+  const cv = new Canvas(300, 170)
+  cv.rect(0, 0, cv.w, 74, 0x1c1614)
+  label(cv, 'ARMAS 1-16', 4, 3)
+  const wi = UI.weaponIconStrip()
+  for (let f = 0; f < 16; f++) {
+    // las 8 nuevas con un marquito para encontrarlas
+    if (f >= 8) cv.rect(4 + f * 17, 12, 14, 14, 0x3a3230)
+    cv.blit(cellOf(wi, ui.weaponIcons, f), 5 + f * 17, 13)
+  }
+  label(cv, 'ITEMS 1-9', 4, 32)
+  const it = F10.itemIconStrip()
+  for (let f = 0; f < 9; f++) {
+    if (f >= 5) cv.rect(4 + f * 17, 41, 14, 14, 0x3a3230)
+    cv.blit(cellOf(it, ui.itemIcons, f), 5 + f * 17, 42)
+  }
+  // íconos a 1:1 en una fila, como en la barra
+  for (let f = 0; f < 16; f++) cv.blit(cellOf(wi, ui.weaponIcons, f), 160 + (f % 8) * 13, 32 + Math.floor(f / 8) * 13)
+  for (let f = 0; f < 9; f++) cv.blit(cellOf(it, ui.itemIcons, f), 160 + f * 13, 59)
+  const ground = 150
+  // utilería sobre el cielo de cada bioma
+  BIOMES.forEach((b, k) => {
+    const x0 = k * 75
+    const sky = bgLayers[b][0]
+    for (let y = 74; y < cv.h; y++) for (let x = x0; x < x0 + 75; x++) cv.put(x, y, sky.get(x - x0 + 300, y + 120))
+    cv.rect(x0, ground, 75, cv.h - ground, b === 'snow' ? 0xe6eef8 : 0x2a1c13)
+    label(cv, b, x0 + 3, 77)
+    cv.blit(V3.targetProp(b), x0 + 4, ground - V3.TARGET_H)
+  })
+  // botín colgando del paracaídas, caja común al lado, mina (2 frames) y misil
+  const para = F10.parachuteProp()
+  cv.blit(para, 40, 86)
+  cv.blit(V3.lootProp(), 43, 101)
+  cv.blit(UI.crateProp(), 62, ground - 12)
+  const mines = V3.mineStrip()
+  for (let f = 0; f < 2; f++) cv.blit(cellOf(mines, props.mine, f), 115 + f * 14, ground - 6)
+  cv.blit(V3.missileProp(), 130, 96)
+  cv.blit(V3.lootProp(), 260, ground - 12)
+  fs.writeFileSync(path.join(previewDir, 'v3-sprites.png'), cv.scaledPng(4))
+}
+
 sheetTanks()
+sheetV3()
 sheetMaterials()
 for (const b of BIOMES) sheetBiome(b)
 sheetUi()
