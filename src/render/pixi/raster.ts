@@ -57,80 +57,32 @@ export class Rng {
 // v2: el buffer es una ventana sobre el mundo (setView): los métodos de dibujo reciben coordenadas de mundo
 // y las pasan a pixels del buffer con X = (x - ox) · z. Con z = 1 y ox, oy múltiplos de 4 el resultado es el
 // mismo pixel a pixel que dibujar en un buffer del tamaño del mundo (incluida la trama de Bayer).
-// v3 (rendimiento): el canvas se crea recién cuando alguien lo pide (los buffers de efectos se suben directo
-// desde `bytes` a una textura de GPU, sin putImageData), y el buffer lleva la caja de lo que se pintó desde el
-// último clear() (bx0..bx1, by0..by1 en pixels del buffer): clear() borra solo esa caja. Quien escriba en
-// `data` a mano (sin los métodos de dibujo) tiene que avisar con touch() o markAll().
 export class Raster {
   readonly data: Uint8ClampedArray
-  readonly bytes: Uint8Array // la misma memoria que data, para subirla a la GPU
-  private _image: ImageData | null = null
-  private _canvas: HTMLCanvasElement | null = null
-  private ctx: CanvasRenderingContext2D | null = null
+  readonly image: ImageData
+  readonly canvas: HTMLCanvasElement
+  private ctx: CanvasRenderingContext2D
   dirty = false
   ox = 0 // punto del mundo en el pixel (0, 0) del buffer
   oy = 0
   z = 1 // pixels de buffer por pixel de mundo
-  // caja pintada desde el último clear() (vacía si bx0 > bx1)
-  bx0 = 0
-  by0 = 0
-  bx1 = -1
-  by1 = -1
 
   constructor(
     readonly w: number,
     readonly h: number,
   ) {
-    this.data = new Uint8ClampedArray(w * h * 4)
-    this.bytes = new Uint8Array(this.data.buffer)
-    this.empty()
-  }
-
-  get canvas(): HTMLCanvasElement {
-    if (!this._canvas) {
-      const c = document.createElement('canvas')
-      c.width = this.w
-      c.height = this.h
-      const ctx = c.getContext('2d', { willReadFrequently: false })
-      if (!ctx) throw new Error('Sin canvas 2D')
-      this._canvas = c
-      this.ctx = ctx
-    }
-    return this._canvas
-  }
-
-  get image(): ImageData {
-    if (!this._image) this._image = new ImageData(this.data as Uint8ClampedArray<ArrayBuffer>, this.w, this.h)
-    return this._image
-  }
-
-  private empty(): void {
-    this.bx0 = this.w
-    this.by0 = this.h
-    this.bx1 = -1
-    this.by1 = -1
-  }
-
-  // Agranda la caja pintada (pixels del buffer, inclusive, ya recortados al buffer).
-  touch(x0: number, y0: number, x1: number, y1: number): void {
-    if (x0 < this.bx0) this.bx0 = x0
-    if (y0 < this.by0) this.by0 = y0
-    if (x1 > this.bx1) this.bx1 = x1
-    if (y1 > this.by1) this.by1 = y1
-  }
-
-  markAll(): void {
-    this.dirty = true
-    this.touch(0, 0, this.w - 1, this.h - 1)
+    this.canvas = document.createElement('canvas')
+    this.canvas.width = w
+    this.canvas.height = h
+    const ctx = this.canvas.getContext('2d', { willReadFrequently: false })
+    if (!ctx) throw new Error('Sin canvas 2D')
+    this.ctx = ctx
+    this.image = ctx.createImageData(w, h)
+    this.data = this.image.data
   }
 
   clear(): void {
-    if (this.bx1 >= this.bx0) {
-      const W = this.w
-      if (this.bx0 === 0 && this.bx1 === W - 1) this.data.fill(0, this.by0 * W * 4, (this.by1 + 1) * W * 4)
-      else for (let y = this.by0; y <= this.by1; y++) this.data.fill(0, (y * W + this.bx0) * 4, (y * W + this.bx1 + 1) * 4)
-    }
-    this.empty()
+    this.data.fill(0)
     this.dirty = false
   }
 
@@ -155,8 +107,7 @@ export class Raster {
   }
 
   flush(x = 0, y = 0, w = this.w, h = this.h): void {
-    void this.canvas
-    this.ctx!.putImageData(this.image, 0, 0, x, y, w, h)
+    this.ctx.putImageData(this.image, 0, 0, x, y, w, h)
   }
 
   put(x: number, y: number, c: number, a = 1): void {
@@ -169,10 +120,6 @@ export class Raster {
   private putB(x: number, y: number, c: number, a: number): void {
     if (x < 0 || y < 0 || x >= this.w || y >= this.h || a <= 0) return
     this.dirty = true
-    if (x < this.bx0) this.bx0 = x
-    if (x > this.bx1) this.bx1 = x
-    if (y < this.by0) this.by0 = y
-    if (y > this.by1) this.by1 = y
     const d = this.data
     const i = (y * this.w + x) * 4
     const r = (c >> 16) & 255
@@ -232,7 +179,6 @@ export class Raster {
     const x0 = Math.max(0, Math.floor(cx - r - 1))
     const x1 = Math.min(W - 1, Math.ceil(cx + r + 1))
     if (x0 > x1 || y0 > y1) return
-    this.touch(x0, y0, x1, y1)
     const r2 = r * r
     const d = this.data
     const n = ramp ? ramp.length : 0
@@ -301,8 +247,6 @@ export class Raster {
     const R2 = R * R
     const yA = Math.max(0, cy - R)
     const yB = Math.min(this.h, cy + R)
-    if (yA >= yB || cx + R <= 0 || cx - R >= W) return
-    this.touch(Math.max(0, cx - R), yA, Math.min(W - 1, cx + R), yB - 1)
     for (let y = yA; y < yB; y++) {
       const dy2 = (y - cy) * (y - cy)
       if (dy2 >= R2) continue
