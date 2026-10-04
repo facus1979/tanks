@@ -12,6 +12,8 @@ import { PitMap, vnoise } from './abyss'
 import type { Art, BiomePalette } from './assets'
 import { MATERIAL_FLAT, OUT } from './fallback'
 import { LIQ, W_ALPHA, W_LIGHT, W_LIGHT_ALPHA, W_SURF, baked, lavaBody, waterBody } from './liquids'
+import { Texture } from 'pixi.js'
+import { rectUploadReady, windowTexture, type RectSource } from './gpu'
 import { bayer, mix, mul, rnd } from './raster'
 
 export const CHUNK_W = 256
@@ -43,14 +45,19 @@ export interface Rect {
   y1: number
 }
 
+// v3 (rendimiento): cada trozo tiene su textura. Con el subidor por rectángulos de gpu.ts (WebGL) la textura es
+// una ventana sobre los bytes del mundo y flush() solo anota el rectángulo: al hacer texture.source.update() se
+// sube ese rectángulo directo desde la memoria (antes: putImageData al canvas del trozo y el canvas entero,
+// 256 × alto del mundo, a la GPU). Sin el subidor queda el camino del canvas.
 export interface Chunk {
   x0: number
   w: number
-  canvas: HTMLCanvasElement
-  ctx: CanvasRenderingContext2D
+  texture: Texture
+  canvas: HTMLCanvasElement | null // solo en el camino del canvas
+  ctx: CanvasRenderingContext2D | null
 }
 
-// Pixels RGBA del mundo entero, volcados a canvases de CHUNK_W de ancho (uno por trozo).
+// Pixels RGBA del mundo entero, subidos en trozos de CHUNK_W de ancho (una textura por trozo).
 export class ChunkLayer {
   readonly data: Uint8ClampedArray
   private image: ImageData
@@ -62,21 +69,35 @@ export class ChunkLayer {
   ) {
     this.image = new ImageData(w, h)
     this.data = this.image.data
+    const direct = rectUploadReady()
+    const bytes = new Uint8Array(this.data.buffer)
     for (let x0 = 0; x0 < w; x0 += CHUNK_W) {
       const cw = Math.min(CHUNK_W, w - x0)
+      if (direct) {
+        this.chunks.push({ x0, w: cw, texture: windowTexture(bytes, w, x0, cw, h), canvas: null, ctx: null })
+        continue
+      }
       const canvas = document.createElement('canvas')
       canvas.width = cw
       canvas.height = h
       const ctx = canvas.getContext('2d')
       if (!ctx) throw new Error('Sin canvas 2D')
-      this.chunks.push({ x0, w: cw, canvas, ctx })
+      const texture = Texture.from(canvas)
+      texture.source.scaleMode = 'nearest'
+      texture.source.autoGenerateMipmaps = false
+      this.chunks.push({ x0, w: cw, texture, canvas, ctx })
     }
   }
 
-  // Copia el rectángulo (ya recortado a un solo trozo) al canvas de ese trozo.
+  // Marca el rectángulo (ya recortado a un solo trozo) para subirlo, o lo copia al canvas de ese trozo.
   flush(i: number, r: Rect): void {
     const c = this.chunks[i]
-    c.ctx.putImageData(this.image, -c.x0, 0, r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0)
+    if (c.ctx) c.ctx.putImageData(this.image, -c.x0, 0, r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0)
+    else (c.texture.source as RectSource).addRect(r.x0 - c.x0, r.y0, r.x1 - 1 - c.x0, r.y1 - 1)
+  }
+
+  destroy(): void {
+    for (const c of this.chunks) c.texture.destroy(true)
   }
 }
 

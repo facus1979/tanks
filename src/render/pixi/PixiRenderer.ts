@@ -468,8 +468,8 @@ export class PixiRenderer implements GameRenderer {
     for (const s of this.backChunks.concat(this.frontChunks, this.liquidChunks)) s.destroy({ texture: true, textureSource: true })
     const p = new TerrainPainter(t.w, t.h)
     if (old) p.craters = old.craters
-    const make = (c: { x0: number; canvas: HTMLCanvasElement }): Sprite => {
-      const s = new Sprite(canvasTexture(c.canvas))
+    const make = (c: { x0: number; texture: Texture }): Sprite => {
+      const s = new Sprite(c.texture)
       s.x = c.x0
       return s
     }
