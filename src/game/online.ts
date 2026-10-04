@@ -65,6 +65,9 @@ export class Online {
           apply: (c) => session.applyNet(c),
           hash: () => hashState(must(session.authState)),
           snapshot: () => encodeState(must(session.authState)),
+          // v3: el room valida que el 'steer' venga del dueño del misil y completa con ceros si el turno
+          // vence, el dueño se va o el guiado se cuelga (state.guided de la sim del anfitrión)
+          guided: () => session.authState?.guided ?? null,
           onLobby: (lobby) => this.lobbyChanged(lobby),
           onPeerLeft: (p) => {
             if (p.playerId != null) session.hostCommand({ type: 'setKind', playerId: p.playerId, kind: 'ai' })
