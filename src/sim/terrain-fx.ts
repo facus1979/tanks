@@ -9,8 +9,20 @@ import { AIR, DIRT, LAVA, SNOW, STONE, TANK_H, TANK_HALF_W, WATER, type Player, 
 
 // ---------- grabador de cambios (como en collapse.ts) ----------
 
+// Sellos por celda (como en collapse.ts): la celda ya guardó su valor original en esta grabación.
+let stamp = new Uint32Array(0)
+let stampGen = 0
+
+// v3: la IA simula sin armar parches (recordFx = false); fire los arma siempre.
+export let recordFx = true
+export function setRecordFx(v: boolean): void {
+  recordFx = v
+}
+
 class Recorder {
-  orig = new Map<number, number>()
+  origIdx: number[] = []
+  origVal: number[] = []
+  gen: number
   patches: TerrainPatch[] = []
   wx0 = Infinity
   wy0 = Infinity
@@ -23,10 +35,27 @@ class Recorder {
   constructor(
     public t: Terrain,
     public record: boolean,
-  ) {}
+  ) {
+    const n = t.w * t.h
+    if (stamp.length < n) {
+      stamp = new Uint32Array(n)
+      stampGen = 0
+    }
+    stampGen++
+    if (stampGen === 0xffffffff) {
+      stamp.fill(0)
+      stampGen = 1
+    }
+    this.gen = stampGen
+    this.record = record && recordFx
+  }
   set(i: number, m: number): void {
     const t = this.t
-    if (!this.orig.has(i)) this.orig.set(i, t.front[i])
+    if (this.record && stamp[i] !== this.gen) {
+      stamp[i] = this.gen
+      this.origIdx.push(i)
+      this.origVal.push(t.front[i])
+    }
     t.front[i] = m
     const x = i % t.w
     const y = (i - x) / t.w
@@ -53,10 +82,11 @@ class Recorder {
     markDirty(t, this.tx0 - 1, this.ty0 - 1, this.tx1 + 1, this.ty1 + 1)
     if (!this.record) return []
     const p0 = patchOf(t, this.tx0, this.ty0, this.tx1, this.ty1)
-    for (const [i, m] of this.orig) {
+    for (let k = 0; k < this.origIdx.length; k++) {
+      const i = this.origIdx[k]
       const x = i % t.w
       const y = (i - x) / t.w
-      p0.front[(y - this.ty0) * p0.w + (x - this.tx0)] = m
+      p0.front[(y - this.ty0) * p0.w + (x - this.tx0)] = this.origVal[k]
     }
     this.patches.unshift(p0)
     return this.patches
@@ -110,7 +140,7 @@ export function buildWall(t: Terrain, players: Player[], x: number, y: number, h
 // están libres. La piedra solo cae derecho. Así las laderas empinadas se desmoronan, las cornisas y los techos
 // de cueva se caen y los salientes se aplanan. Las estructuras (ladrillo, madera, metal...) no se mueven.
 // Tierra sobre lava → piedra; lo que sale por el fondo de un abismo se pierde.
-export const QUAKE_ITERS = 40
+export const QUAKE_ITERS = 32
 export const QUAKE_DEPTH = 48
 export const QUAKE_FRAME_ITERS = 2
 export function quakeTerrain(t: Terrain, x: number, y: number, r: number, record: boolean, band = Infinity): TerrainFx {
@@ -155,25 +185,24 @@ export function quakeTerrain(t: Terrain, x: number, y: number, r: number, record
           continue
         }
         if (m === STONE) continue
-        // granular: resbala en diagonal (lado alternado por celda e iteración, determinista)
-        const first = hash2(xx, yy, 311 + iter) < 0.5 ? -1 : 1
-        for (const d of [first, -first]) {
-          const nx = xx + d
-          if (nx < x0 || nx > x1) continue
-          if (front[i + d] !== AIR || front[i + w + d] !== AIR) continue
-          rec.set(i, AIR)
-          rec.set(i + w + d, m)
-          cells++
-          moved = true
-          break
-        }
+        // granular: resbala en diagonal si el costado y su diagonal están libres (si puede a los dos lados, el
+        // lado sale de un hash de la celda y la iteración: determinista)
+        const left = xx > x0 && front[i - 1] === AIR && front[i + w - 1] === AIR
+        const right = xx < x1 && front[i + 1] === AIR && front[i + w + 1] === AIR
+        if (!left && !right) continue
+        const d = left && right ? (hash2(xx, yy, 311 + iter) < 0.5 ? -1 : 1) : left ? -1 : 1
+        rec.set(i, AIR)
+        rec.set(i + w + d, m)
+        cells++
+        moved = true
       }
     }
     if ((iter + 1) % QUAKE_FRAME_ITERS === 0) rec.flush()
     if (!moved) break
   }
+  const changed = rec.changed
   const patches = rec.finish()
-  return { changed: patches.length > 0 || rec.changed, cells, patches }
+  return { changed, cells, patches }
 }
 
 // ---------- agujero negro ----------
@@ -233,6 +262,7 @@ export function pullTerrain(t: Terrain, x: number, y: number, r: number, record:
     rec.flush()
     if (!moved) break
   }
+  const changed = rec.changed
   const patches = rec.finish()
-  return { changed: patches.length > 0 || rec.changed, cells, patches }
+  return { changed, cells, patches }
 }

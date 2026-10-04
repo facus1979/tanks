@@ -1,10 +1,11 @@
+import { aiProf } from '../src/sim/ai'
 import { applyCommand, chooseShot, createMatch, ITEM_ORDER, WEAPON_ORDER, type Difficulty, type GameState, type MapSize } from '../src/sim'
 function aiTurn(state: GameState, difficulty: Difficulty) {
   const p = state.players[state.current]
   const t0 = performance.now()
   const plan = chooseShot(state, difficulty)
   const ms = performance.now() - t0
-  for (const item of plan.items ?? []) state = applyCommand(state, { type: 'useItem', playerId: p.id, item, target: item === 'jetpack' || item === 'teleport' ? plan.target : undefined }).state
+  for (const item of plan.items ?? []) state = applyCommand(state, { type: 'useItem', playerId: p.id, item, target: item === 'jetpack' || item === 'teleport' ? plan.itemTarget : undefined }).state
   for (let i = 0; i < Math.abs(plan.move ?? 0); i++) state = applyCommand(state, { type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 }).state
   state = applyCommand(state, { type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }).state
   state = applyCommand(state, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }).state
@@ -22,7 +23,9 @@ for (const [difficulty, size, n] of [['normal', 'small', 3], ['hard', 'small', 2
     for (let turn = 0; turn < 60 && s.phase === 'aiming'; turn++) {
       const pre = s
       const r = aiTurn(s, difficulty)
-      if (r.ms > 250) {
+      if (r.ms > 600) console.log(JSON.stringify(Object.fromEntries(Object.entries(aiProf).map(([k, v]) => [k, `${v.n}/${v.ms.toFixed(0)}`]))))
+      for (const k in aiProf) delete aiProf[k]
+      if (r.ms > 600) {
         const a = pre.players[pre.current]
         console.log(size, seed, turn, r.ms.toFixed(0), JSON.stringify({ ...r.plan, steer: r.plan.steer?.length }), 'lava', pre.lava, 'hz', pre.hazards.length, 'ammo', Object.entries(a.ammo).filter(([, v]) => v > 0).map(([k]) => k).join(','))
         // reperfilado: mismo estado sin ítems

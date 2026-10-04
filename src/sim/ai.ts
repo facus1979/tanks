@@ -9,6 +9,7 @@ import { SLIDE_MAX } from './slide'
 import { NAPALM_DPS, NAPALM_SPREAD, LASER_RANGE, resolveShot } from './weapons'
 import { aimLanding, apexOf, guidedTarget, jumpSpots, laserAngles, noisySteer, planSteer } from './ai-arsenal'
 import { ACID_DAMAGE, inHazard } from './hazards'
+import { setRecordFx } from './terrain-fx'
 import { landingFor } from './game'
 import {
   KNOCKBACK_MAX,
@@ -172,7 +173,7 @@ export interface ShotPlan {
   // 'steer' mientras dure el guiado). Solo con weapon 'guided'.
   steer?: (-1 | 0 | 1)[]
   // v3: destino del jetpack o del teletransporte de items (la sesión lo manda como useItem.target).
-  target?: Vec2
+  itemTarget?: Vec2
 }
 
 // Umbrales de vida para reparar y para activar el escudo.
@@ -210,6 +211,12 @@ interface Candidate {
   score: number
   push?: boolean // v3: la estimación cree que tira a un rival al abismo
 }
+
+// v3: candidatos por arma que se verifican con la simulación completa (ver search)
+const POOL_FINE = 6
+const POOL_COARSE = 3
+const HEAVY_SIMS = 2
+const ROUGH = new Set<WeaponId>(['cluster', 'roller', 'napalm', 'bouncer'])
 
 // v3: cuántos tiros "al abismo" se verifican con la simulación completa por búsqueda.
 const PUSH_POOL = 6
@@ -338,7 +345,7 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
   if (move === 0 && !jump && actor.items.anchor > 0 && !actor.anchored && brinksOf(state.terrain, [actor]).length > 0) items.push('anchor')
   if (jump) {
     items.push(jump.item)
-    plan.target = jump.target
+    plan.itemTarget = jump.target
   }
   if (items.length > 0) plan.items = items
   // v3: teledirigido: correcciones planificadas desde el apogeo del tiro con error, sin temblor, y con el error
@@ -633,7 +640,14 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
     for (let a = -2; a <= 2; a += 1) for (let p = -1.5; p <= 1.5; p += 0.5) consider(clamp(ba.angle + a, 0, 180), clamp(ba.power + p, 10, 100))
   }
   // verificación con la simulación completa (racimo, rodadora y napalm no se estiman bien)
-  const pool = [...perWeapon.values(), best, ...pushes]
+  // v3: con 16 armas, verificar todas en cada búsqueda era lo más caro del turno: se verifican las POOL_FINE
+  // (POOL_COARSE desde otros lugares) mejores según la estimación; las que la estimación no ve bien (racimo,
+  // rodadora, napalm, rebotadora) entran siempre en la fina.
+  const ranked = [...perWeapon.values()].sort((a, b) => b.score - a.score || WEAPON_ORDER.indexOf(a.weapon) - WEAPON_ORDER.indexOf(b.weapon))
+  // con el kit de siempre (hasta 7 armas que no son la Tierra) se verifican todas, como antes de v3
+  const keep = ranked.length <= 7 ? ranked : ranked.slice(0, fine ? POOL_FINE : POOL_COARSE)
+  if (fine && ranked.length > 7) for (const c of ranked.slice(POOL_FINE)) if (ROUGH.has(c.weapon)) keep.push(c)
+  const pool = [...keep, best, ...pushes]
   for (const ba of brinkAim) {
     if (ba.d >= 16) continue
     for (const id of BRINK_WEAPONS) if (weapons.includes(id)) pool.push({ angle: ba.angle, power: ba.power, weapon: id, score: 0 })
@@ -648,7 +662,13 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   const lipWeapon: WeaponId = weapons.includes('heavy') ? 'heavy' : weapons[0]
   for (const la of lipAim) if (la.d < 16) pool.push({ angle: la.angle, power: la.power, weapon: lipWeapon, score: 0 })
   let verified: Candidate = { ...best, score: -Infinity }
+  // v3: terremoto y agujero negro son las simulaciones más caras: a lo sumo HEAVY_SIMS de cada uno por búsqueda
+  const heavy: Partial<Record<WeaponId, number>> = {}
   for (const c of pool) {
+    if (c.weapon === 'quake' || c.weapon === 'blackhole') {
+      heavy[c.weapon] = (heavy[c.weapon] ?? 0) + 1
+      if (heavy[c.weapon]! > HEAVY_SIMS) continue
+    }
     const score = simulate(state, c, prio)
     if (score > verified.score) verified = { ...c, score }
   }
@@ -868,7 +888,23 @@ function scratchState(state: GameState): GameState {
   }
 }
 
+// v3: medición (para sim-check y perfiles; no cambia nada): ms y llamadas de simulate por arma.
+export const aiProf: Record<string, { n: number; ms: number }> = {}
 function simulate(state: GameState, c: Candidate, prio?: Map<number, number>): number {
+  const t0 = performance.now()
+  setRecordFx(false) // sin parches de terremoto ni agujero negro (nadie los anima)
+  let r: number
+  try {
+    r = simulateShot(state, c, prio)
+  } finally {
+    setRecordFx(true)
+  }
+  const e = (aiProf[c.weapon] ??= { n: 0, ms: 0 })
+  e.n++
+  e.ms += performance.now() - t0
+  return r
+}
+function simulateShot(state: GameState, c: Candidate, prio?: Map<number, number>): number {
   const s = scratchState(state)
   const actor = s.players[s.current]
   actor.angle = c.angle

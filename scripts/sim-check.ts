@@ -142,7 +142,7 @@ function aiTurn(state: GameState, difficulty: Difficulty): StepResult & { ms: nu
   const pre: GameEvent[] = []
   for (const item of plan.items ?? []) {
     // v3: jetpack y teletransporte con su destino
-    const target = item === 'jetpack' || item === 'teleport' ? plan.target : undefined
+    const target = item === 'jetpack' || item === 'teleport' ? plan.itemTarget : undefined
     const r = applyCommand(state, { type: 'useItem', playerId: p.id, item, target })
     pre.push(...r.events)
     state = r.state
