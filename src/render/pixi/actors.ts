@@ -277,14 +277,21 @@ export class TankView {
     g.moveTo(c.x + hw, c.y).lineTo(cx + 4, top + 3).stroke({ width: 1, color: 0x2a2a24 })
   }
 
+  private antennaKey = ''
+
   private drawAntenna(art: Art, color: number, time: number, wind: number, recoil: number): void {
     const g = this.antenna
-    g.clear()
     const ax = art.antennaInBody.x
     const ay = art.antennaInBody.y
     const sway = recoil > 0.3 ? -1 : 0
-    g.rect(ax, ay - 12, 1, 12).fill(0x3a3a34)
     const flap = Math.floor(time * (5 + Math.abs(wind) * 0.6)) % 2
+    // v3 (rendimiento): solo se redibuja cuando cambia (rehacer el Graphics en cada frame costaba ~2% del CPU
+    // en el celular emulado con 4 tanques)
+    const key = `${color},${sway},${flap},${ax},${ay}`
+    if (key === this.antennaKey) return
+    this.antennaKey = key
+    g.clear()
+    g.rect(ax, ay - 12, 1, 12).fill(0x3a3a34)
     for (let y = 0; y < 4; y++) {
       for (let x = 0; x < 6 - y; x++) {
         const droop = x > 3 - flap ? 1 : 0
