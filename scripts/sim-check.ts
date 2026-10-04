@@ -3601,6 +3601,21 @@ for (const id of ITEM_ORDER) check(SHOP.some((e) => e.id === id && e.kind === 'i
   check(r.events.some((e) => e.type === 'slide' && e.cause === 'quake'), 'terremoto: sacude tanques')
   check(netHash(shootAt(s, 'quake', 506, 300, 5, 90).state) === netHash(r.state), 'terremoto: determinista')
 }
+// un agujero negro que se va por el abismo cerca del labio derecho (cruza la boca a ~20 px del labio)
+function intoPit(s: GameState): StepResult & { d: number } {
+  let best = { angle: 50, power: 50, d: Infinity }
+  for (let angle = 30; angle <= 70; angle += 2) {
+    for (let power = 20; power <= 100; power += 0.5) {
+      const f = fly({ terrain: s.terrain, players: s.players, props: s.props, ownerId: s.players[s.current].id, angle, power, wind: 0 })
+      if (f.impact.kind !== 'out') continue
+      const at = f.path.find((q) => q.x >= PIT0 && q.x <= PIT1 && q.y >= 306)
+      if (!at) continue
+      const d = Math.abs(at.x - (PIT1 - 20))
+      if (d < best.d) best = { angle, power, d }
+    }
+  }
+  return { ...shoot(s, 'blackhole', best.angle, best.power), d: best.d }
+}
 {
   // agujero negro: atrae al rival hacia el centro; con un abismo al lado, lo tira
   const s = armed()
@@ -3610,18 +3625,23 @@ for (const id of ITEM_ORDER) check(SHOP.some((e) => e.id === id && e.kind === 'i
   check(r.events.some((e) => e.type === 'pull'), 'agujero negro: evento pull')
   check(!!sl && r.state.players[1].x < 560, `agujero negro: atrae al rival (${r.state.players[1].x})`)
   check(r.state.players[1].x >= impactsOf(r)[0].x - 1, 'agujero negro: no lo pasa del centro')
+  // con un abismo al lado: el agujero negro se abre en la boca y lo arrastra adentro
   const p = pitMap()
+  fillRect(p.terrain, PIT0, 290, PIT1, 307, AIR) // la boca abierta
   for (const q of p.players) q.ammo.blackhole = 2
-  p.players[1].x = 800
-  const rp = shootAt(p, 'blackhole', PIT1 + 4, 300, 5, 90)
+  p.players[1].x = PIT1 + 1 + TANK_HALF_W + 8
+  p.wind = 0
+  const rp = intoPit(p)
   check(rp.events.some((e) => e.type === 'death' && e.playerId === 1 && e.cause === 'abyss'), `agujero negro: lo arrastra al abismo (x ${rp.state.players[1].x}, d ${rp.d.toFixed(1)})`)
   // anclado no se mueve
   const pa = pitMap()
   for (const q of pa.players) q.ammo.blackhole = 2
-  pa.players[1].x = 800
+  fillRect(pa.terrain, PIT0, 290, PIT1, 307, AIR)
+  pa.players[1].x = PIT1 + 1 + TANK_HALF_W + 8
   pa.players[1].anchored = true
-  const ra = shootAt(pa, 'blackhole', PIT1 + 4, 300, 5, 90)
-  check(ra.state.players[1].alive && ra.state.players[1].x === 800, 'ancla: el agujero negro no lo mueve')
+  pa.wind = 0
+  const ra = intoPit(pa)
+  check(ra.state.players[1].alive && ra.state.players[1].x === PIT1 + 1 + TANK_HALF_W + 8, 'ancla: el agujero negro no lo mueve')
 }
 {
   // muro: pared fina y alta de tierra donde cae; frena un tiro bajo

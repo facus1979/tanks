@@ -133,7 +133,7 @@ export function resolveShot(state: GameState, shooter: Player, weapon: WeaponId,
     power: shooter.power,
     wind: state.wind,
     lava: state.lava ?? undefined, // v2: lo que toca la lava se derrite sin explotar
-    lavaSolid: w.terrain === 'build', // Pulido v2: salvo la Tierra, que construye ahí
+    lavaSolid: w.terrain === 'build' || !!w.pull, // Pulido v2: salvo la Tierra, que construye ahí (v3: y el agujero negro, que se abre en la superficie)
   }
   const flights: Flight[] = []
   const events: GameEvent[] = []
@@ -164,6 +164,11 @@ export function afterSteer(state: GameState, g: GuidedState, r: SteerResult, fli
 // v3: lo que pasa cuando el proyectil termina su vuelo (f.time = desde el disparo), según el arma.
 export function land(state: GameState, shooter: Player, weapon: WeaponId, f: FlightResult, flights: Flight[], events: GameEvent[]): ShotOutcome {
   const w = WEAPONS[weapon]
+  // v3: el agujero negro que se va por un abismo se abre en la boca (ver pitMouth)
+  if (w.pull && f.impact.kind === 'out') {
+    const at = pitMouth(state, flights[flights.length - 1])
+    if (at) f = { ...f, impact: { kind: 'terrain', x: at.x, y: at.y }, time: at.t }
+  }
   if (f.impact.kind === 'out' || f.impact.kind === 'lava') return { flights, events }
   const { x, y, tankId } = f.impact
   if (w.rolls && f.impact.kind === 'terrain') return roll(state, shooter, weapon, f, flights, events)
@@ -181,6 +186,29 @@ export function land(state: GameState, shooter: Player, weapon: WeaponId, f: Fli
   // v3 ácido: charco en el fondo del cráter (bajo el agua se diluye)
   if (w.acid && !blast.water) placeHazard(state, 'acid', shooter.id, x, y - blast.radius, f.time, events)
   return { flights, events }
+}
+
+// v3: el agujero negro no se pierde en el abismo: se abre donde su vuelo cruza la boca (POCKET px por debajo
+// del labio más bajo de los dos lados). Recorta el vuelo ahí. null si el vuelo no terminó en un abismo.
+const POCKET = 6
+function pitMouth(state: GameState, flight: Flight): { x: number; y: number; t: number } | null {
+  const t = state.terrain
+  if (!t.pits) return null
+  const path = flight.path
+  for (let k = 0; k < path.length; k++) {
+    const x = Math.round(path[k].x)
+    if (x < 0 || x >= t.w || !t.pits[x]) continue
+    let l = x
+    let r = x
+    while (l > 0 && t.pits[l]) l--
+    while (r < t.w - 1 && t.pits[r]) r++
+    const rim = Math.min(columnGround(t, l), columnGround(t, r))
+    if (path[k].y < rim + POCKET) continue
+    flight.path = path.slice(0, k + 1)
+    flight.impact = { kind: 'terrain', x: path[k].x, y: path[k].y }
+    return { x: path[k].x, y: path[k].y, t: (flight.startT ?? 0) + k * PATH_DT }
+  }
+  return null
 }
 
 // v2.4: Impact.water: el centro de la explosión de ese vuelo quedó sumergido (lo decide resolveBlast).
