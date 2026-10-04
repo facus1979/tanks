@@ -393,6 +393,7 @@ export type GameEvent =
       // cuántos pixels de cada material se rompieron: el renderer tira escombros de esos colores
       debris: Partial<Record<Material, number>>
       source?: 'shot' | 'barrel' // 'barrel': explosión en cadena de un barril
+      water?: boolean // v2.4: el centro de la explosión quedó sumergido (radio × WATER_BLAST_SCALE)
     }
   // t opcional: momento de playback. Sin t, el evento va con el impacto anterior de la lista.
   | { type: 'damage'; playerId: number; amount: number; hp: number; t?: number; cause?: 'lava' | 'collapse' } // collapse: v2.4, aplastado por un derrumbe // cause: v2, quemado por la lava

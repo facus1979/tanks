@@ -147,7 +147,9 @@ export const ORDER_SALT = 0x2545f491
 function setupRound(state: GameState): void {
   const rng = new Rng(roundSeed(state.seed, state.round))
   const biome = biomeFor(state.biomeMode, state.seed, state.round)
-  const gen = generate(biome, rng, state.players.length, state.width, state.height)
+  // v2.4: tantos lugares seguros como humanos (ver humanSafe en gen.ts)
+  const humans = state.players.filter((p) => p.kind === 'human').length
+  const gen = generate(biome, rng, state.players.length, state.width, state.height, humans)
   state.biome = biome
   state.terrain = gen.terrain
   state.props = gen.props
@@ -161,6 +163,24 @@ function setupRound(state: GameState): void {
     const tmp = seat[i]
     seat[i] = seat[j]
     seat[j] = tmp
+  }
+  // el que abre la ronda sale del mismo sorteo (antes de los cambios de lugar de abajo: no lo cambian)
+  const opener = draw.int(0, state.players.length - 1)
+  // v2.4: un humano al que le tocó un lugar al borde de un abismo (cornisa o a menos de HUMAN_PIT_GAP px)
+  // lo cambia con una IA de lugar seguro, elegida con el mismo sorteo. Si no le tocó (o en Chico, sin
+  // abismos), no se sortea nada más y todo queda como en v2.3. generate garantiza que hay lugares seguros
+  // para todos los humanos.
+  const safe = gen.safe
+  if (safe) {
+    state.players.forEach((p, i) => {
+      if (p.kind !== 'human' || safe[seat[i]]) return
+      const pool = state.players.filter((q, j) => q.kind !== 'human' && safe[seat[j]]).map((q) => state.players.indexOf(q))
+      if (pool.length === 0) return
+      const j = pool[draw.int(0, pool.length - 1)]
+      const tmp = seat[i]
+      seat[i] = seat[j]
+      seat[j] = tmp
+    })
   }
   state.players.forEach((p, i) => {
     const x = gen.spawns[seat[i]]
@@ -181,7 +201,7 @@ function setupRound(state: GameState): void {
   state.wind = wind.value
   state.rng = wind.state
   state.windLeft = state.players.length
-  state.current = draw.int(0, state.players.length - 1)
+  state.current = opener
   state.phase = 'aiming'
   state.roundWinnerId = null
   state.turn = 1

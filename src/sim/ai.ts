@@ -415,6 +415,7 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   // empuja adentro (se verifica con la simulación completa, que resuelve el empuje)
   const brinks = brinksOf(state.terrain, targets)
   const brinkAim = brinks.map(() => ({ angle: 0, power: 0, d: Infinity }))
+  let direct = false // algún tiro de la búsqueda pega directo en un rival
   const consider = (angle: number, power: number) => {
     const r = estimate(state, actor, targets, weapons, angle, power, sky, ledges, prio)
     total++
@@ -433,6 +434,7 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
       }
     }
     if (r.blocked) blocked++
+    if (r.direct) direct = true
     for (const c of r.list) {
       const prev = perWeapon.get(c.weapon)
       if (!prev || c.score > prev.score) perWeapon.set(c.weapon, c)
@@ -446,6 +448,10 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   // en mapas anchos la potencia mínima de 24 ya tira lejos: se busca desde más abajo
   const p0 = k > 1 ? 12 : 24
   for (let angle = 6; angle <= 174; angle += da) for (let power = p0; power <= 100; power += dp) consider(angle, power)
+  // v2.4: morteros. Si la grilla no encontró ningún impacto directo (típico: el rival detrás de una montaña
+  // alta, donde la ventana de tiros que pasan la cima y caen sobre él es angosta), busca por bisección, para
+  // cada ángulo alto hacia el rival más cercano, la potencia que hace caer el tiro en su x.
+  if (fine && !direct) mortar(state, actor, nearest(actor, targets), sky, consider)
   if (aim.d < 40) {
     // refina alrededor del tiro que cae más al centro del rival colgado: el que le rompe el piso
     // suele estar en una ventana chica que la grilla gruesa no ve
@@ -485,7 +491,64 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
     const score = simulate(state, c, prio)
     if (score > verified.score) verified = { ...c, score }
   }
+  if (fine && verified.score > 0) verified = center(state, actor, verified, sky)
   return { best: verified, blocked: total > 0 ? blocked / total : 0 }
+}
+
+// v2.4: centrado del impacto directo. Todos los impactos directos valen lo mismo, así que la búsqueda se
+// quedaba con uno cualquiera de la ventana de tiros que pegan (por el desempate, el más plano: el borde). Por
+// encima de una montaña esa ventana mide ~2 puntos de potencia, y desde el borde el error de puntería (aun el
+// de la difícil) la saca afuera la mitad de las veces. Acá, si el tiro elegido pega directo, se corre hacia
+// donde más tiros vecinos (ángulo ± CENTER_DA, potencia ± CENTER_DP) también pegan en ese tanque, por pasos de
+// medio grado y un cuarto de potencia, hasta CENTER_STEPS pasos. Los pasos van en términos de elevación (hacia
+// arriba o hacia abajo del horizonte del lado del tiro) para que dos situaciones espejadas den tiros espejados.
+const CENTER_DA = 0.5
+const CENTER_DP = 0.6
+const CENTER_STEPS = 10
+function center(state: GameState, actor: Player, c: Candidate, sky: Int16Array): Candidate {
+  const shot = (angle: number, power: number) =>
+    fly({ skyline: sky, terrain: state.terrain, players: state.players, props: state.props, ownerId: actor.id, angle, power, wind: state.wind, lava: state.lava ?? undefined }).impact
+  const first = shot(c.angle, c.power)
+  if (first.kind !== 'tank' || first.tankId === undefined || first.tankId === actor.id) return c
+  const id = first.tankId
+  const side = c.angle <= 90 ? 1 : -1 // elevación: + sube el cañón hacia la vertical del lado del tiro
+  const cache = new Map<string, boolean>()
+  const hit = (angle: number, power: number) => {
+    const key = `${angle},${power}`
+    let h = cache.get(key)
+    if (h === undefined) {
+      const imp = shot(angle, power)
+      h = imp.kind === 'tank' && imp.tankId === id
+      cache.set(key, h)
+    }
+    return h
+  }
+  const robust = (angle: number, power: number) => {
+    let n = 0
+    for (const da of [-CENTER_DA, 0, CENTER_DA]) for (const dp of [-CENTER_DP, 0, CENTER_DP]) if (hit(clamp(angle + da, 0, 180), clamp(power + dp, 10, 100))) n++
+    return n
+  }
+  let a = c.angle
+  let p = c.power
+  let r = robust(a, p)
+  for (let step = 0; step < CENTER_STEPS && r < 9; step++) {
+    let best: { a: number; p: number; r: number } | null = null
+    for (const de of [0, 0.5, -0.5]) {
+      for (const dp of [0, 0.25, -0.25]) {
+        if (de === 0 && dp === 0) continue
+        const na = clamp(a + side * de, 0, 180)
+        const np = clamp(p + dp, 10, 100)
+        if (!hit(na, np)) continue
+        const nr = robust(na, np)
+        if (nr > (best?.r ?? r)) best = { a: na, p: np, r: nr }
+      }
+    }
+    if (!best) break
+    a = best.a
+    p = best.p
+    r = best.r
+  }
+  return a === c.angle && p === c.power ? c : { ...c, angle: a, power: p }
 }
 
 function estimate(
@@ -498,7 +561,7 @@ function estimate(
   skyline?: Int16Array,
   ledges: Ledge[] = [],
   prio?: Map<number, number>,
-): { list: Candidate[]; blocked: boolean; at?: { x: number; y: number } } {
+): { list: Candidate[]; blocked: boolean; at?: { x: number; y: number }; direct?: boolean } {
   const flight = fly({
     skyline,
     terrain: state.terrain,
@@ -545,7 +608,39 @@ function estimate(
     const score = (dmg > 0 ? 1000 + dmg * 10 - self * SELF_WEIGHT - cost : -near - self * SELF_WEIGHT - cost * 0.01) + flatTie(angle)
     list.push(push ? { angle, power, weapon: id, score, push } : { angle, power, weapon: id, score })
   }
-  return { list, blocked, at: flight.impact }
+  const direct = flight.impact.kind === 'tank' && targets.some((t) => t.id === flight.impact.tankId)
+  return { list, blocked, at: flight.impact, direct }
+}
+
+// v2.4: búsqueda de morteros. Para cada ángulo alto hacia el blanco (de MORTAR_A0 a MORTAR_A1 grados sobre la
+// horizontal, cada MORTAR_DA), bisección de la potencia según dónde cae el tiro respecto de la x del blanco
+// (corto: más potencia; largo: menos). Un tiro que choca contra la ladera de este lado cuenta como corto.
+// Cada resultado y sus vecinos pasan por consider (la estimación de siempre). Unos 20 ángulos × 9 vuelos.
+const MORTAR_A0 = 40
+const MORTAR_A1 = 88
+const MORTAR_DA = 2.5
+const MORTAR_STEPS = 9
+function mortar(state: GameState, actor: Player, target: Player, sky: Int16Array, consider: (angle: number, power: number) => void): void {
+  const dir = target.x > actor.x ? 1 : -1
+  for (let a = MORTAR_A0; a <= MORTAR_A1; a += MORTAR_DA) {
+    const angle = dir > 0 ? a : 180 - a
+    let lo = 10
+    let hi = 100
+    for (let k = 0; k < MORTAR_STEPS; k++) {
+      const p = (lo + hi) / 2
+      const f = fly({ skyline: sky, terrain: state.terrain, players: state.players, props: state.props, ownerId: actor.id, angle, power: p, wind: state.wind, lava: state.lava ?? undefined })
+      if (f.impact.kind === 'tank' && f.impact.tankId === target.id) {
+        lo = hi = p
+        break
+      }
+      // 'out' (se fue del mapa o por arriba): largo
+      const long = f.impact.kind === 'out' || (f.impact.x - target.x) * dir > 0
+      if (long) hi = p
+      else lo = p
+    }
+    const p = (lo + hi) / 2
+    for (const dp of [-0.5, 0, 0.5]) consider(angle, clamp(p + dp, 10, 100))
+  }
 }
 
 // v3: un rival que se sostiene sobre un abismo. Por cada columna de su caja: si es de abismo y lo

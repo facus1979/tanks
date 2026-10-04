@@ -128,6 +128,7 @@ export function resolveBlast(state: GameState, first: Blast, after?: (events: Ga
       t: b.t,
       debris,
       source: b.source ?? 'shot',
+      ...(b.water ? { water: true } : {}), // v2.4: también en barriles en cadena
     })
     const mark = events.length
     const pushes: { p: Player; dist: number; dir: -1 | 1 }[] = []
