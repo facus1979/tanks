@@ -760,6 +760,41 @@ function playSounds(events: GameEvent[]): void {
         break
       case 'prop':
         if (e.destroyed && e.kind === 'barrel') sfx.barrel()
+        // v3: caja de botín rota (con monedas) u objetivo pago destruido; la caja que aparece cae en paracaídas
+        else if (e.destroyed && e.kind === 'loot') sfx.lootBreak()
+        else if (e.destroyed && e.kind === 'target') sfx.targetDown()
+        else if (!e.destroyed && e.kind === 'loot' && session.isNewProp(e)) sfx.lootDrop()
+        break
+      // ---------- v3 ----------
+      case 'beam':
+        sfx.beam(Math.hypot(e.x1 - e.x0, e.y1 - e.y0))
+        break
+      case 'quake':
+        sfx.quake(e.radius)
+        break
+      case 'pull':
+        sfx.blackhole(e.duration)
+        break
+      case 'hazard':
+        if (e.hazard.kind === 'mine') {
+          if (e.action === 'place') sfx.mineArm()
+          else if (e.action === 'trigger' || e.action === 'expire') sfx.mineTrigger()
+        } else if (e.action !== 'expire') sfx.acidBubble(e.action === 'trigger' ? 1 : 0.6)
+        break
+      case 'deflect':
+        sfx.deflect()
+        break
+      case 'jetpack':
+        sfx.jetpack(Math.max(0, e.path.length - 1) * PATH_DT)
+        break
+      case 'teleport':
+        sfx.teleport()
+        break
+      case 'guide':
+        sfx.guideStart()
+        break
+      case 'bonus':
+        sfx.bonus(e.kind)
         break
       case 'fall':
         // v3: al abismo, silbido que se aleja durante la caída; v2.3: dura hasta que el tanque se pierde
@@ -813,7 +848,9 @@ function playSounds(events: GameEvent[]): void {
         break
       case 'item':
         if (e.item === 'shield') sfx.shieldOn()
-        else sfx.click()
+        else if (e.item === 'anchor' || e.item === 'deflector') sfx.itemOn(e.item)
+        // v3: jetpack y teletransporte suenan con su propio evento (jetpack / teleport)
+        else if (e.item !== 'jetpack' && e.item !== 'teleport') sfx.click()
         break
       case 'roundover':
         sfx.roundEnd()

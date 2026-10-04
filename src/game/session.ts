@@ -319,6 +319,7 @@ export class Session {
   // pullSplashes, impactos con el centro bajo el agua y lo que movió cada flujo (para el audio)
   private splashes: Vec2[] = []
   private submerged = new WeakSet<GameEvent>()
+  private newProps = new WeakSet<GameEvent>() // v3: eventos prop que agregan utilería (botín que cae)
   private flowInfos = new WeakMap<GameEvent, FlowInfo>()
   // online
   private mode: SessionMode = 'local'
@@ -934,6 +935,11 @@ export class Session {
     const out = this.splashes
     this.splashes = []
     return out
+  }
+
+  // v3: el evento prop trajo utilería nueva (caja de botín que aparece y cae): sonido de paracaídas.
+  isNewProp(event: GameEvent): boolean {
+    return this.newProps.has(event)
   }
 
   // v4: el impacto fue con el centro bajo el agua (explosión sumergida, sonido apagado).
@@ -1759,7 +1765,11 @@ export class Session {
       case 'prop': {
         const prop = pb.props.find((q) => q.id === event.propId)
         const final = pb.after.props?.find((q) => q.id === event.propId)
-        if (prop) {
+        if (!prop && !event.destroyed) {
+          // v3: utilería que aparece en el tiro (caja de botín que cae en paracaídas): entra con este evento
+          pb.props.push(final ? { ...final } : { id: event.propId, kind: event.kind, x: event.x, y: event.y, w: 12, h: 12, alive: true })
+          this.newProps.add(event)
+        } else if (prop) {
           prop.alive = !event.destroyed
           if (final) {
             prop.x = final.x
