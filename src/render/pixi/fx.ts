@@ -7,6 +7,8 @@ import type { BlastStyle, Terrain } from '../../sim/types'
 import { AIR, STONE, WATER, WEAPONS } from '../../sim/types'
 import { DEBRIS_COLORS, OUT } from './fallback'
 import { LIQ, solidCell } from './liquids'
+import type { Texture } from 'pixi.js'
+import { LightLayer, bufferTexture } from './lights'
 import { Raster, Rng, bayer, mix } from './raster'
 
 const FIRE = [0xfffbe2, 0xffe27a, 0xffb43e, 0xf77a28, 0xd24a1c, 0x8a2814]
@@ -238,7 +240,11 @@ const easeOut = (u: number): number => 1 - (1 - u) * (1 - u)
 
 export class Fx {
   readonly fx: Raster
-  readonly light: Raster
+  // v3: las luces son sprites aditivos en la GPU (lights.ts); fx.light.light(...) sigue igual que con el Raster.
+  readonly light: LightLayer
+  // v3: textura de GPU que se llena directo desde los bytes de fx (sin canvas ni putImageData), ver present().
+  readonly fxTexture: Texture
+  private fxShown = false
   shake = 0
   flash = 0
   flashColor = 0xfff1c9
@@ -269,7 +275,17 @@ export class Fx {
   // w × h: tamaño de los buffers (la pantalla más un margen), no del mundo.
   constructor(w: number, h: number) {
     this.fx = new Raster(w, h)
-    this.light = new Raster(w, h)
+    this.light = new LightLayer(w, h)
+    this.fxTexture = bufferTexture(this.fx)
+  }
+
+  // Sube a la GPU lo que se dibujó en fx (si hay algo o si hay que borrar lo del frame anterior).
+  // Devuelve si el sprite de efectos tiene que verse.
+  present(): boolean {
+    const fx = this.fx
+    if (fx.dirty || this.fxShown) this.fxTexture.source.update()
+    this.fxShown = fx.dirty
+    return fx.dirty
   }
 
   // Ubica los dos buffers sobre el mundo (ver Raster.setView).
@@ -1991,5 +2007,6 @@ export class Fx {
         if (k > 0) light.light(e.x + e.w / 2, e.y - 6, Math.max(22, e.w * 1.6), 0xff8a3a, 0.3 * k * (0.85 + 0.15 * Math.sin(this.time * 13 + e.x)))
       }
     }
+    light.finish()
   }
 }
