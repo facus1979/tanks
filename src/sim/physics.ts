@@ -57,6 +57,8 @@ export interface Blast {
   source?: 'shot' | 'barrel'
   // v2.3: sentido horizontal en que venía el proyectil (impacto directo: ver resolveBlast)
   heading?: -1 | 1
+  // v2.4: resolveBlast la marca si el centro quedó sumergido (radio × WATER_BLAST_SCALE); va a Impact.water
+  water?: boolean
 }
 
 // Distancia del punto a la caja del tanque (0 si está adentro).
@@ -111,7 +113,10 @@ export function resolveBlast(state: GameState, first: Blast, after?: (events: Ga
   while (queue.length > 0) {
     const b = queue.shift()!
     // v4: explosión con el centro sumergido: radio de terreno y de daño × WATER_BLAST_SCALE
-    if (submerged(state.terrain, b.x, b.y)) b.radius *= WATER_BLAST_SCALE
+    if (submerged(state.terrain, b.x, b.y)) {
+      b.radius *= WATER_BLAST_SCALE
+      b.water = true
+    }
     const debris = deform(state.terrain, b.x, b.y, b.radius, b.terrain, state.lava ?? Infinity)
     events.push({
       type: 'impact',
