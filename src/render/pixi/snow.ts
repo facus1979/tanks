@@ -147,7 +147,8 @@ export function frost(t: Terrain, r: { x0: number; y0: number; x1: number; y1: n
         if (m !== ICE) {
           for (const side of [-1, 1]) {
             const s = k + side
-            if (f[s] !== AIR || f[s + W] !== AIR) continue
+            // solo en bordes de verdad (dos filas de aire debajo): en las pendientes no
+            if (f[s] !== AIR || f[s + W] !== AIR || f[s + 2 * W] !== AIR) continue
             put(x + side, y, 0xeef5fc)
             if (rnd(x, y, 163 + side) > 0.45) put(x + side, y + 1, 0xc2d2e6)
             if (rnd(x, y, 165 + side) > 0.7 && f[s + side] === AIR) put(x + 2 * side, y, 0xdde8f4)
