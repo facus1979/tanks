@@ -337,15 +337,15 @@ const ICONS = [
   [
     '........kkk.',
     '.......kWGGk',
-    '.......kGGgk',
-    '...ss..kGggk',
-    '..s..s..kkk.',
-    '.s....s.s...',
-    '.s.....s....',
+    '..ss...kGGgk',
+    '.s..s..kGggk',
+    '.s...s..kkk.',
+    's....s..s...',
+    's.....s.s...',
+    's.....s.s...',
     's......s....',
-    'Y.Y...Y.Y...',
-    '.O.....O....',
-    'Y.Y...Y.Y...',
+    '.Y.....Y....',
+    'YOY...YOY...',
     'SSSSSSSSSSSS',
   ],
   // laser: emisor con rayo rosa de núcleo blanco que pega del otro lado
@@ -380,10 +380,10 @@ const ICONS = [
   ],
   // quake: suelo partido en zigzag, escombros saltando y líneas de temblor
   [
-    's..C....c..s',
-    '.s...c.C..s.',
-    's..c......s.',
-    '...GgG.GGgG.',
+    '....cc......',
+    '.s..cC...cc.',
+    's........cCs',
+    '.s........s.',
     '.kkkkkk.kkkk',
     'kBBbbbkkBBbk',
     'kbbbbbbkkbbk',
@@ -443,24 +443,24 @@ function blackholeIcon(cv, x0) {
   const ring = (front) => {
     for (let y = 0; y < 12; y++) {
       for (let x = 0; x < 12; x++) {
-        // elipse inclinada: rotada ~-20°
+        // elipse apenas inclinada (corrida en y según x)
         const dx = x - cx
-        const dy = y - cy
-        const u = dx * 0.94 + dy * 0.34
-        const v = -dx * 0.34 + dy * 0.94
-        const e = Math.hypot(u / 5.8, v / 2.1)
-        if (e < 0.72 || e > 1.12) continue
-        if (front !== v > 0) continue
-        cv.put(x0 + x, y, e > 1.0 ? OUT : v < -0.6 ? 0xe6b0ff : u > 2 ? 0x6a2aa8 : 0xa65ae0)
+        const dy = y - cy + dx * 0.22
+        const e = Math.hypot(dx / 6, dy / 2.4)
+        if (e < 0.6 || e > 1.08) continue
+        if (front !== dy > 0) continue
+        cv.put(x0 + x, y, dy < -0.6 ? 0xf0c8ff : dx > 2.5 ? 0x8a4ad0 : 0xb46aee)
       }
     }
   }
   ring(false)
+  // disco: negro con un halo violeta oscuro y contorno
   for (let y = 0; y < 12; y++) {
     for (let x = 0; x < 12; x++) {
       const d = Math.hypot(x - cx, y - cy)
-      if (d < 2.4) cv.put(x0 + x, y, 0x08060c)
-      else if (d < 3.3) cv.put(x0 + x, y, 0x3a1a5a)
+      if (d < 2.7) cv.put(x0 + x, y, 0x08060c)
+      else if (d < 3.6) cv.put(x0 + x, y, 0x6a2aa8)
+      else if (d < 4.4) cv.put(x0 + x, y, OUT)
     }
   }
   ring(true)
