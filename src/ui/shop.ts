@@ -143,7 +143,12 @@ class ShopScreen implements ShopView {
     who.append(portrait(model.crew, model.color, small ? 1 : 2), stack)
     const cash = el('div', 'cash')
     cash.append(label('PLATA', GREY), label(`$${model.money}`, GOLD, small ? 2 : 3))
-    head.append(who, cash)
+    const ready = button('LISTO', () => this.handlers?.ready(), 'play')
+    // ventanas chicas (celular apaisado): LISTO sube al encabezado, junto a la plata, para que entren las 9 filas
+    const right = el('div', 'shop-right')
+    right.append(cash)
+    if (small) right.append(ready)
+    head.append(who, right)
 
     const cols = el('div', 'shop shop3')
     for (const c of columns(model.rows)) {
@@ -163,16 +168,17 @@ class ShopScreen implements ShopView {
       if (NEW_IN_V3.has(sel.id)) title.append(label('NUEVO', GOLD))
       title.append(label(`${sel.qty > 1 ? `X${sel.qty}  ` : ''}$${sel.price}`, sel.price <= model.money ? GOLD : 0xd0362c))
       text.append(title, label(SHOP_DESC[sel.id] ?? '', 0xc8bca8))
-      detail.append(icon(sel.id, small ? 1 : 2), text)
+      detail.append(icon(sel.id, 1), text)
     }
 
-    const actions = el('div', 'actions')
-    const ready = button('LISTO', () => this.handlers?.ready(), 'play')
-    actions.append(ready)
     const hint = el('div', 'hint')
     hint.append(label('FLECHAS MOVER   ESPACIO COMPRA   BORRAR VENDE   L LISTO', GREY))
-
-    frame.append(head, cols, detail, actions, hint)
+    frame.append(head, cols, detail)
+    if (!small) {
+      const actions = el('div', 'actions')
+      actions.append(ready)
+      frame.append(actions, hint)
+    }
     this.root.replaceChildren(frame)
     this.root.querySelector('.prow.sel')?.scrollIntoView({ block: 'nearest' })
   }

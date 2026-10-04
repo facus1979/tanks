@@ -38,6 +38,7 @@ const TEST_PRICES: Partial<Record<ShopId, [number, number, number]>> = {
   guided: [450, 1, 3], bouncer: [260, 2, 9], laser: [380, 1, 5], mine: [200, 2, 6], quake: [500, 1, 3], blackhole: [650, 1, 2], acid: [320, 2, 6], wall: [140, 2, 9],
   jetpack: [200, 1, 3], teleport: [400, 1, 2], anchor: [150, 1, 3], deflector: [300, 1, 3],
 }
+const ITEM_TEST_NAMES: Record<ItemId, string> = { shield: 'Escudo', parachute: 'Paracaídas', fuel: 'Combustible', repair: 'Reparación', tracer: 'Trazador', jetpack: 'Jetpack', teleport: 'Teletransporte', anchor: 'Ancla', deflector: 'Deflector' }
 const FULL_SHOP: ShopEntry[] = [
   ...SHOP,
   ...[...WEAPON_ORDER.filter((id) => id !== 'normal'), ...ITEM_ORDER]
@@ -48,7 +49,6 @@ const FULL_SHOP: ShopEntry[] = [
       return { id, kind: item ? 'item' : 'weapon', name: item ? ITEM_TEST_NAMES[id as ItemId] : WEAPONS[id as WeaponId].name, price, qty, max }
     }),
 ]
-const ITEM_TEST_NAMES: Record<ItemId, string> = { shield: 'Escudo', parachute: 'Paracaídas', fuel: 'Combustible', repair: 'Reparación', tracer: 'Trazador', jetpack: 'Jetpack', teleport: 'Teletransporte', anchor: 'Ancla', deflector: 'Deflector' }
 
 function shopModel(money: number, owned: Record<string, number>): ShopModel {
   const w = who()
