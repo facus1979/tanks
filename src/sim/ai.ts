@@ -192,6 +192,7 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
   const actor = state.players[state.current]
   const rand = random ?? rngFor(state)
   flowBudget = flowBudgetFor(state.terrain.w)
+  centerAlways = difficulty === 'hard'
   const weapons = WEAPON_ORDER.filter((id) => actor.ammo[id] > 0 && WEAPONS[id].terrain !== 'build')
   const fallback = weapons[0] ?? WEAPON_ORDER.find((id) => actor.ammo[id] > 0) ?? 'normal'
   const targets = state.players.filter((p) => p.alive && p.id !== actor.id)
@@ -451,7 +452,8 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   // v2.4: morteros. Si la grilla no encontró ningún impacto directo (típico: el rival detrás de una montaña
   // alta, donde la ventana de tiros que pasan la cima y caen sobre él es angosta), busca por bisección, para
   // cada ángulo alto hacia el rival más cercano, la potencia que hace caer el tiro en su x.
-  if (fine && !direct) mortar(state, actor, nearest(actor, targets), sky, consider)
+  const narrow = fine && !direct // la grilla no ve impactos directos: la ventana de tiros que pegan es angosta
+  if (narrow) mortar(state, actor, nearest(actor, targets), sky, consider)
   if (aim.d < 40) {
     // refina alrededor del tiro que cae más al centro del rival colgado: el que le rompe el piso
     // suele estar en una ventana chica que la grilla gruesa no ve
@@ -491,7 +493,7 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
     const score = simulate(state, c, prio)
     if (score > verified.score) verified = { ...c, score }
   }
-  if (fine && verified.score > 0) {
+  if ((narrow || centerAlways) && verified.score > 0) {
     // el tiro centrado tiene que valer lo mismo con la simulación completa: un tiro que pega en el borde de la
     // caja puede servir por otra cosa (romperle el puente, empujarlo al vacío) que el del centro no hace
     const c = center(state, actor, verified, sky)
@@ -866,6 +868,10 @@ const AI_FLOW_ITERS = 200
 // flujos simulados por turno de la IA (se recarga en chooseShot): acota el peor caso con lava cerca
 const AI_FLOW_BUDGET = 8
 let flowBudget = AI_FLOW_BUDGET
+// v2.4: la difícil centra siempre el impacto directo (ver center); la normal y la fácil, solo cuando la grilla
+// gruesa no encontró ninguno (ventana angosta: montaña, rival tapado). Centrar siempre con la normal cambiaba el
+// reparto de victorias por posición con 6 en Mediano (una posición ganaba 19 de 60).
+let centerAlways = false
 // v5: cada flujo simulado cuesta más cuanto más ancho el mapa (en Grande ~17 ms) y con 8 tanques hay más
 // bordes de pozo con un rival abajo: el tope baja con el cuadrado del ancho pasado Mediano (Grande: 4)
 // para que el turno siga bajo 250 ms. Chico y Mediano quedan en AI_FLOW_BUDGET.
