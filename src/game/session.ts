@@ -8,6 +8,7 @@ import type {
   Flight,
   GameEvent,
   GameState,
+  Hazard,
   ItemId,
   MatchConfig,
   Player,
@@ -19,7 +20,7 @@ import type {
   Vec2,
   WeaponId,
 } from '../sim/types'
-import { ITEM_ORDER, LAVA, MAX_PLAYERS_BY_SIZE, SHOP, SUDDEN_DEATH_CALM, TANK_H, TANK_W, WATER, WEAPONS, fuelFor } from '../sim/types'
+import { GUIDE_TIME, ITEM_ORDER, JETPACK_RANGE, LAVA, MAX_PLAYERS_BY_SIZE, SHOP, STEER_TICK, SUDDEN_DEATH_CALM, TANK_H, TANK_W, TELEPORT_RANGE, WATER, WEAPONS, fuelFor } from '../sim/types'
 import { AIM_PREVIEW_T, HUD_BAR_H, VIEW_W, type Camera, type RenderFrame } from '../render/types'
 import type { HudModel, HudSide } from '../ui/hud'
 import type { BannerModel, HudExtras, HudNet, MinimapModel, ScoreModel, ShopModel } from '../ui/types'
@@ -94,14 +95,50 @@ interface Playback {
   splashNext: number[]
   // pulido v2: deslizamientos (empuje o pendiente) con la caída que los sigue
   slides: SlidePlay[]
+  // v3 teledirigido: el ascenso de un misil guiado termina en este estado (phase 'guiding'); al terminar el
+  // playback empieza el guiado. guideQueue: tandas de 'steer' que el anfitrión aceptó durante el ascenso
+  // (se aplican sobre after, así el hash de la sala ya las incluye, y se muestran al empezar el guiado).
+  guideFrom: GameState | null
+  guideQueue: { before: GameState; result: StepResult }[]
+  // v3: minas y charcos que se ven (arrancan como antes del tiro y cambian con los eventos hazard)
+  hazards: Hazard[]
+  // v3: algo grande que la cámara mira un rato (terremoto, agujero negro, botín que cae, teletransporte)
+  focus: { x: number; y: number; zoom: number; t1: number } | null
+}
+
+// v3 misil teledirigido en la fase 'guiding' (sin playback): el camino que ya devolvieron los 'steer' y
+// el cabezal de lo que se muestra. Cada tanda agrega su tramo; el cabezal avanza en tiempo real y nunca
+// pasa del final (si el dueño es remoto y la red se atrasa, el misil espera).
+interface GuidePlay {
+  ownerId: number
+  weapon: WeaponId
+  pts: Vec2[] // camino desde que empezó el guiado, un punto cada PATH_DT
+  t: number // cabezal: segundos mostrados desde que empezó el guiado
+  guide0: number // segundos de guiado al empezar (GuidedState.guide)
+  zoom: number
+  clock: number // dueño de este dispositivo o IA: segundos hasta la próxima tanda
+  ticks: number // ticks ya mandados
+  plan: (-1 | 0 | 1)[] | null // IA: correcciones por tick (ShotPlan.steer)
+  idle: number // anfitrión: segundos sin tandas del dueño remoto
+  stuck: number // tandas seguidas que la sim no aceptó
+  hint: (Vec2 & { at: number }) | null // steerLive del dueño remoto (vista previa)
+}
+
+// v3: eligiendo el destino de un jetpack o un teletransporte.
+export interface ItemAimView {
+  item: 'jetpack' | 'teleport'
+  from: Vec2 // centro del tanque
+  to: Vec2 // cursor (ya recortado al rango)
+  range: number
 }
 
 // Pulido v2: un tanque que se corre por el piso (evento slide). Recorre path desde t0 (un punto cada
 // PATH_DT) hasta t1; si después cae (fall que no es al abismo ni con paracaídas), la caída se anima con
 // gravedad y el fall se entrega al aterrizar (golpe, polvo, chapuzón). Lo que le pasa a ese tanque después
 // en la lista (daño, muerte, escudo, otro deslizamiento) espera a que termine.
+// v3: el salto del jetpack se anima igual (su path es el camino del tanque).
 interface SlidePlay {
-  event: Extract<GameEvent, { type: 'slide' }>
+  event: Extract<GameEvent, { type: 'slide' | 'jetpack' }>
   playerId: number
   t0: number
   t1: number // fin del recorrido
@@ -161,6 +198,9 @@ interface AiDrive {
   hold: number
   move: number // pixels con signo que faltan recorrer antes de apuntar (ShotPlan.move)
   moveAcc: number
+  // v3: ítems del plan que faltan usar (uno por frame, antes de moverse) y el arma que falta elegir
+  items: { item: ItemId; target?: Vec2 }[]
+  weapon: WeaponId | null
 }
 
 const SETTLE = 0.9
@@ -229,6 +269,21 @@ const SLIDE_HOLD = 0.35
 const SLIDE_TAIL = 0.4
 // Lo de un tanque que espera a que termine su deslizamiento.
 const AFTER_SLIDE = new Set<GameEvent['type']>(['damage', 'shield', 'death'])
+// v3 teledirigido: ticks por tanda de 'steer' (2 × STEER_TICK = 0,1 s), anticipación de la cámara sobre el
+// misil (segundos de vuelo a su velocidad), zoom de la cámara mientras se guía (entre estos topes) y
+// segundos sin tandas del dueño remoto tras los que el anfitrión manda ceros (para que el turno no se trabe).
+const STEER_BATCH = 2
+const GUIDE_LOOKAHEAD = 0.45
+const GUIDE_ZOOM_MIN = 0.7
+const GUIDE_IDLE = 3
+// v3 cámara: cuánto mira un terremoto, un agujero negro (más su duración), el botín que cae y el lugar
+// adonde llegó un teletransporte.
+const QUAKE_HOLD = 1.6
+const PULL_HOLD = 0.5
+const LOOT_HOLD = 1.6
+const TELEPORT_HOLD = 0.9
+// v3 destino de jetpack y teletransporte: velocidad del cursor con teclado o gamepad (px de mundo por s).
+export const ITEM_CURSOR_SPEED = 260
 
 // Duración de la caída (no al abismo) de from a to después de un deslizamiento.
 export function slideFallDur(from: number, to: number): number {
@@ -320,6 +375,16 @@ export class Session {
   private splashes: Vec2[] = []
   private submerged = new WeakSet<GameEvent>()
   private newProps = new WeakSet<GameEvent>() // v3: eventos prop que agregan utilería (botín que cae)
+  // v3 teledirigido: guiado en curso, lado pedido por el input local (-1 izquierda, 1 derecha), plan de la
+  // IA que disparó (se pasa al guiado al empezar), tandas propias ya mostradas que el cliente espera ver
+  // volver en el log (predicción) y tandas nuevas para el sonido
+  private guide: GuidePlay | null = null
+  private steerSide: -1 | 0 | 1 = 0
+  private aiSteer: { playerId: number; dirs: (-1 | 0 | 1)[] } | null = null
+  private predicted: string[] = []
+  private steerNews: { dir: -1 | 0 | 1; left: number }[] = []
+  // v3: destino de jetpack / teletransporte que se está eligiendo (key: turno en que se empezó)
+  private itemAim: { item: 'jetpack' | 'teleport'; playerId: number; key: string; x: number; y: number } | null = null
   private flowInfos = new WeakMap<GameEvent, FlowInfo>()
   // online
   private mode: SessionMode = 'local'
@@ -424,6 +489,7 @@ export class Session {
     this.ai = null
     this.aiToken++
     this.aim = null
+    this.resetGuide()
     this.message = ''
     this.messageT = 0
     this.terrainVersion++
@@ -464,7 +530,13 @@ export class Session {
   // peers, ya verificado por la sala). true si la sim lo aceptó.
   applyNet(command: Command): boolean {
     const s = this.state
-    if (this.mode !== 'host' || !s || this.playback) return false
+    if (this.mode !== 'host' || !s) return false
+    // v3: las tandas del teledirigido se aceptan también durante el ascenso (ver applySteer)
+    if (command.type === 'steer') {
+      this.accepted = false
+      return this.applySteer(command)
+    }
+    if (this.playback) return false
     if (TURN_COMMANDS.has(command.type)) {
       const id = (command as { playerId: number }).playerId
       if (s.phase !== 'aiming' || s.players[s.current]?.id !== id) return false
@@ -505,9 +577,12 @@ export class Session {
     this.aim = null
     this.terrainVersion++
     this.lavaAnim = null
+    this.resetGuide()
     if (round !== state.round) this.newRound()
     // ya empezada (reconexión): no se vuelve a avisar
     if (state.lava != null) this.suddenDeathSaid = true
+    // v3: llegó en pleno guiado de un teledirigido: se sigue desde donde está el misil
+    if (state.phase === 'guiding') this.beginGuide(state, 'guided', 1)
   }
 
   // Cañón de otro jugador en vivo (aimLive): solo visual, no toca el estado.
@@ -533,6 +608,128 @@ export class Session {
   isLocal(p: Player): boolean {
     if (p.kind !== 'human') return false
     return this.mode === 'local' || this.localIds.has(p.id)
+  }
+
+  // ---------- v3 teledirigido ----------
+
+  // El misil que se ve lo dirige el humano de este dispositivo (en hot-seat, el dueño; online, solo si es tuyo).
+  get steering(): boolean {
+    const s = this.state
+    const g = this.guide
+    if (!s || !g || s.phase !== 'guiding' || this.playback || this.frozen) return false
+    const owner = s.players.find((p) => p.id === g.ownerId)
+    return !!owner && this.controlledHere(owner)
+  }
+
+  // Lado pedido por el input local mientras se guía: -1 izquierda, 1 derecha, 0 derecho. Se lee al armar
+  // cada tanda (cada STEER_BATCH ticks). La sim gira con -1 antihorario y 1 horario en pantalla; con el
+  // misil bajando, horario lleva la punta a la izquierda: izquierda = 1, derecha = -1.
+  steerInput(side: -1 | 0 | 1): void {
+    this.steerSide = side
+  }
+
+  // Tandas nuevas desde la última llamada (soplido del cohete): lado de la sim y fracción de guiado que queda.
+  pullSteers(): { dir: -1 | 0 | 1; left: number }[] {
+    const out = this.steerNews
+    this.steerNews = []
+    return out
+  }
+
+  // Online (steerLive): posición del misil que dirige este dispositivo, para mandarla en vivo; null si no.
+  liveSteer(): { playerId: number; x: number; y: number } | null {
+    const g = this.guide
+    if (!g || !this.steering) return null
+    const at = samplePath(g.pts, g.t)
+    return { playerId: g.ownerId, x: at.x, y: at.y }
+  }
+
+  // Online (steerLive): posición en vivo del misil de otro. Solo visual: la cámara la mira mientras el log
+  // todavía no trajo ese tramo.
+  remoteSteer(playerId: number, x: number, y: number): void {
+    const g = this.guide
+    if (!g || g.ownerId !== playerId || !Number.isFinite(x) || !Number.isFinite(y)) return
+    g.hint = { x, y, at: performance.now() }
+  }
+
+  // ---------- v3 destino de jetpack y teletransporte ----------
+
+  // Destino que se está eligiendo (cursor recortado al rango), o null.
+  get aimingItem(): ItemAimView | null {
+    const a = this.itemAim
+    const s = this.state
+    if (!a || !s || !this.inputEnabled) return null
+    const p = s.players[s.current]
+    if (!p || p.id !== a.playerId || this.turnKey(s) !== a.key || (p.items?.[a.item] ?? 0) <= 0) return null
+    const from = { x: p.x, y: p.y - TANK_H / 2 }
+    const range = a.item === 'jetpack' ? JETPACK_RANGE : TELEPORT_RANGE
+    return { item: a.item, from, to: this.clampTarget(s, from, range, a.x, a.y), range }
+  }
+
+  // Empieza a elegir destino (el ítem no se gasta hasta confirmar). El cursor arranca un poco adelante.
+  beginItemAim(item: 'jetpack' | 'teleport'): boolean {
+    const s = this.state
+    if (!this.inputEnabled || !s) return false
+    const p = s.players[s.current]
+    if ((p.items?.[item] ?? 0) <= 0) {
+      this.flash(`Sin ${ITEM_NAMES[item]}`)
+      return false
+    }
+    const ahead = p.angle <= 90 ? 1 : -1
+    const range = item === 'jetpack' ? JETPACK_RANGE : TELEPORT_RANGE
+    this.itemAim = { item, playerId: p.id, key: this.turnKey(s), x: p.x + ahead * range * 0.5, y: p.y - TANK_H / 2 - 30 }
+    this.flash(item === 'jetpack' ? 'Elegi donde saltar' : 'Elegi el destino')
+    return true
+  }
+
+  // Mueve el cursor (teclado, gamepad) en px de mundo.
+  moveItemCursor(dx: number, dy: number): void {
+    const v = this.aimingItem
+    if (!v || !this.itemAim) return
+    this.itemAim.x = v.to.x + dx
+    this.itemAim.y = v.to.y + dy
+  }
+
+  // Pone el cursor en un punto del mundo (mouse, toque).
+  setItemCursor(x: number, y: number): void {
+    if (!this.aimingItem || !this.itemAim) return
+    this.itemAim.x = x
+    this.itemAim.y = y
+  }
+
+  // Confirma: manda useItem con el destino. true si la sim lo aceptó.
+  confirmItemAim(): boolean {
+    const v = this.aimingItem
+    const s = this.state
+    if (!v || !s) return false
+    this.itemAim = null
+    const p = s.players[s.current]
+    const target = { x: Math.round(v.to.x), y: Math.round(v.to.y) }
+    const ok = this.act({ type: 'useItem', playerId: p.id, item: v.item, target })
+    if (!ok) this.flash('No se puede')
+    return ok
+  }
+
+  // Esc: cancela sin gastar el ítem.
+  cancelItemAim(): boolean {
+    if (!this.itemAim) return false
+    this.itemAim = null
+    return true
+  }
+
+  private turnKey(s: GameState): string {
+    return `${this.matchId}:${s.turn}:${s.current}`
+  }
+
+  // Destino dentro del círculo de alcance y del mapa (en y, desde un poco arriba del cielo hasta el piso).
+  private clampTarget(s: GameState, from: Vec2, range: number, x: number, y: number): Vec2 {
+    let dx = x - from.x
+    let dy = y - from.y
+    const d = Math.hypot(dx, dy)
+    if (d > range) {
+      dx *= range / d
+      dy *= range / d
+    }
+    return { x: clamp(from.x + dx, TANK_W / 2, s.terrain.w - TANK_W / 2), y: clamp(from.y + dy, 0, s.terrain.h - 1) }
   }
 
   // QA (?autotest=1): apunta a un valor fijo y dispara.
@@ -710,15 +907,17 @@ export class Session {
     this.commitAimAndFire(this.state.players[this.state.current].id)
   }
 
-  // Q/F/R/T: escudo, combustible, reparación, trazador. Devuelve true si se aplicó.
-  useItem(item: ItemId): boolean {
+  // Q/F/R/T: escudo, combustible, reparación, trazador; v3: ancla y deflector. Devuelve true si se aplicó.
+  // v3: jetpack y teletransporte sin destino entran en el modo de elegir destino (true si empezó).
+  useItem(item: ItemId, target?: Vec2): boolean {
     if (!this.inputEnabled || !this.state) return false
+    if ((item === 'jetpack' || item === 'teleport') && !target) return this.beginItemAim(item)
     const p = this.state.players[this.state.current]
     if ((p.items?.[item] ?? 0) <= 0) {
       this.flash(`Sin ${ITEM_NAMES[item]}`)
       return false
     }
-    const ok = this.act({ type: 'useItem', playerId: p.id, item })
+    const ok = this.act(target ? { type: 'useItem', playerId: p.id, item, target } : { type: 'useItem', playerId: p.id, item })
     if (!ok) this.flash('No se puede')
     return ok
   }
@@ -732,6 +931,8 @@ export class Session {
       if ((p?.items?.[id] ?? 0) <= 0) continue
       if (id === 'shield' && p.shield > 0) continue
       if (id === 'tracer' && p.tracer) continue
+      if (id === 'anchor' && p.anchored) continue
+      if (id === 'deflector' && p.deflector) continue
       return id
     }
     return null
@@ -906,6 +1107,12 @@ export class Session {
     }
     this.drain()
     if (this.playback) return
+    if (this.state.phase === 'guiding') {
+      // v3: teledirigido en la bajada (también el cliente: dirige el suyo y muestra el de los demás)
+      this.phaseT = 0
+      this.stepGuide(dt)
+      return
+    }
     if (this.state.phase !== 'aiming') {
       this.phaseT += dt
       // demo: la partida entre IAs sigue sola (tienda de IAs incluida)
@@ -915,6 +1122,185 @@ export class Session {
     this.phaseT = 0
     if (this.mode === 'client') return
     this.driveAi(dt)
+  }
+
+  // ---------- v3 teledirigido: guiado ----------
+
+  // Empieza el guiado desde el estado con phase 'guiding' (al terminar el ascenso o con un snapshot).
+  private beginGuide(state: GameState, weapon: WeaponId, zoom: number): void {
+    const gs = state.guided
+    if (!gs) return
+    const plan = this.aiSteer && this.aiSteer.playerId === gs.ownerId ? this.aiSteer.dirs : null
+    this.aiSteer = null
+    this.guide = {
+      ownerId: gs.ownerId,
+      weapon,
+      pts: [{ x: gs.x, y: gs.y }],
+      t: 0,
+      guide0: Number.isFinite(gs.guide) ? gs.guide : GUIDE_TIME,
+      zoom: clamp(zoom, GUIDE_ZOOM_MIN, 1),
+      clock: 0,
+      ticks: 0,
+      plan,
+      idle: 0,
+      stuck: 0,
+      hint: null,
+    }
+  }
+
+  private resetGuide(): void {
+    this.guide = null
+    this.steerSide = 0
+    this.aiSteer = null
+    this.predicted = []
+    this.steerNews = []
+    this.itemAim = null
+  }
+
+  // Avanza el cabezal y, si el misil es de este dispositivo (humano local o IA del anfitrión/local), arma
+  // una tanda de STEER_BATCH ticks cada STEER_BATCH × STEER_TICK segundos. La tanda se manda al empezar su
+  // ventana con el lado que se aprieta en ese momento: así el camino siempre va una tanda adelante del
+  // cabezal y el misil no se frena esperando (la demora del input es de una tanda, 0,1 s).
+  private stepGuide(dt: number): void {
+    const s = this.state
+    const g = this.guide
+    if (!s || !g) {
+      if (s?.phase === 'guiding') this.beginGuide(s, 'guided', 1)
+      return
+    }
+    const end = (g.pts.length - 1) * PATH_DT
+    g.t = Math.min(end, g.t + dt)
+    const owner = s.players.find((p) => p.id === g.ownerId)
+    if (!owner) return
+    const here = this.controlledHere(owner)
+    const ai = !this.controlledByHuman(owner) && this.mode !== 'client'
+    if (here || ai) {
+      g.clock -= dt
+      if (g.clock > 0) return
+      const span = STEER_BATCH * STEER_TICK
+      g.clock = Math.max(-span, g.clock) + span
+      const dirs: (-1 | 0 | 1)[] = []
+      for (let i = 0; i < STEER_BATCH; i++) {
+        const side = here ? this.steerSide : 0
+        dirs.push(here ? ((-side) as -1 | 0 | 1) : g.plan?.[g.ticks + i] ?? 0)
+      }
+      g.ticks += STEER_BATCH
+      if (this.act({ type: 'steer', playerId: owner.id, dirs })) g.stuck = 0
+      else if (++g.stuck === 40) console.warn('teledirigido: la sim no acepta las tandas de steer')
+    } else if (this.mode === 'host') {
+      // dueño remoto que no manda nada (se colgó o tiene la pestaña dormida): ceros para que el misil caiga
+      g.idle += dt
+      if (g.idle > GUIDE_IDLE) {
+        g.idle = 0
+        this.act({ type: 'steer', playerId: owner.id, dirs: new Array(STEER_BATCH).fill(0) })
+      }
+    }
+  }
+
+  // Una tanda de 'steer' que llega a la sesión: la propia (local o del anfitrión), la del log (cliente, con
+  // pre) o una de la sala (anfitrión). Durante el ascenso del misil (anfitrión, playback con guideFrom) se
+  // aplica sobre after y queda en cola. true si la sim la aceptó.
+  private applySteer(command: Extract<Command, { type: 'steer' }>, pre?: StepResult): boolean {
+    const pb = this.playback
+    if (pb) {
+      const before = pb.after
+      if (!pb.guideFrom || before.phase !== 'guiding' || before.guided?.ownerId !== command.playerId) return false
+      const r = pre ?? safeApply(before, command)
+      if (!r || (r.state === before && r.events.length === 0)) return false
+      pb.after = r.state
+      pb.guideQueue.push({ before, result: r })
+      this.accepted = true
+      return true
+    }
+    const s = this.state
+    if (!s || s.phase !== 'guiding' || s.guided?.ownerId !== command.playerId) return false
+    const r = pre ?? safeApply(s, command)
+    if (!r || (r.state === s && r.events.length === 0)) return false
+    this.accepted = true
+    this.takeSteer(s, r, command)
+    return true
+  }
+
+  // Muestra el resultado de una tanda: si el misil sigue guiado, su tramo se suma al camino; si terminó
+  // (chocó o se acabó el guiado), lo que falta ver del camino, el vuelo final y las explosiones van como un
+  // tiro normal (playback), empalmados sin corte.
+  private takeSteer(before: GameState, r: StepResult, command?: Extract<Command, { type: 'steer' }>): void {
+    if (!this.guide) this.beginGuide(before, 'guided', 1)
+    const g = this.guide
+    if (!g) {
+      this.state = r.state
+      return
+    }
+    g.idle = 0
+    if (command) {
+      const left = clamp((g.guide0 - g.ticks * STEER_TICK) / Math.max(1e-6, g.guide0), 0, 1)
+      for (const d of command.dirs.slice(0, 1)) this.steerNews.push({ dir: d, left })
+    }
+    const base = before.guided?.t ?? 0
+    const flights = (r.flights ?? []).slice().sort((a, b) => (a.startT ?? 0) - (b.startT ?? 0))
+    const off = steerOffset(base, flights, r.events)
+    if (r.state.phase === 'guiding') {
+      for (const f of flights) appendPath(g.pts, f.path)
+      // la sim no mandó el tramo: el punto nuevo sale del estado
+      if (!flights.length && r.state.guided) appendPath(g.pts, [{ x: r.state.guided.x, y: r.state.guided.y }])
+      this.state = r.state
+      if (r.events.length) this.fx.push(...r.events)
+      for (const e of r.events) this.noteEvent(e, null, before, r.state)
+      return
+    }
+    // lo que todavía no se vio del camino, remuestreado cada PATH_DT desde el cabezal
+    const end = (g.pts.length - 1) * PATH_DT
+    const n = Math.max(0, Math.ceil((end - g.t) / PATH_DT - 1e-6))
+    const prefix: Vec2[] = []
+    for (let k = 0; k <= n; k++) prefix.push(samplePath(g.pts, Math.min(end, g.t + k * PATH_DT)))
+    const lead = n * PATH_DT
+    let merged = false
+    const out: Flight[] = flights.map((f) => {
+      const start = (f.startT ?? 0) - off + lead
+      if (!merged && Math.abs(start - lead) < 2 * PATH_DT) {
+        merged = true
+        const path = prefix.slice()
+        appendPath(path, f.path)
+        const shift = (prefix.length - 1) * PATH_DT
+        return { ...f, path, startT: 0, splashes: f.splashes?.map((sp) => ({ ...sp, t: sp.t + shift })) }
+      }
+      return { ...f, startT: Math.max(0, start) }
+    })
+    if (!merged && prefix.length > 1) {
+      // sin vuelo que empalme (la sim no lo mandó): el resto del camino como un vuelo sin impacto propio
+      const last = prefix[prefix.length - 1]
+      out.unshift({ path: prefix, impact: { kind: 'out', x: last.x, y: last.y }, startT: 0 })
+    }
+    const events = r.events.map((e) => {
+      const t = (e as { t?: unknown }).t
+      return typeof t === 'number' && Number.isFinite(t) ? ({ ...e, t: Math.max(0, t - off + lead) } as GameEvent) : e
+    })
+    this.guide = null
+    this.startPlayback(before, r.state, events, out, g.ownerId, { weapon: g.weapon, guided: true, zoom: g.zoom })
+  }
+
+  // Posición y velocidad del misil en el cabezal.
+  private guideNow(g: GuidePlay): { x: number; y: number; vx: number; vy: number } {
+    const at = samplePath(g.pts, g.t)
+    const end = (g.pts.length - 1) * PATH_DT
+    let vx = 0
+    let vy = 0
+    if (g.pts.length > 1) {
+      const t0 = Math.max(0, Math.min(g.t, end - PATH_DT))
+      const a = samplePath(g.pts, t0)
+      const b = samplePath(g.pts, t0 + PATH_DT)
+      vx = (b.x - a.x) / PATH_DT
+      vy = (b.y - a.y) / PATH_DT
+    } else if (this.state?.guided) {
+      vx = this.state.guided.vx
+      vy = this.state.guided.vy
+    }
+    return { x: at.x, y: at.y, vx, vy }
+  }
+
+  // Segundos de guiado que quedan en lo que se ve.
+  private guideLeft(g: GuidePlay): number {
+    return Math.max(0, g.guide0 - g.t)
   }
 
   pullFx(): GameEvent[] {
@@ -1429,6 +1815,17 @@ export class Session {
   private act(command: Command): boolean {
     if (this.mode === 'local' || !this.route) return this.dispatch(command)
     if (this.mode === 'client' && (!this.state || this.playback)) return false
+    if (this.mode === 'client' && command.type === 'steer') {
+      // v3: predicción del que dirige: la tanda se muestra ya (la sim es determinista) y, cuando vuelve en el
+      // log del anfitrión, drain la reconoce y no la aplica de nuevo
+      const s = this.state!
+      const r = s.phase === 'guiding' ? safeApply(s, command) : null
+      if (!r || (r.state === s && r.events.length === 0)) return false
+      if (this.route(command) === false) return false
+      this.predicted.push(steerKey(command))
+      this.takeSteer(s, r, command)
+      return true
+    }
     return this.route(command) !== false
   }
 
@@ -1442,6 +1839,17 @@ export class Session {
         continue
       }
       const s = this.state
+      if (c.type === 'steer' && this.predicted.length) {
+        // v3: tanda propia que ya se mostró por predicción
+        if (this.predicted[0] === steerKey(c)) {
+          this.predicted.shift()
+          continue
+        }
+        // el anfitrión metió otra cosa (ceros por turno vencido): la vista salta a la réplica lógica
+        console.warn('online: el teledirigido se desincronizó de la predicción')
+        if (this.logic) this.loadSnapshot(this.logic)
+        return
+      }
       const ok = this.dispatch(c, item.result ?? undefined)
       if (c.type === 'move' && ok) this.movedT = 0.12
       if (c.type === 'aim' && this.aim?.playerId === c.playerId) {
@@ -1454,6 +1862,7 @@ export class Session {
 
   // Devuelve false si la sim rechazó o no implementa el comando. pre: resultado ya calculado (client).
   private dispatch(command: Command, pre?: StepResult): boolean {
+    if (command.type === 'steer') return this.applySteer(command, pre)
     const s = this.state
     if (!s || this.playback) return false
     let result
@@ -1467,6 +1876,7 @@ export class Session {
     if (command.type === 'fire') {
       this.aim = null
       this.ai = null
+      this.itemAim = null
       this.startPlayback(s, result.state, result.events, result.flights ?? [], command.playerId)
       return true
     }
@@ -1478,6 +1888,14 @@ export class Session {
       this.ai = null
       this.moveAcc = 0
       this.edge = null
+      this.startPlayback(s, result.state, result.events, [], command.playerId)
+      return true
+    }
+    // v3: jetpack y teletransporte se reproducen (el salto, el destello, la caída si no hay piso) antes de seguir
+    if (command.type === 'useItem' && result.events.some((e) => e.type === 'jetpack' || e.type === 'teleport' || e.type === 'fall' || e.type === 'slide')) {
+      this.moveAcc = 0
+      this.edge = null
+      this.itemAim = null
       this.startPlayback(s, result.state, result.events, [], command.playerId)
       return true
     }
@@ -1506,6 +1924,7 @@ export class Session {
     this.phaseT = 0
     this.slow = 0
     this.tracerCache = null
+    this.resetGuide()
     this.sentReady.clear()
     this.sentNext = false
     this.resetLava()
@@ -1523,7 +1942,16 @@ export class Session {
     this.cam.reset(s.terrain.w, s.terrain.h, p ? { x: p.x, y: p.y } : null)
   }
 
-  private startPlayback(before: GameState, after: GameState, events: GameEvent[], flights: Flight[], shooterId: number): void {
+  // opts (v3 teledirigido): weapon, el arma del tiro (el final del guiado no la saca de before); guided, es el
+  // final de un guiado (no vuelve a sonar el disparo); zoom, el de la cámara (sigue el del guiado).
+  private startPlayback(
+    before: GameState,
+    after: GameState,
+    events: GameEvent[],
+    flights: Flight[],
+    shooterId: number,
+    opts?: { weapon?: WeaponId; guided?: boolean; zoom?: number },
+  ): void {
     if (events.some((e) => e.type === 'empty')) this.flash('Sin municion')
     // v2.3: un tiro o una caída apagan el globo "!" del borde
     this.alertT.clear()
@@ -1548,6 +1976,8 @@ export class Session {
         if (event.blast === 'nuke' || event.blast === 'bigfire') bigBlast = true
       }
       if (LATE.has(event.type)) return { t: Infinity, event }
+      // v3: el guiado empieza cuando termina el ascenso (el evento guide no trae t)
+      if (event.type === 'guide') return { t: flightsEnd, event }
       const own = ownT(event)
       if (event.type === 'lava' || (event.type === 'damage' && event.cause === 'lava')) lavaPhase = true
       if (own == null && (lavaPhase || event.type === 'calm') && event.type !== 'impact') {
@@ -1594,7 +2024,11 @@ export class Session {
     const flowsEnd = flows.reduce((m, f) => Math.max(m, f.end + FLOW_TAIL), 0)
     // con deslizamientos, el turno siguiente espera a que el tanque se asiente
     const slidesEnd = slides.reduce((m, sl) => Math.max(m, sl.end + SLIDE_TAIL), 0)
-    const weapon = before.players.find((p) => p.id === shooterId)?.weapon ?? 'normal'
+    const weapon = opts?.weapon ?? before.players.find((p) => p.id === shooterId)?.weapon ?? 'normal'
+    // v3: ascenso de un teledirigido: el playback termina justo en el apogeo (sin asentarse) y sigue el guiado
+    const guideFrom = after.phase === 'guiding' && after.guided ? after : null
+    // v3: el teletransporte espera un momento con la cámara en el destino
+    const tpEnd = events.some((e) => e.type === 'teleport') ? TELEPORT_HOLD : 0
     const { terrain, target, reveal, pending } = splitTerrain(before.terrain, after.terrain, timeline, flows)
     // la ronda termina con este tiro: la última muerte va en cámara lenta
     let finisher: GameEvent | null = null
@@ -1604,7 +2038,7 @@ export class Session {
     const finisherDrop = finisher?.type === 'death' ? drops.find((d) => d.playerId === finisher.playerId) ?? null : null
     this.playback = {
       t: 0,
-      end: Math.max(Math.max(flightsEnd, eventsEnd) + settle, lavaEnd, dropsEnd, flowsEnd, slidesEnd),
+      end: guideFrom ? flightsEnd : Math.max(Math.max(flightsEnd, eventsEnd) + settle, lavaEnd, dropsEnd, flowsEnd, slidesEnd, tpEnd),
       before,
       after,
       flights: timed,
@@ -1623,11 +2057,13 @@ export class Session {
       finisherDrop,
       slowDone: false,
       flightsEnd,
-      zoom: shotZoom(
-        flights.map((f) => f.path),
-        before.terrain.h,
-        this.cam.bar,
-      ),
+      zoom:
+        opts?.zoom ??
+        shotZoom(
+          flights.map((f) => f.path),
+          before.terrain.h,
+          this.cam.bar,
+        ),
       settle: null,
       lava: before.lava ?? null,
       calmLeft: Math.max(0, SUDDEN_DEATH_CALM - (before.calm ?? 0)),
@@ -1635,9 +2071,13 @@ export class Session {
       flows,
       splashNext: flights.map(() => 0),
       slides,
+      guideFrom,
+      guideQueue: [],
+      hazards: (before.hazards ?? []).map((h) => ({ ...h })),
+      focus: null,
     }
     if (hasShot) {
-      this.shots.push({ playerId: shooterId, weapon })
+      if (!opts?.guided) this.shots.push({ playerId: shooterId, weapon })
       this.lastShooter = shooterId
     }
     this.advance(0)
@@ -1669,12 +2109,22 @@ export class Session {
     }
     // lo que no llegó a mostrarse (cráteres o parches de flujo) aparece con la grilla final
     if (pb.pending > 0 || pb.flows.some((f) => f.next < f.event.patches.length)) this.terrainVersion++
-    this.state = pb.after
+    // v3: fin del ascenso de un teledirigido: el estado es el del apogeo y empieza el guiado
+    this.state = pb.guideFrom ?? pb.after
     this.playback = null
     this.phaseT = 0
     // v2.4: los "!" pedidos durante el tiro se prenden ahora, que se ven
     for (const id of this.alertSoon) this.alert(id)
     this.alertSoon.clear()
+    if (pb.guideFrom) {
+      this.beginGuide(pb.guideFrom, pb.weapon, pb.zoom)
+      // tandas que el anfitrión aceptó durante el ascenso (la última puede cerrar el guiado con un playback)
+      for (const q of pb.guideQueue) {
+        if (this.playback) break
+        this.takeSteer(q.before, q.result)
+      }
+      return
+    }
     // al terminar el tiro, la cámara va al tanque del turno siguiente
     this.cam.mode = 'tank'
   }
@@ -2027,6 +2477,8 @@ export class Session {
         hold: scripted ? 0.1 : 0.3,
         move: 0,
         moveAcc: 0,
+        items: [],
+        weapon: null,
       }
       const client = this.aiClient
       if (scripted || this.demo?.freeze || this.syncAi || !client || !client.available) {
@@ -2059,6 +2511,19 @@ export class Session {
       }
       return
     }
+    // v3: ítems del plan, uno por frame (jetpack y teletransporte arman un playback y esto sigue después)
+    if (ai.items.length) {
+      const it = ai.items.shift()!
+      const ok = it.target ? this.act({ type: 'useItem', playerId: actor.id, item: it.item, target: it.target }) : this.act({ type: 'useItem', playerId: actor.id, item: it.item })
+      if (!ok) console.warn('IA: la sim no aceptó el ítem', it.item)
+      return
+    }
+    if (ai.weapon) {
+      const w = ai.weapon
+      ai.weapon = null
+      const now = this.state?.players.find((p) => p.id === actor.id)
+      if (now && now.weapon !== w) this.act({ type: 'selectWeapon', playerId: actor.id, weapon: w })
+    }
     if (ai.move !== 0) {
       ai.moveAcc += MOVE_SPEED * dt
       let steps = Math.min(3, Math.floor(ai.moveAcc))
@@ -2088,6 +2553,9 @@ export class Session {
         aim.power = ai.plan.power
       }
       if (this.demo && !this.demo.shotDone && actor.id === s.players[0]?.id) this.demo.shotDone = true
+      // v3: correcciones del teledirigido que la sesión reproduce durante el guiado
+      const dirs = planSteer(ai.plan)
+      this.aiSteer = dirs ? { playerId: actor.id, dirs } : null
       this.commitAimAndFire(actor.id, true)
     }
   }
@@ -2107,7 +2575,13 @@ export class Session {
     ai.t = 0
     ai.move = Math.round(plan.move ?? 0)
     ai.moveAcc = 0
-    if (plan.weapon !== actor.weapon) this.act({ type: 'selectWeapon', playerId: actor.id, weapon: plan.weapon })
+    // v3: primero los ítems del plan (ShotPlan.items), después el arma; los aplica driveAi de a uno
+    ai.items = planItems(plan)
+    ai.weapon = plan.weapon
+    if (!ai.items.length && plan.weapon !== actor.weapon) {
+      ai.weapon = null
+      this.act({ type: 'selectWeapon', playerId: actor.id, weapon: plan.weapon })
+    }
   }
 
   private plan(s: GameState, actor: Player): ShotPlan {
@@ -2124,7 +2598,8 @@ export class Session {
   }
 }
 
-const USABLE: ItemId[] = ['shield', 'repair', 'fuel', 'tracer']
+// v3: el botón B del gamepad (y ÍTEM táctil) prueba en este orden; jetpack y teletransporte piden destino
+const USABLE: ItemId[] = ['shield', 'repair', 'fuel', 'tracer', 'deflector', 'anchor', 'jetpack', 'teleport']
 const ITEM_NAMES: Record<ItemId, string> = {
   shield: 'escudo',
   parachute: 'paracaidas',
@@ -2444,6 +2919,74 @@ function samplePath(path: Vec2[], t: number): Vec2 {
     x: path[i].x + (path[i + 1].x - path[i].x) * f,
     y: path[i].y + (path[i + 1].y - path[i].y) * f,
   }
+}
+
+function steerKey(c: Extract<Command, { type: 'steer' }>): string {
+  return `${c.playerId}:${c.dirs.join(',')}`
+}
+
+// applyCommand sin excepciones (null si la sim tiró).
+function safeApply(state: GameState, command: Command): StepResult | null {
+  try {
+    return applyCommand(state, command)
+  } catch (err) {
+    console.error(err)
+    return null
+  }
+}
+
+// v3: los tiempos (startT de los vuelos, t de los eventos) de una tanda de 'steer' pueden venir contados
+// desde el disparo (absolutos) o desde el comienzo de la tanda. base: GuidedState.t antes de la tanda.
+// Devuelve cuánto restar para pasarlos a "desde el comienzo de la tanda": absolutos si el primer vuelo
+// arranca en base o después; si no traen startT, se decide con el impacto (si su t queda más cerca del final
+// del vuelo contado desde la tanda o desde el disparo).
+function steerOffset(base: number, flights: Flight[], events: GameEvent[]): number {
+  if (!(base > 1e-6)) return 0
+  if (flights.some((f) => f.startT != null)) {
+    const first = Math.min(...flights.map((f) => f.startT ?? 0))
+    if (first >= base - 1e-3) return base
+    if (first > 1e-6) return 0
+  }
+  const relEnd = flights.reduce((m, f) => Math.max(m, (f.startT ?? 0) + Math.max(0, f.path.length - 1) * PATH_DT), 0)
+  const imp = events.find((e): e is Extract<GameEvent, { type: 'impact' }> => e.type === 'impact')
+  if (imp && Number.isFinite(imp.t)) return Math.abs(imp.t - relEnd) <= Math.abs(imp.t - (base + relEnd)) ? 0 : base
+  return 0
+}
+
+// Suma un tramo al camino, sin repetir el primer punto si es el último que ya estaba.
+function appendPath(pts: Vec2[], path: Vec2[]): void {
+  let i = 0
+  const last = pts[pts.length - 1]
+  if (last && path.length && Math.abs(path[0].x - last.x) + Math.abs(path[0].y - last.y) < 0.5) i = 1
+  for (; i < path.length; i++) pts.push({ x: path[i].x, y: path[i].y })
+}
+
+// v3: correcciones del plan de la IA para el teledirigido (ShotPlan.steer, interno de sim). Acepta una lista
+// de -1/0/1 por tick o una lista de tandas (se aplana).
+function planSteer(plan: ShotPlan): (-1 | 0 | 1)[] | null {
+  const raw = (plan as { steer?: unknown }).steer
+  if (!Array.isArray(raw)) return null
+  return (raw.flat(2) as unknown[]).map((v) => (typeof v === 'number' && v > 0 ? 1 : typeof v === 'number' && v < 0 ? -1 : 0))
+}
+
+// v3: ítems del plan de la IA: ids sueltos o { item | id, target } (jetpack y teletransporte con destino).
+function planItems(plan: ShotPlan): { item: ItemId; target?: Vec2 }[] {
+  const raw = (plan as { items?: unknown }).items
+  if (!Array.isArray(raw)) return []
+  const out: { item: ItemId; target?: Vec2 }[] = []
+  for (const it of raw) {
+    if (typeof it === 'string' && (ITEM_ORDER as string[]).includes(it)) out.push({ item: it as ItemId })
+    else if (it && typeof it === 'object') {
+      const o = it as { item?: unknown; id?: unknown; target?: unknown }
+      const id = (o.item ?? o.id) as string
+      const tg = o.target as Vec2 | undefined
+      if ((ITEM_ORDER as string[]).includes(id)) out.push({ item: id as ItemId, target: tg && Number.isFinite(tg.x) && Number.isFinite(tg.y) ? { x: tg.x, y: tg.y } : undefined })
+    }
+  }
+  // v3: el destino de jetpack y teletransporte puede venir aparte (ShotPlan.itemTarget)
+  const extra = (plan as { itemTarget?: unknown }).itemTarget as Vec2 | undefined
+  if (extra && Number.isFinite(extra.x)) for (const o of out) if ((o.item === 'jetpack' || o.item === 'teleport') && !o.target) o.target = { x: extra.x, y: extra.y }
+  return out
 }
 
 // t propio de un evento (los que lo traen opcional); el de impact se maneja aparte.
