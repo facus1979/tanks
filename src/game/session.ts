@@ -112,9 +112,10 @@ interface SlidePlay {
 }
 
 // v4 líquidos: un evento flow en reproducción. Cada parche se copia a la grilla que se ve en
-// start + i * dt; el último deja la grilla final.
+// start + i * dt; el último deja la grilla final. v2.4: también los derrumbes (evento collapse), que tienen
+// el mismo formato y se aplican igual.
 interface FlowPlay {
-  event: Extract<GameEvent, { type: 'flow' }>
+  event: Extract<GameEvent, { type: 'flow' | 'collapse' }>
   start: number // t del primer parche (el del evento, corrido después de los impactos si hacía falta)
   dt: number
   end: number // t del último parche
@@ -128,6 +129,7 @@ export interface FlowInfo {
   dur: number // segundos que dura (del primer al último parche)
   water: number // celdas que cambiaron con agua (llenándose o vaciándose)
   lava: number // celdas que cambiaron con lava
+  solid: number // v2.4: celdas que cambiaron sin líquido de por medio (solo se cuentan en un derrumbe)
   x0: number
   y0: number
   x1: number
@@ -167,6 +169,8 @@ const SLOW_SCALE = 0.3
 const SLOW_TIME = 1.2
 // v2.3: cuánto dura el globo "!" después del último intento contra el tope del borde del abismo.
 const ALERT_TIME = 1.2
+// v2.4: diferencia de viento entre una vuelta y la siguiente que merece el "!" sobre el tanque del turno
+const WIND_ALERT = 6
 const LATE = new Set<GameEvent['type']>(['turn', 'wind', 'gameover', 'roundover', 'round', 'shop'])
 // Anticipación de la cámara sobre el proyectil (segundos de vuelo hacia adelante).
 const LOOKAHEAD = 0.35
@@ -210,6 +214,10 @@ const FLOW_GAP = 0.25
 const FLOW_BIG = 300
 const FLOW_NEAR = 260
 const FLOW_HOLD = 0.35
+// v2.4 derrumbe: la cámara lo mira (como al flujo) si cayeron COLLAPSE_BIG celdas o más y está a la vista
+// o cerca. El daño del aplastado llega COLLAPSE_GAP después de que se asienta.
+const COLLAPSE_BIG = 150
+const COLLAPSE_GAP = 0.1
 // Después del flujo: consecuencias del cambio de turno que no pueden adelantarse a la animación.
 const AFTER_FLOW = new Set<GameEvent['type']>(['damage', 'shield', 'death'])
 // Pulido v2, deslizamiento. Gravedad y topes de la caída que sigue a un deslizamiento (la del abismo usa
@@ -300,6 +308,13 @@ export class Session {
   // v2.3: globo "!" (RenderFrame.alerts): segundos que le quedan a cada jugador. Hoy lo prende solo el
   // tope del borde del abismo, mientras el humano está frenado ahí (y ALERT_TIME después del último intento).
   private alertT = new Map<number, number>()
+  // v2.4: "!" pedidos durante un tiro (se ven recién al terminar, que es cuando hay globos) y jugadores con
+  // un "!" nuevo que main.ts todavía no levantó (pitido de atención)
+  private alertSoon = new Set<number>()
+  private alertNews: number[] = []
+  private turnAlertKey = '' // turno ya revisado para el "!" de arrancar metido en lava
+  // v2.4: salpicaduras para RenderFrame.splashes (aparte de las del audio): las nuevas desde el último frame
+  private frameSplashes: Vec2[] = []
   // v4 líquidos: salpicaduras de proyectiles que entraron al agua desde la última llamada a
   // pullSplashes, impactos con el centro bajo el agua y lo que movió cada flujo (para el audio)
   private splashes: Vec2[] = []
@@ -372,6 +387,13 @@ export class Session {
   // Factor de tiempo del último update (cámara lenta en el golpe que cierra la ronda).
   get timeScale(): number {
     return this.scale
+  }
+
+  // v2.4: escala de tiempo de lo que viene (la del próximo update): para el audio, que la necesita ya en
+  // el frame en que arranca la cámara lenta (el golpe final o la caída al abismo suenan estirados desde el
+  // principio) y en el que termina.
+  get soundScale(): number {
+    return this.slow > 0 ? this.slowScale : 1
   }
 
   get inputEnabled(): boolean {
@@ -551,14 +573,46 @@ export class Session {
       const s = this.state
       const p = s?.players[s.current]
       if (!s || !p || this.playback) break
-      if (this.mode === 'client' && (p.fuel ?? 0) <= 0) break
+      // v2.4: sin combustible: "!" sobre el tanque mientras insiste
+      if ((p.fuel ?? 0) <= 0) {
+        this.noFuel(p)
+        break
+      }
       if (this.edgeStop(s, p, dir)) {
         this.moveAcc = 0
         break
       }
       if (!this.act({ type: 'move', playerId: p.id, dir })) break
       this.movedT = 0.12
+      // v2.4: ese paso gastó lo último que quedaba
+      const after = this.state?.players.find((q) => q.id === p.id)
+      if (after && after.alive && (after.fuel ?? 0) <= 0 && !this.playback) this.noFuel(after)
     }
+  }
+
+  // v2.4: el humano se quedó sin combustible al moverse: "!" y el cartel de siempre en el HUD.
+  private noFuel(p: Player): void {
+    this.alert(p.id)
+    this.flash('Sin combustible')
+  }
+
+  // v2.4: globo "!" sobre un jugador por ALERT_TIME. Con un tiro en reproducción no hay globos, así que
+  // queda pedido y se prende al terminar el tiro (si no, se gastaría el tiempo sin verse).
+  private alert(id: number | undefined): void {
+    if (id == null || this.demo?.freeze) return
+    if (this.playback) {
+      this.alertSoon.add(id)
+      return
+    }
+    if (!this.alertT.has(id)) this.alertNews.push(id)
+    this.alertT.set(id, ALERT_TIME)
+  }
+
+  // Jugadores con un "!" nuevo desde la última llamada (para el pitido).
+  pullAlerts(): number[] {
+    const out = this.alertNews
+    this.alertNews = []
+    return out
   }
 
   // Soltó la dirección (o no aprieta ninguna): el tope del borde queda armado y el próximo intento
@@ -810,7 +864,22 @@ export class Session {
       }
     }
     this.step(dt)
-    if (!this.frozen) this.updateCamera(dt)
+    if (!this.frozen) {
+      this.updateCamera(dt)
+      this.lavaTurnAlert()
+    }
+  }
+
+  // v2.4: un tanque que arranca su turno metido en lava (de la grilla, o debajo de la superficie de la
+  // lava de la muerte súbita) muestra el "!". Se revisa una vez por turno, cuando ya no hay tiro.
+  private lavaTurnAlert(): void {
+    const s = this.state
+    if (!s || this.playback || s.phase !== 'aiming') return
+    const key = `${this.matchId}:${s.turn}:${s.current}`
+    if (key === this.turnAlertKey) return
+    this.turnAlertKey = key
+    const p = s.players[s.current]
+    if (p && p.alive && inLava(s, p)) this.alert(p.id)
   }
 
   private step(dt: number): void {
@@ -872,7 +941,7 @@ export class Session {
     return this.submerged.has(event)
   }
 
-  // v4: qué movió un evento flow ya entregado (celdas de agua y de lava, duración, zona), o null.
+  // v4: qué movió un evento flow (v2.4: o collapse) ya entregado (celdas, duración, zona), o null.
   flowInfo(event: GameEvent): FlowInfo | null {
     return this.flowInfos.get(event) ?? null
   }
@@ -913,6 +982,7 @@ export class Session {
         aimPreview: null,
         camera: this.cam.camera,
         lava: this.lavaView(),
+        splashes: this.takeFrameSplashes(),
       }
     }
     const aim = this.aimGuide(s)
@@ -934,7 +1004,23 @@ export class Session {
       camera: this.cam.camera,
       lava: this.lavaView(),
       alerts: this.alerts(s),
+      splashes: this.takeFrameSplashes(),
     }
+  }
+
+  // v2.4: salpicaduras nuevas desde el frame anterior (cada una llega una sola vez, en el frame en que el
+  // playback pasó su momento); undefined si no hay.
+  private takeFrameSplashes(): Vec2[] | undefined {
+    if (!this.frameSplashes.length) return undefined
+    const out = this.frameSplashes
+    this.frameSplashes = []
+    return out
+  }
+
+  // v2.4: main.ts avanzó sin dibujar (avance rápido, pestaña en segundo plano): lo que era para ese frame
+  // ya pasó y no se muestra después, todo junto y fuera de tiempo.
+  skipFrame(): void {
+    this.frameSplashes = []
   }
 
   // v2.3: ids con globo "!" ahora (solo entre tiros: con un tiro en reproducción no hay ninguno). Un
@@ -968,7 +1054,13 @@ export class Session {
   }
 
   // Eventos de la muerte súbita, en su momento (playback) o al aplicarse (fuera de un tiro).
-  private noteEvent(event: GameEvent, pb: Playback | null): void {
+  // v2.4: before / after: estados de antes y después del comando (para los "!" del viento, la muerte súbita
+  // y la falta de munición).
+  private noteEvent(event: GameEvent, pb: Playback | null, before: GameState | null, after: GameState | null): void {
+    const turnId = after ? after.players[after.current]?.id : undefined
+    if (event.type === 'empty') this.alert(event.playerId)
+    // viento que cambia mucho de una vuelta a la otra: "!" sobre el tanque del turno
+    if (event.type === 'wind' && before && Math.abs(event.value - before.wind) >= WIND_ALERT) this.alert(turnId)
     if (event.type === 'lava') {
       const shown = this.lavaView()
       const h = (pb ? pb.terrain : this.state?.terrain)?.h ?? 450
@@ -979,17 +1071,19 @@ export class Session {
         pb.lava = event.to
         pb.calmLeft = Math.max(0, event.warn)
       }
-      if (event.from == null) this.announceSuddenDeath()
+      if (event.from == null) this.announceSuddenDeath(turnId)
     } else if (event.type === 'calm') {
       if (pb) pb.calmLeft = Math.max(0, event.left)
-      if (event.left <= 0) this.announceSuddenDeath()
+      if (event.left <= 0) this.announceSuddenDeath(turnId)
     }
   }
 
-  private announceSuddenDeath(): void {
+  private announceSuddenDeath(turnId: number | undefined): void {
     if (this.suddenDeathSaid || this.demo?.freeze) return
     this.suddenDeathSaid = true
     this.suddenDeathNews = true
+    // v2.4: "!" sobre el tanque del turno (el que va a tener que escapar de la lava primero)
+    this.alert(turnId)
   }
 
   // HudExtras.suddenDeath: tiros sin daño que faltan y si la lava ya sube.
@@ -1384,11 +1478,11 @@ export class Session {
     const changed = result.state !== s
     this.state = result.state
     if (result.events.length) this.fx.push(...result.events)
-    for (const e of result.events) this.noteEvent(e, null)
+    for (const e of result.events) this.noteEvent(e, null, s, result.state)
     if (result.events.some((e) => e.type === 'empty')) this.flash('Sin municion')
     if (command.type === 'move' && changed && result.state.terrain !== s.terrain) this.terrainVersion++
-    // v4: un flujo fuera de un tiro (no debería pasar) muestra directamente la grilla final
-    else if (result.events.some((e) => e.type === 'flow')) this.terrainVersion++
+    // v4: un flujo (o un derrumbe, v2.4) fuera de un tiro (no debería pasar) muestra directamente la grilla final
+    else if (result.events.some((e) => e.type === 'flow' || e.type === 'collapse')) this.terrainVersion++
     if (result.events.some((e) => e.type === 'round') || (s.phase !== 'aiming' && result.state.phase === 'aiming')) this.newRound()
     return changed
   }
@@ -1572,6 +1666,9 @@ export class Session {
     this.state = pb.after
     this.playback = null
     this.phaseT = 0
+    // v2.4: los "!" pedidos durante el tiro se prenden ahora, que se ven
+    for (const id of this.alertSoon) this.alert(id)
+    this.alertSoon.clear()
     // al terminar el tiro, la cámara va al tanque del turno siguiente
     this.cam.mode = 'tank'
   }
@@ -1596,13 +1693,17 @@ export class Session {
   }
 
   private deliver(pb: Playback, event: GameEvent): void {
-    // v4: explosión con el centro bajo el agua (se mira antes de mostrar su cráter)
-    if (event.type === 'impact' && underwater(pb.terrain, event.x, event.y)) this.submerged.add(event)
-    if (event.type === 'flow') this.startFlow(pb, event)
+    // v4: explosión con el centro bajo el agua. v2.4: lo dice la sim (Impact.water del vuelo de ese
+    // impacto); si no viene (barriles, sim sin el dato), la heurística de mirar la grilla antes del cráter.
+    if (event.type === 'impact') {
+      const water = impactWater(pb, event)
+      if (water ?? underwater(pb.terrain, event.x, event.y)) this.submerged.add(event)
+    }
+    if (event.type === 'flow' || event.type === 'collapse') this.startFlow(pb, event)
     // v2.2: el viento cambia por vuelta; se avisa unos segundos al cambiar
     if (event.type === 'wind') this.windNotice = WIND_NOTICE
     this.fx.push(event)
-    this.noteEvent(event, pb)
+    this.noteEvent(event, pb, pb.before, pb.after)
     if (event === pb.finisher && !pb.finisherDrop) this.startSlow(SLOW_TIME, SLOW_SCALE)
     const pixels = pb.reveal.get(event)
     if (pixels && pixels.length) {
@@ -1675,15 +1776,17 @@ export class Session {
   // ---------- líquidos (v4) ----------
 
   // Empieza un flujo: mide qué mueve (con la grilla que se ve ahora) y decide si la cámara lo mira.
-  private startFlow(pb: Playback, event: Extract<GameEvent, { type: 'flow' }>): void {
+  // v2.4: un derrumbe (collapse) igual: mide todo lo que cambia y es grande desde COLLAPSE_BIG celdas.
+  private startFlow(pb: Playback, event: Extract<GameEvent, { type: 'flow' | 'collapse' }>): void {
     const f = pb.flows.find((q) => q.event === event)
     if (!f || f.info) return
-    const info = measureFlow(pb.terrain, event.patches, f.end - f.start)
+    const collapse = event.type === 'collapse'
+    const info = measureFlow(pb.terrain, event.patches, f.end - f.start, collapse)
     f.info = info
     this.flowInfos.set(event, info)
     // grande y a la vista o cerca: la cámara se queda mirándolo; lejos o chico, no hace falta ir
     const v = this.cam.view()
-    const big = info.water + info.lava >= FLOW_BIG
+    const big = collapse ? Math.max(event.cells, info.solid) >= COLLAPSE_BIG : info.water + info.lava >= FLOW_BIG
     const near = info.x1 >= v.x - FLOW_NEAR && info.x0 <= v.x + v.w + FLOW_NEAR
     f.follow = !this.cam.fixed && big && near
   }
@@ -1711,6 +1814,7 @@ export class Session {
       while (pb.splashNext[k] < list.length && f.start + list[pb.splashNext[k]].t <= pb.t) {
         const sp = list[pb.splashNext[k]++]
         this.splashes.push({ x: sp.x, y: sp.y })
+        this.frameSplashes.push({ x: sp.x, y: sp.y })
       }
     })
   }
@@ -1869,6 +1973,9 @@ export class Session {
     this.lost.clear()
     this.edge = null
     this.alertT.clear()
+    this.alertSoon.clear()
+    this.alertNews = []
+    this.turnAlertKey = ''
     this.edgeNews = false
   }
 
@@ -2076,22 +2183,35 @@ function planSlides(timeline: TimedEvent[], h: number, slides: SlidePlay[]): voi
 // cráter ya abierto), y dura (parches − 1) · dt. Lo que viene después del flujo en la lista y pertenece
 // al cambio de turno (daño de lava de inicio de turno, escudo, muerte) se corre a FLOW_GAP después de
 // que termina si la sim no le puso un t mayor; el vapor sin t propio va con el arranque del flujo.
+// v2.4: los derrumbes (collapse) se arman igual. Lo que viene después en la lista (otro derrumbe o el flujo
+// de líquidos) arranca cuando el derrumbe terminó (corre sobre la tierra ya asentada), y el daño del
+// aplastado (cause 'collapse'), aunque la sim lo ponga antes, llega COLLAPSE_GAP después de que se asentó.
 function planFlows(timeline: TimedEvent[]): FlowPlay[] {
   const flows: FlowPlay[] = []
   let lastSrc = 0
+  let collapseEnd = -Infinity
   for (let i = 0; i < timeline.length; i++) {
     const { event, t } = timeline[i]
     if ((event.type === 'impact' || event.type === 'burn') && Number.isFinite(t)) lastSrc = Math.max(lastSrc, t)
-    if (event.type !== 'flow' || event.patches.length === 0) continue
+    if ((event.type !== 'flow' && event.type !== 'collapse') || event.patches.length === 0) continue
     const dt = Number.isFinite(event.dt) ? Math.max(0, event.dt) : 0
     const start = Math.max(Number.isFinite(event.t) ? event.t : 0, lastSrc)
     const end = start + (event.patches.length - 1) * dt
     timeline[i].t = start
     flows.push({ event, start, dt, end, next: 0, info: null, follow: null })
+    if (event.type === 'collapse') {
+      lastSrc = Math.max(lastSrc, end)
+      collapseEnd = Math.max(collapseEnd, end)
+    }
     for (let j = i + 1; j < timeline.length; j++) {
       const e = timeline[j]
       if (e.event.type === 'steam' && ownT(e.event) == null && Number.isFinite(e.t)) e.t = Math.max(e.t, start)
       else if (AFTER_FLOW.has(e.event.type) && Number.isFinite(e.t) && e.t < end + FLOW_GAP) e.t = end + FLOW_GAP
+    }
+  }
+  if (Number.isFinite(collapseEnd)) {
+    for (const e of timeline) {
+      if (e.event.type === 'damage' && e.event.cause === 'collapse' && Number.isFinite(e.t)) e.t = Math.max(e.t, collapseEnd + COLLAPSE_GAP)
     }
   }
   return flows
@@ -2118,11 +2238,12 @@ function applyPatch(terrain: Terrain, p: TerrainPatch): void {
 }
 
 // Qué mueve un flujo partiendo de la grilla que se ve: aplica los parches sobre una copia de front y
-// cuenta las celdas que cambian con agua o con lava, con la caja que las encierra.
-function measureFlow(grid: Terrain, patches: TerrainPatch[], dur: number): FlowInfo {
+// cuenta las celdas que cambian con agua o con lava, con la caja que las encierra. v2.4: con all (derrumbe)
+// también cuenta y encierra las que cambian sin líquido (solid).
+function measureFlow(grid: Terrain, patches: TerrainPatch[], dur: number, all = false): FlowInfo {
   const { w, h } = grid
   const scratch = grid.front.slice()
-  const info: FlowInfo = { dur, water: 0, lava: 0, x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }
+  const info: FlowInfo = { dur, water: 0, lava: 0, solid: 0, x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }
   for (const p of patches) {
     for (let r = 0; r < p.h; r++) {
       const y = p.y + r
@@ -2137,6 +2258,7 @@ function measureFlow(grid: Terrain, patches: TerrainPatch[], dur: number): FlowI
         scratch[gi] = v
         if (v === LAVA || old === LAVA) info.lava++
         else if (v === WATER || old === WATER) info.water++
+        else if (all) info.solid++
         else continue
         if (x < info.x0) info.x0 = x
         if (x > info.x1) info.x1 = x
@@ -2156,7 +2278,24 @@ function measureFlow(grid: Terrain, patches: TerrainPatch[], dur: number): FlowI
   return info
 }
 
-// El centro de la explosión está bajo el agua (la celda del impacto o la de arriba).
+// v2.4: Impact.water del vuelo que terminó en este impacto (mismo punto, a menos de 1 px), o undefined si
+// ningún vuelo coincide o la sim no lo informa.
+function impactWater(pb: Playback, event: Extract<GameEvent, { type: 'impact' }>): boolean | undefined {
+  if (event.source === 'barrel') return undefined
+  let best: Flight['impact'] | null = null
+  let bestD = 1
+  for (const f of pb.flights) {
+    const im = f.flight.impact
+    const d = Math.abs(im.x - event.x) + Math.abs(im.y - event.y)
+    if (d <= bestD) {
+      bestD = d
+      best = im
+    }
+  }
+  return best?.water
+}
+
+// Respaldo (v4): el centro de la explosión está bajo el agua (la celda del impacto o la de arriba).
 function underwater(t: Terrain, x: number, y: number): boolean {
   const cx = Math.round(x)
   const cy = Math.round(y)
@@ -2307,6 +2446,21 @@ function quantize(v: number): number {
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v))
+}
+
+// v2.4: el tanque está metido en lava: alguna celda de lava de la grilla en su caja, o el piso debajo de
+// la superficie de la lava de la muerte súbita.
+function inLava(s: GameState, p: Player): boolean {
+  if (s.lava != null && p.y > s.lava) return true
+  const t = s.terrain
+  const x0 = Math.max(0, Math.round(p.x - TANK_W / 2))
+  const x1 = Math.min(t.w - 1, Math.round(p.x + TANK_W / 2))
+  const y0 = Math.max(0, Math.round(p.y - TANK_H))
+  const y1 = Math.min(t.h - 1, Math.round(p.y))
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) if (t.front[y * t.w + x] === LAVA) return true
+  }
+  return false
 }
 
 // v3: los eventos traen una caída al abismo (fall por debajo del mapa o muerte con cause 'abyss').

@@ -610,6 +610,8 @@ function step1(dt: number, live: boolean, draw = true): void {
     return
   }
   session.update(dt)
+  // v2.4: los sonidos se estiran (y bajan de tono) con la cámara lenta, también los que ya suenan
+  sfx.setTimeScale(session.soundScale)
   if (online) {
     online.update(dt)
     session.netHud = online.hudNet()
@@ -638,6 +640,8 @@ function step1(dt: number, live: boolean, draw = true): void {
   for (const _ of session.pullSplashes()) sfx.splash()
   // v3: el tanque frenó solo en el borde de un abismo
   if (session.pullEdgeWarning()) sfx.edgeWarn()
+  // v2.4: "!" nuevo sobre un tanque (sin munición, sin combustible, viento, muerte súbita, lava)
+  if (session.pullAlerts().length && live) sfx.alert()
   if (session.pullSuddenDeath() && live) {
     // empieza la muerte súbita: sirena corta y vibración en táctil
     sfx.suddenDeath()
@@ -646,6 +650,7 @@ function step1(dt: number, live: boolean, draw = true): void {
   sfx.engine(live && session.moving)
   if (!draw) {
     session.pullFx()
+    session.skipFrame()
     flow()
     return
   }
@@ -780,7 +785,14 @@ function playSounds(events: GameEvent[]): void {
         break
       case 'damage':
         if (e.cause === 'lava') sfx.lavaBurn()
+        else if (e.cause === 'collapse') sfx.crush() // v2.4: aplastado por un derrumbe
         break
+      case 'collapse': {
+        // v2.4: rumor de tierra y piedras mientras dura el derrumbe, más fuerte cuanto más cayó
+        const info = session.flowInfo(e)
+        if (e.cells > 0 || (info && info.solid > 0)) sfx.collapse(info?.dur ?? e.dt * Math.max(0, e.patches.length - 1), Math.max(e.cells, info?.solid ?? 0))
+        break
+      }
       case 'flow': {
         // v4: líquido corriendo mientras dura el flujo; grave y burbujeante si lo que más se movió es lava
         const info = session.flowInfo(e)
