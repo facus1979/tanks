@@ -393,10 +393,10 @@ export type GameEvent =
       // cuántos pixels de cada material se rompieron: el renderer tira escombros de esos colores
       debris: Partial<Record<Material, number>>
       source?: 'shot' | 'barrel' // 'barrel': explosión en cadena de un barril
-      water?: boolean // v2.4: el centro quedó sumergido (igual que Flight.impact.water)
+      water?: boolean // v2.4: el centro de la explosión quedó sumergido (radio × WATER_BLAST_SCALE)
     }
   // t opcional: momento de playback. Sin t, el evento va con el impacto anterior de la lista.
-  | { type: 'damage'; playerId: number; amount: number; hp: number; t?: number; cause?: 'lava' | 'collapse' } // collapse: v2.4, aplastado por un derrumbe // cause: v2, quemado por la lava
+  | { type: 'damage'; playerId: number; amount: number; hp: number; t?: number; cause?: 'lava' | 'collapse' } // cause: 'lava' (v2) quemado por la lava; 'collapse' (v2.4) aplastado por un derrumbe
   | { type: 'death'; playerId: number; t?: number; cause?: 'abyss' | 'lava' } // cause: v3/v2, sin explosión de restos si es 'abyss'
   | { type: 'fall'; playerId: number; from: number; to: number; parachute?: boolean; t?: number; water?: boolean } // water: v4, cayó al agua (sin daño)
   | { type: 'prop'; propId: number; kind: PropKind; x: number; y: number; destroyed: boolean; t?: number }

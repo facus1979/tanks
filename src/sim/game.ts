@@ -1,7 +1,7 @@
 import { PATH_DT } from './ballistics'
 import { generate } from './gen'
 import { flowLiquids } from './flow'
-import { engulfedInLava, hurt, inLava, kill, settleAfterFlow, settleTank, tankFloor } from './physics'
+import { COLLAPSE_DELAY, collapseAfterShot, engulfedInLava, hurt, inLava, kill, settleAfterFlow, settleTank, tankFloor } from './physics'
 import { SLIDE_MAX, slopeAt, stepTank } from './slide'
 import { resolveShot } from './weapons'
 import { Rng, hashSeed, irange } from './rng'
@@ -147,7 +147,9 @@ export const ORDER_SALT = 0x2545f491
 function setupRound(state: GameState): void {
   const rng = new Rng(roundSeed(state.seed, state.round))
   const biome = biomeFor(state.biomeMode, state.seed, state.round)
-  const gen = generate(biome, rng, state.players.length, state.width, state.height)
+  // v2.4: tantos lugares seguros como humanos (ver humanSafe en gen.ts)
+  const humans = state.players.filter((p) => p.kind === 'human').length
+  const gen = generate(biome, rng, state.players.length, state.width, state.height, humans)
   state.biome = biome
   state.terrain = gen.terrain
   state.props = gen.props
@@ -161,6 +163,24 @@ function setupRound(state: GameState): void {
     const tmp = seat[i]
     seat[i] = seat[j]
     seat[j] = tmp
+  }
+  // el que abre la ronda sale del mismo sorteo (antes de los cambios de lugar de abajo: no lo cambian)
+  const opener = draw.int(0, state.players.length - 1)
+  // v2.4: un humano al que le tocó un lugar al borde de un abismo (cornisa o a menos de HUMAN_PIT_GAP px)
+  // lo cambia con una IA de lugar seguro, elegida con el mismo sorteo. Si no le tocó (o en Chico, sin
+  // abismos), no se sortea nada más y todo queda como en v2.3. generate garantiza que hay lugares seguros
+  // para todos los humanos.
+  const safe = gen.safe
+  if (safe) {
+    state.players.forEach((p, i) => {
+      if (p.kind !== 'human' || safe[seat[i]]) return
+      const pool = state.players.filter((q, j) => q.kind !== 'human' && safe[seat[j]]).map((q) => state.players.indexOf(q))
+      if (pool.length === 0) return
+      const j = pool[draw.int(0, pool.length - 1)]
+      const tmp = seat[i]
+      seat[i] = seat[j]
+      seat[j] = tmp
+    })
   }
   state.players.forEach((p, i) => {
     const x = gen.spawns[seat[i]]
@@ -181,7 +201,7 @@ function setupRound(state: GameState): void {
   state.wind = wind.value
   state.rng = wind.state
   state.windLeft = state.players.length
-  state.current = draw.int(0, state.players.length - 1)
+  state.current = opener
   state.phase = 'aiming'
   state.roundWinnerId = null
   state.turn = 1
@@ -318,6 +338,8 @@ function fire(state: GameState, actor: Player): StepResult {
   const weapon = shooter.weapon
   const before = next.players.map((p) => ({ hp: p.hp + p.shield, alive: p.alive }))
   const { flights, events } = resolveShot(next, shooter, weapon)
+  // v2.4: los terrones sueltos caen (antes que los líquidos: lo que cae al agua la desplaza y el flujo la reparte)
+  collapseAfterShot(next, events, shotEnd(events, flights) + COLLAPSE_DELAY, true)
   // v4: los líquidos corren y se asientan después de los impactos (y lo que eso derrumbe o queme)
   settleLiquids(next, events, flights)
   // v3: los que cayeron al abismo con este tiro. La vida que perdieron no es daño que se cobre;
@@ -459,7 +481,7 @@ function shotEnd(events: GameEvent[], flights: Flight[]): number {
   for (const e of events) {
     if ('t' in e && typeof e.t === 'number') end = Math.max(end, e.t)
     // v4: el flujo dura un parche cada dt
-    if (e.type === 'flow') end = Math.max(end, e.t + Math.max(0, e.patches.length - 1) * e.dt)
+    if (e.type === 'flow' || e.type === 'collapse') end = Math.max(end, e.t + Math.max(0, e.patches.length - 1) * e.dt) // v2.4: y el derrumbe
   }
   return end
 }

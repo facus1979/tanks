@@ -46,6 +46,8 @@ export interface Generated {
   terrain: Terrain
   props: Prop[]
   spawns: number[] // x del centro de cada tanque, en orden de jugador
+  // v2.4 (Mediano y Grande): por cada spawn, si sirve para un humano (humanSafe). Ausente = todos (Chico).
+  safe?: boolean[]
   // v3 (solo Mediano y Grande; interno de sim): cuencas secas que V4 llena de agua o lava. El
   // líquido ocupa las columnas [x0, x1) desde la fila `level` (y de la superficie) hasta el fondo.
   basins?: Basin[]
@@ -135,9 +137,20 @@ interface Tramo {
 }
 
 // width/height: tamaño del mapa (state.width/height). Con 800×450 da los mismos mapas que v1.
-export function generate(biome: Biome, rng: Rng, count: number, width = WORLD_W, height = WORLD_H): Generated {
+// v2.4: safe = cuántos de los lugares tienen que ser seguros para un humano (ver humanSafe): uno por jugador
+// humano. Solo cambia el mapa si sin esa condición no alcanzaban (ver spreadSpawns).
+export function generate(biome: Biome, rng: Rng, count: number, width = WORLD_W, height = WORLD_H, safe = 0): Generated {
   if (width === W && height === H) return single(biome, rng, count)
-  return chain(biome, rng, count, width, height)
+  return chain(biome, rng, count, width, height, safe)
+}
+
+// v2.4: un humano nunca nace sobre una cornisa ni con la caja a menos de HUMAN_PIT_GAP px de un abismo
+// (se mide hasta las columnas de abismo, que incluyen el socavón bajo los labios y las cornisas: más
+// estricto que la boca). Las IA sí pueden (SPAWN_PIT_GAP), así sigue habiendo tanques a un empujón del vacío.
+export const HUMAN_PIT_GAP = 40
+export function humanSafe(t: Terrain, x: number): boolean {
+  // +1: la caja es [x - TANK_HALF_W, x + TANK_HALF_W) y al espejar se corre un px (como en spawnOk)
+  return !nearPit(t, x, TANK_HALF_W + HUMAN_PIT_GAP + 1)
 }
 
 // Un tramo: superficie, estructuras del bioma y cráteres.
@@ -444,8 +457,15 @@ function pickSpawns(L: Layout, rng: Rng, count: number, industrial: boolean): nu
 // se mezclan en el resto.
 // ok: el lugar sirve para un tanque (lejos de abismos y cuencas, piso donde entra, sin estructuras).
 // loose: lo mínimo cuando no hay nada mejor (muchos jugadores): lejos de abismos y cuencas.
-function spreadSpawns(t: Terrain, slots: number[], rng: Rng, count: number, ok: (x: number) => boolean, loose: (x: number) => boolean, brink: Set<number> = new Set()): number[] {
+// v2.4: safeCount = cuántos lugares tienen que cumplir safe (los humanos). Se eligen como siempre y, solo
+// cuando lo que falta para llegar a safeCount es igual a los lugares que quedan por elegir, los que siguen se
+// eligen entre los seguros. Así, si el sorteo de siempre ya daba suficientes lugares seguros, el mapa es
+// exactamente el mismo; y el rng se consume igual en los dos casos (un next por lugar y la mezcla final).
+function spreadSpawns(t: Terrain, slots: number[], rng: Rng, count: number, ok0: (x: number) => boolean, loose0: (x: number) => boolean, brink: Set<number> = new Set(), safeCount = 0, safe: (x: number) => boolean = () => true): number[] {
   const n = Math.max(1, count)
+  let forced = false
+  const ok = (x: number) => ok0(x) && (!forced || safe(x))
+  const loose = (x: number) => loose0(x) && (!forced || safe(x))
   const span = t.w / n
   const taken: number[] = []
   const away = (x: number, d: number) => taken.every((q) => Math.abs(q - x) >= d)
@@ -455,10 +475,11 @@ function spreadSpawns(t: Terrain, slots: number[], rng: Rng, count: number, ok: 
   const gap = Math.max(SPAWN_GAP, span * 0.32, n > 4 ? SPAWN_GAP_CROWD : 0)
   for (let i = 0; i < n; i++) {
     const ideal = span * (i + 0.5) + (rng.next() - 0.5) * span * 0.3
+    forced = safeCount - taken.filter(safe).length >= n - i
     let best = -1
     let level = 0
     for (const x of slots) {
-      if (!away(x, gap) || Math.abs(x - ideal) > span * 0.34) continue
+      if (!away(x, gap) || Math.abs(x - ideal) > span * 0.34 || !ok(x)) continue
       // v2.3: los lugares al borde de un abismo (brink) ganan dentro de la ventana: que haya tanques cerca del vacío
       const cost = (q: number) => Math.abs(q - ideal) - (brink.has(q) ? span : 0)
       if (best < 0 || cost(x) < cost(best)) best = x
@@ -1043,7 +1064,7 @@ interface Build {
   ledges: LedgeInfo[]
 }
 
-function chain(biome: Biome, rng: Rng, count: number, width: number, height: number): Generated {
+function chain(biome: Biome, rng: Rng, count: number, width: number, height: number, safeCount = 0): Generated {
   const segs = planSegments(biome, rng, width)
   for (const seg of segs) params(seg, biome, rng)
   const noiseSeed = rng.int(1, 100000)
@@ -1088,7 +1109,10 @@ function chain(biome: Biome, rng: Rng, count: number, width: number, height: num
       break
     }
   }
-  const spawnXs = spreadSpawns(t, slots, rng, count, ok, (x) => spawnOk(t, b.mouth, x, basins, null), brinks)
+  const safe = (x: number) => humanSafe(t, x)
+  const spawnXs = spreadSpawns(t, slots, rng, count, ok, (x) => spawnOk(t, b.mouth, x, basins, null), brinks, safeCount, safe)
+  // v2.4: seguro para un humano (antes de espejar; el orden es el de spawns)
+  const safeFlags = spawnXs.map(safe)
   spawnStats.brinks[0] += b.brinks.length
   spawnStats.brinks[1] += brinks.size
   spawnStats.brinks[2] += spawnXs.filter((x) => brinks.has(x)).length
@@ -1121,6 +1145,7 @@ function chain(biome: Biome, rng: Rng, count: number, width: number, height: num
     terrain: t,
     props,
     spawns,
+    safe: safeFlags,
     basins: basins.map((q) => {
       const [x0, x1] = flipX(q.x0, q.x1)
       return { ...q, x0, x1 }
