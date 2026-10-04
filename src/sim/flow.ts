@@ -508,7 +508,7 @@ function restless(t: Terrain, x: number, y: number, m: number): boolean {
   return false
 }
 
-function patchOf(t: Terrain, x0: number, y0: number, x1: number, y1: number): TerrainPatch {
+export function patchOf(t: Terrain, x0: number, y0: number, x1: number, y1: number): TerrainPatch {
   const pw = x1 - x0 + 1
   const ph = y1 - y0 + 1
   const front = new Uint8Array(pw * ph)

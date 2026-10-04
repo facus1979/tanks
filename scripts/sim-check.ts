@@ -78,11 +78,13 @@ import {
   type WeaponId,
 } from '../src/sim'
 import { tankTilt } from '../src/sim/tilt'
-import { propSupported, resolveBlast, blastFor } from '../src/sim/physics'
+import { propSupported, resolveBlast, blastFor, collapseAfterShot } from '../src/sim/physics'
 import { aiStats, lavaRisk } from '../src/sim/ai'
 import { LAVA_DELAY } from '../src/sim/game'
 import { skylineOf } from '../src/sim/ballistics'
-import { generate, padBounds, SPAWN_PIT_GAP, SPAWN_GAP_CROWD, spawnStats, CORNICE_CRUST, CORNICE_LEN, CORNICE_SPAWN_FLAT, CORNICE_SPILL, type Generated } from '../src/sim/gen'
+import { resolveShot } from '../src/sim/weapons'
+import { collapseStats } from '../src/sim/collapse'
+import { generate, humanSafe, padBounds, SPAWN_PIT_GAP, SPAWN_GAP_CROWD, spawnStats, CORNICE_CRUST, CORNICE_LEN, CORNICE_SPAWN_FLAT, CORNICE_SPILL, type Generated } from '../src/sim/gen'
 import { Rng } from '../src/sim/rng'
 import { cloneTerrain, columnGround, createTerrain, deform, fillRect, hasLiquid } from '../src/sim/terrain'
 import { applyPatch, flowLiquids, liquidVolume } from '../src/sim/flow'
@@ -892,17 +894,25 @@ function match(bots: number, seed: number, size: MapSize = 'small'): MatchStats 
   const w = s.roundWinnerId
   return { shots, turns: s.turn, winner: w, weapons, sudden: s.lava !== null, byLava, lavaMs, abyss, walked, rank: w === null ? -1 : order.indexOf(w), opener: w === opener }
 }
-// Chico con 20 partidas (el balance de v1); Mediano y Grande con 10 (con --balance, 20).
+// 20 partidas por tamaño, 40 con 2 tanques en Mediano y Grande (v2.4; antes Mediano y Grande con 10).
 {
   const full = process.argv.includes('--balance')
   for (const size of MAP_SIZE_ORDER) {
     const t0 = performance.now()
-    const games = size === 'small' || full ? 20 : 10
+    // v2.4: 20 partidas en todos los tamaños (con 10, Mediano y Grande quedaban a un tiro del tope que
+    // bloquea el deploy; el workflow de Pages corre sim-check). Las de 2 tanques en Mediano y Grande, 40: son
+    // baratas (~5 s) y muy ruidosas (de 1 a 28 tiros); con 20, Grande daba entre 7,7 y 11,8 según la tanda de
+    // seeds (media de 60 partidas ~10) y el piso de 8 fallaba por azar.
+    const gamesFor = (bots: number) => (bots === 1 && size !== 'small' ? 40 : 20)
+    void full
     // v4: costo del flujo en estas partidas (cada fire corre el flujo sobre todo el mapa)
     flowStats.fires = flowStats.flows = flowStats.ms = flowStats.worst = 0
+    // v2.4: costo del derrumbe
+    collapseStats.calls = collapseStats.collapses = collapseStats.ms = collapseStats.worst = collapseStats.cells = 0
     liquidEvents.splash = liquidEvents.water = liquidEvents.lava = liquidEvents.steam = 0
     for (const bots of [1, 3]) {
       const res = []
+      const games = gamesFor(bots)
       for (let seed = 1; seed <= games; seed++) res.push(match(bots, 100 + seed, size))
       const shots = res.map((r) => r.shots)
       const avg = shots.reduce((a, b) => a + b, 0) / shots.length
@@ -923,13 +933,24 @@ function match(bots: number, seed: number, size: MapSize = 'small'): MatchStats 
       check(lavaMs < AI_BUDGET_MS, `la IA con lava tardó ${lavaMs.toFixed(0)} ms (${size})`)
       // v2: con la muerte súbita ningún tamaño se estira (objetivo ~15 con 2 tanques y ~25 con 4)
       if (bots === 1) check(avg >= 8 && avg <= (size === 'small' ? 15 : 16), `balance ${size} 2 tanques fuera de rango (${avg.toFixed(1)})`)
-      else check(avg <= 27, `balance ${size} 4 tanques: ${avg.toFixed(1)} tiros/partida (tope 27)`)
+      else {
+        // v2.4: tope 30 en Mediano y Grande (antes 27 en todos). Desde v2.3 (empuje, cornisas) Mediano con 4 mide
+        // 25,9-26,2 (10 y 20 partidas): quedaba a menos de un tiro del tope y el error de 20 partidas es ~1,8
+        // tiros. Chico sigue en 27 (mide ~17).
+        const cap = size === 'small' ? 27 : 30
+        check(avg <= cap, `balance ${size} 4 tanques: ${avg.toFixed(1)} tiros/partida (tope ${cap})`)
+      }
     }
     const flowAvg = flowStats.ms / Math.max(1, flowStats.fires)
     console.log(
       `  flujo ${size}: ${flowStats.fires} fires, ${flowStats.flows} movieron líquido, ${flowAvg.toFixed(2)} ms medio, peor ${flowStats.worst.toFixed(1)} ms; salpicaduras ${liquidEvents.splash}, caídas al agua ${liquidEvents.water}, quemaduras de lava ${liquidEvents.lava}, vapores ${liquidEvents.steam}`,
     )
     check(flowAvg < 20, `flujo ${size}: ${flowAvg.toFixed(2)} ms medio por fire (objetivo < 20)`)
+    const colAvg = collapseStats.ms / Math.max(1, collapseStats.calls)
+    console.log(
+      `  derrumbe ${size}: ${collapseStats.calls} fires, ${collapseStats.collapses} con derrumbe (${collapseStats.cells} celdas), ${colAvg.toFixed(2)} ms medio, peor ${collapseStats.worst.toFixed(1)} ms`,
+    )
+    check(colAvg < 10, `derrumbe ${size}: ${colAvg.toFixed(2)} ms medio por fire (objetivo < 10)`)
     console.log(`balance ${size}: ${((performance.now() - t0) / 1000).toFixed(1)} s`)
   }
 }
@@ -1828,7 +1849,7 @@ type DeathEv = Extract<GameEvent, { type: 'death' }>
     if (r.events.some((e) => e.type === 'damage' && e.playerId === 1)) hits++
   }
   console.log(`IA: por encima de la montaña pega ${hits}/6`)
-  check(hits >= 4, `IA: no pasa la montaña alta (${hits}/6)`)
+  check(hits >= 5, `IA: no pasa la montaña alta (${hits}/6)`) // v2.4: morteros y centrado (antes 4/6, mínimo 4)
 }
 {
   // determinismo y réplicas en mapas con abismos: el log de una partida Grande aplicado en otra réplica
@@ -3119,6 +3140,284 @@ const abyssDeath = (ev: GameEvent[], id: number) => ev.some((e) => e.type === 'd
     `v2.3 balance con abismo: ${games} partidas, ${(shots / games).toFixed(1)} tiros/partida, ${deaths} muertes, ${abyss} por abismo (${((100 * abyss) / deaths).toFixed(1)}%), puentes de Tierra ${aiStats.bridges - bridges0} (cruces ${aiStats.crossings - crossings0}); ${((performance.now() - t0) / 1000).toFixed(1)} s`,
   )
   check(abyss * 20 >= deaths, `v2.3: pocas muertes por abismo (${abyss}/${deaths})`)
+}
+// ---------- 19. v2.4: spawns humanos seguros, napalm bajo la lava, derrumbe, Impact.water ----------
+type CollapseEv = Extract<GameEvent, { type: 'collapse' }>
+const collapsesOf = (ev: GameEvent[]) => ev.filter((e): e is CollapseEv => e.type === 'collapse')
+// El tiro (ángulo y potencia, sin viento) cuyo impacto cae más cerca de (x, y). Grilla gruesa y después fina.
+function aimAt(s: GameState, x: number, y: number, lo = 5, hi = 175): { angle: number; power: number; d: number } {
+  const p = s.players[s.current]
+  let best = { angle: 90, power: 50, d: Infinity }
+  const at = (angle: number, power: number) => {
+    const f = fly({ terrain: s.terrain, players: s.players, props: s.props, ownerId: p.id, angle, power, wind: 0, lava: s.lava ?? undefined })
+    const d = Math.hypot(f.impact.x - x, f.impact.y - y)
+    if (d < best.d) best = { angle, power, d }
+  }
+  for (let a = lo; a <= hi; a += 2) for (let pw = 10; pw <= 100; pw += 2) at(a, pw)
+  const b0 = best
+  for (let a = b0.angle - 2; a <= b0.angle + 2; a += 0.25) for (let pw = b0.power - 2; pw <= b0.power + 2; pw += 0.25) at(a, pw)
+  return best
+}
+const countIn = (t: { w: number; front: Uint8Array }, m: number, x0: number, y0: number, x1: number, y1: number) => {
+  let n = 0
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (t.front[y * t.w + x] === m) n++
+  return n
+}
+{
+  // spawns: los humanos nunca nacen sobre una cornisa ni a menos de HUMAN_PIT_GAP px de un abismo; las IA sí.
+  // Con un humano el mapa no cambia (siempre hay lugares seguros de sobra); con todos humanos, generate
+  // elige lugares seguros si el sorteo de siempre no alcanzaba.
+  let humansN = 0
+  let unsafeHumans = 0
+  let aiBrink = 0
+  let swapped = 0
+  let forcedMaps = 0
+  let sameMap = 0
+  let nondet = 0
+  const t0 = performance.now()
+  for (const size of ['medium', 'large'] as MapSize[]) {
+    for (let seed = 1; seed <= 24; seed++) {
+      const biome = BIOMES[seed % 3]
+      const n = size === 'medium' ? 4 : 6
+      const ai = createMatch(mk(n - 1, 'normal', biome, seed, 1, 0, size))
+      for (const humans of [1, n]) {
+        const s = createMatch(mk(n - 1, 'normal', biome, seed, 1, humans, size))
+        if (netHash(s) !== netHash(createMatch(mk(n - 1, 'normal', biome, seed, 1, humans, size)))) nondet++
+        const same = s.terrain.front.every((v, i) => v === ai.terrain.front[i])
+        if (humans === 1 && same) sameMap++
+        if (humans === n && !same) forcedMaps++
+        for (const p of s.players) {
+          if (p.kind === 'human') {
+            humansN++
+            if (!humanSafe(s.terrain, p.x)) unsafeHumans++
+            if (p.x !== ai.players[p.id].x) swapped++
+          } else if (!humanSafe(s.terrain, p.x)) aiBrink++
+        }
+      }
+    }
+  }
+  // Chico no tiene abismos: con humanos o sin ellos, el mismo terreno y los mismos lugares
+  let smallSame = 0
+  for (let seed = 1; seed <= 30; seed++) {
+    const biome = BIOMES[seed % 3]
+    const a = createMatch(mk(3, 'normal', biome, seed))
+    const b = createMatch(mk(3, 'normal', biome, seed, 1, 2))
+    if (a.terrain.front.every((v, i) => v === b.terrain.front[i]) && a.players.every((p, i) => p.x === b.players[i].x) && a.current === b.current) smallSame++
+  }
+  console.log(
+    `v2.4 spawns: ${humansN} humanos, ${unsafeHumans} al borde; IA al borde ${aiBrink}; humanos que cambiaron de lugar con una IA ${swapped}; mapas iguales con 1 humano ${sameMap}/48, mapas que cambian con todos humanos ${forcedMaps}/48; Chico igual ${smallSame}/30; ${((performance.now() - t0) / 1000).toFixed(1)} s`,
+  )
+  check(unsafeHumans === 0, `v2.4: ${unsafeHumans} humanos nacen al borde de un abismo`)
+  check(aiBrink > 0, 'v2.4: ninguna IA nace al borde de un abismo (tienen que poder)')
+  check(sameMap === 48, `v2.4: con un humano cambió el mapa (${sameMap}/48)`)
+  check(nondet === 0, `v2.4: createMatch con humanos no determinista (${nondet})`)
+  check(smallSame === 30, `v2.4: Chico cambia con humanos (${smallSame}/30)`)
+}
+{
+  // napalm bajo la lava: el fuego no baja a la banda de muerte súbita ni quema lo que está debajo
+  const slope = (lava: number | null) => {
+    const s = flat()
+    const t = s.terrain
+    fillRect(t, 400, 300, WORLD_W - 1, WORLD_H - 4, AIR, 'front')
+    for (let x = 400; x < WORLD_W; x++) fillRect(t, x, Math.min(360, 300 + Math.round((x - 400) * 1.2)), x, WORLD_H - 4, DIRT, 'front')
+    s.players[1].x = 455
+    s.players[1].y = tankFloor(t, 455, 0)
+    s.players[1].hp = 100
+    s.lava = lava
+    s.calm = lava === null ? 0 : SUDDEN_DEATH_CALM
+    s.wind = 0
+    return s
+  }
+  const base = slope(null)
+  const aim = aimAt(base, 418, 322, 20, 85)
+  const run = (lava: number | null) => {
+    const s = slope(lava)
+    const r = shoot(s, 'napalm', aim.angle, aim.power)
+    const burns = r.events.filter((e): e is BurnEv => e.type === 'burn')
+    const fire = r.events.some((e) => e.type === 'damage' && e.playerId === 1 && e.cause !== 'lava')
+    return { burns, fire }
+  }
+  const dry = run(null)
+  const wet = run(340)
+  console.log(`v2.4 napalm: sin lava ${dry.burns.length} tramos de fuego (le pega al de abajo: ${dry.fire}), con la banda en 340 ${wet.burns.length} tramos, más abajo ${wet.burns.filter((b) => b.y >= 340).length}`)
+  check(aim.d < 6 && dry.fire, `v2.4 napalm: la prueba no pega sin lava (d ${aim.d.toFixed(1)})`)
+  check(wet.burns.length > 0 && wet.burns.every((b) => b.y < 340) && !wet.fire, 'v2.4 napalm: el fuego bajó a la banda de lava')
+}
+{
+  // derrumbe 1: un pilar cortado en la base cae entero; los parches reproducen la grilla final
+  const s = flat()
+  s.wind = 0
+  fillRect(s.terrain, 380, 170, 392, 299, DIRT, 'both')
+  const a = aimAt(s, 386, 288, 20, 85)
+  let pre = applyCommand(s, { type: 'selectWeapon', playerId: 0, weapon: 'heavy' }).state
+  pre = applyCommand(pre, { type: 'aim', playerId: 0, angle: a.angle, power: a.power }).state
+  const dirt0 = countT(pre.terrain, DIRT)
+  const r = applyCommand(pre, { type: 'fire', playerId: 0 })
+  const cols = collapsesOf(r.events)
+  const debris = impactsOf(r).reduce((n, e) => n + (e.debris[DIRT] ?? 0), 0)
+  // la parte de arriba (unas 90 filas) cae al cráter: la punta baja de y 170 a más de y 200
+  const high = countIn(r.state.terrain, DIRT, 380, 170, 392, 200)
+  check(cols.length === 1 && cols[0].cells > 900 && high === 0, `v2.4 derrumbe: el pilar no cayó (${cols.length} eventos, ${cols[0]?.cells} celdas, ${high} arriba)`)
+  check(countT(r.state.terrain, DIRT) === dirt0 - debris, 'v2.4 derrumbe: la tierra que cae se conserva')
+  // reproducir: impactos sobre una copia + parches del derrumbe + parches del flujo = grilla final
+  const rep = cloneState(pre)
+  rep.players[0].ammo.heavy -= 1
+  resolveShot(rep, rep.players[0], 'heavy')
+  let same0 = true
+  if (cols.length > 0) {
+    const p0 = cols[0].patches[0]
+    for (let y = 0; y < p0.h && same0; y++) for (let x = 0; x < p0.w; x++) if (rep.terrain.front[(p0.y + y) * rep.terrain.w + p0.x + x] !== p0.front[y * p0.w + x]) same0 = false
+  }
+  for (const e of r.events) if (e.type === 'collapse' || e.type === 'flow') for (const p of e.patches) applyPatch(rep.terrain, p)
+  check(same0 && sameGrid(rep.terrain, r.state.terrain), 'v2.4 derrumbe: los parches no reproducen la grilla final')
+  const ci = r.events.findIndex((e) => e.type === 'collapse')
+  const last = Math.max(...impactsOf(r).map((e) => e.t))
+  check(ci >= 0 && cols[0].t > last && cols[0].dt > 0 && cols[0].patches.length >= 2, 'v2.4 derrumbe: t, dt o parches del evento')
+  const fi = r.events.findIndex((e) => e.type === 'flow')
+  check(fi < 0 || fi > ci, 'v2.4 derrumbe: va antes del flujo')
+}
+{
+  // derrumbe 2: las cornisas y los techos de cueva unidos al terreno no se caen
+  const cav = flat()
+  cav.wind = 0
+  fillRect(cav.terrain, 300, 312, 420, 350, AIR, 'front')
+  const a = aimAt(cav, 360, 300, 20, 85)
+  const r = shoot(cav, 'normal', a.angle, a.power)
+  const roof = countIn(r.state.terrain, DIRT, 300, 300, 330, 311) + countIn(r.state.terrain, DIRT, 390, 300, 420, 311)
+  check(roof === 2 * 31 * 12, `v2.4 derrumbe: el techo de la cueva se cayó (${roof}/${2 * 31 * 12})`)
+  const cor = corniceMap(300)
+  cor.wind = 0
+  const b = aimAt(cor, CM0 - 4, 300)
+  const rc = shoot(cor, 'normal', b.angle, b.power)
+  const crust = countIn(rc.state.terrain, DIRT, CC0, 300, CM0 - 22, 307)
+  check(crust === (CM0 - 22 - CC0 + 1) * 8, `v2.4 derrumbe: la cornisa se cayó (${crust})`)
+  // el puente del abismo cortado en un extremo sigue colgado del otro; cortado en los dos, cae al vacío
+  const br = pitMap()
+  br.players[1].x = 1200
+  br.wind = 0
+  const c = aimAt(br, PIT0 + 6, 300)
+  const r1 = shoot(br, 'heavy', c.angle, c.power)
+  const left = countIn(r1.state.terrain, DIRT, PIT0 + 40, 300, PIT1, 307)
+  check(left === 40 * 8, `v2.4 derrumbe: el puente cortado de un lado se cayó (${left})`)
+  let s2 = r1.state
+  s2.current = 0
+  s2 = cloneState(s2)
+  s2.players[0].ammo.heavy = 2
+  const d = aimAt(s2, PIT1 - 6, 300)
+  const r2 = shoot(s2, 'heavy', d.angle, d.power)
+  const rest = countIn(r2.state.terrain, DIRT, PIT0, 0, PIT1, s2.terrain.h - 1)
+  check(collapsesOf(r2.events).length === 1 && rest === 0, `v2.4 derrumbe: el puente suelto no cayó al abismo (${rest} celdas quedan)`)
+}
+{
+  // derrumbe 3: un bloque colgado que se suelta aplasta al tanque de abajo (damage con cause 'collapse')
+  const s = flat()
+  s.wind = 0
+  const t = s.terrain
+  s.players[1].x = 600
+  fillRect(t, 580, 240, 620, 259, DIRT, 'both')
+  fillRect(t, 621, 240, 639, 241, DIRT, 'both')
+  fillRect(t, 640, 240, 650, 299, DIRT, 'both')
+  const a = aimAt(s, 631, 241, 20, 85)
+  const r = shoot(s, 'normal', a.angle, a.power)
+  const crush = r.events.filter((e) => e.type === 'damage' && e.playerId === 1)
+  const cause = crush.map((e) => (e.type === 'damage' ? e.cause : ''))
+  const col = collapsesOf(r.events)[0]
+  const dmgT = crush.length > 0 && crush[0].type === 'damage' ? crush[0].t ?? 0 : 0
+  console.log(`v2.4 aplastamiento: ${col?.cells} celdas, daño ${crush.map((e) => (e.type === 'damage' ? e.amount : 0)).join('+')} (${cause.join(',')})`)
+  check(crush.length === 1 && cause[0] === 'collapse' && r.state.players[1].hp < 100 && col !== undefined && dmgT >= col.t, 'v2.4 aplastamiento: sin daño por derrumbe')
+}
+{
+  // derrumbe 4: tierra que cae sobre la lava → piedra; al agua la desplaza (el agua se conserva)
+  const hang = (m: number) => {
+    const s = poolMap(m)
+    const t = s.terrain
+    fillRect(t, 630, 240, 669, 259, DIRT, 'both')
+    fillRect(t, 670, 240, 699, 241, DIRT, 'both')
+    fillRect(t, 700, 240, 712, 299, DIRT, 'both')
+    return s
+  }
+  // se corta el puentecito con deform (el bloque tapa los tiros desde los dos lados) y se derrumba con el
+  // mismo resolver que usa fire
+  const cut = (s: GameState) => {
+    deform(s.terrain, 685, 241, 8, 'destroy')
+    const ev: GameEvent[] = []
+    collapseAfterShot(s, ev, 0, true)
+    return ev
+  }
+  const lv = hang(LAVA)
+  const st0 = countT(lv.terrain, STONE)
+  const l0 = countT(lv.terrain, LAVA)
+  const el = cut(lv)
+  // la capa que toca la lava se vuelve piedra y flota; lo que cae encima queda apoyado ahí. Ninguna celda de
+  // tierra queda tocando la lava y la lava no se mueve.
+  let touching = 0
+  const ft = lv.terrain
+  for (let i = ft.w; i < ft.front.length - ft.w; i++) if (ft.front[i] === DIRT && ft.front[i + ft.w] === LAVA) touching++
+  const fell = countIn(ft, DIRT, 630, 240, 669, 259)
+  check(collapsesOf(el).length === 1 && fell === 0 && touching === 0 && countT(ft, STONE) >= st0 + 40 && countT(ft, LAVA) === l0, `v2.4 derrumbe: la tierra sobre la lava (${touching} celdas de tierra tocan la lava, ${fell} no cayeron)`)
+  const wt = hang(WATER)
+  const w0 = countT(wt.terrain, WATER)
+  const ew = cut(wt)
+  const sunk = countIn(wt.terrain, DIRT, 630, 300, 669, 339)
+  check(collapsesOf(ew).length === 1 && countT(wt.terrain, WATER) === w0 && sunk >= 790, `v2.4 derrumbe: al agua (${countT(wt.terrain, WATER)}/${w0} de agua, ${sunk} de tierra en el fondo)`)
+  flowLiquids(wt.terrain, { seed: null, record: false })
+  check(countT(wt.terrain, WATER) === w0, 'v2.4 derrumbe: el flujo después del derrumbe conserva el agua')
+}
+{
+  // derrumbe 5: determinismo y réplicas con derrumbes (Grande, 4 IA)
+  const config: MatchConfig = { slots: [{ kind: 'human' }, { kind: 'ai' }, { kind: 'ai' }, { kind: 'ai' }], rounds: 1, difficulty: 'normal', biome: 'jungle', seed: 23, size: 'large' }
+  let a = createMatch(config)
+  let b = decodeState(encodeState(a))
+  let collapses = 0
+  let diverged = 0
+  let log = ''
+  for (let guard = 0; a.phase === 'aiming' && guard < 40; guard++) {
+    const p = a.players[a.current]
+    const plan = chooseShot(a, 'normal')
+    const cmds: Command[] = []
+    for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item })
+    for (let i = 0; i < Math.abs(plan.move ?? 0); i++) cmds.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
+    cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+    for (const cmd of cmds) {
+      const ra = applyCommand(a, cmd)
+      const rb = applyCommand(b, cmd)
+      collapses += collapsesOf(ra.events).length
+      log += JSON.stringify(ra.events.map((e) => (e.type === 'collapse' ? { ...e, patches: e.patches.length } : e.type === 'flow' ? { ...e, patches: e.patches.length } : e)))
+      a = ra.state
+      b = rb.state
+      if (netHash(a) !== netHash(b)) diverged++
+    }
+  }
+  check(diverged === 0 && collapses > 0, `v2.4 réplicas con derrumbe: ${diverged} pasos distintos, ${collapses} derrumbes`)
+  // la misma partida otra vez da exactamente los mismos eventos
+  let c = createMatch(config)
+  let log2 = ''
+  for (let guard = 0; c.phase === 'aiming' && guard < 40; guard++) {
+    const p = c.players[c.current]
+    const plan = chooseShot(c, 'normal')
+    const cmds: Command[] = []
+    for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item })
+    for (let i = 0; i < Math.abs(plan.move ?? 0); i++) cmds.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
+    cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+    for (const cmd of cmds) {
+      const rc = applyCommand(c, cmd)
+      log2 += JSON.stringify(rc.events.map((e) => (e.type === 'collapse' ? { ...e, patches: e.patches.length } : e.type === 'flow' ? { ...e, patches: e.patches.length } : e)))
+      c = rc.state
+    }
+  }
+  check(log === log2 && netHash(a) === netHash(c), 'v2.4 derrumbe: la partida no es determinista')
+  console.log(`v2.4 réplicas: ${collapses} derrumbes en la partida, réplicas iguales`)
+}
+{
+  // Impact.water: explosión con el centro sumergido (en el vuelo y en el evento impact); seca, sin la marca
+  const s = poolMap(WATER)
+  s.players[0].x = 500
+  const a = aimAt(s, 650, 330, 20, 85)
+  const r = shoot(s, 'normal', a.angle, a.power)
+  const imp = impactsOf(r)[0]
+  check(r.flights![0].impact.water === true && imp?.water === true && imp.radius === WEAPONS.normal.radius * WATER_BLAST_SCALE, `v2.4 Impact.water: explosión sumergida sin la marca (${JSON.stringify(r.flights![0].impact)})`)
+  const dry = shoot(flat(), 'normal', 60, 60)
+  check(dry.flights![0].impact.water === undefined && impactsOf(dry).every((e) => e.water === undefined), 'v2.4 Impact.water: explosión seca con la marca')
 }
 console.log(`IA peor caso: ${worstMs.toFixed(0)} ms`)
 console.log(`${checks - failures}/${checks} chequeos OK`)

@@ -6,6 +6,7 @@ import type { Terrain } from '../../sim/types'
 import type { GameRenderer, RenderFrame, Viewport } from '../types'
 import { VIEW_H, VIEW_W } from '../types'
 import { AbyssFalls } from './abyss'
+import { CollapseView } from './collapse'
 import type { Part } from './abyss'
 import { BUBBLE_HOLD, BUBBLE_TIME, PropView, RECOIL_TIME, TankView } from './actors'
 import type { Art } from './assets'
@@ -126,6 +127,8 @@ export class PixiRenderer implements GameRenderer {
   private flowRect: Rect | null = null
   private flowLeft = 0
   private flowNew = false // el frame en que llega el evento el diff es completo (puede haber otros cambios)
+  // v2.4: derrumbes en curso (evento 'collapse'): polvo de los bordes, piedritas y nube al asentarse
+  private collapse = new CollapseView()
 
   private fx = new Fx(BUF_W, BUF_H)
   private extras = new Extras(this.fx)
@@ -317,6 +320,8 @@ export class PixiRenderer implements GameRenderer {
       }
       const list = painter.update(frame.terrain, art, pal, changed, x0, x1, this.flowNew ? null : this.flowRect)
       this.flowNew = false
+      // v2.4: el derrumbe mira lo que cambió en su zona (antes del update de fx: las partículas nuevas ya se mueven)
+      this.collapse.update(this.fx, frame.terrain, changed, frame.freeze || this.fx.hitStop > 0 ? 0 : dt, (x, y) => this.liquids.plunge(this.fx, x, y))
       for (const i of list) {
         if (painter.bfFlushed[i]) {
           this.backChunks[i].texture.source.update()
@@ -405,9 +410,13 @@ export class PixiRenderer implements GameRenderer {
       return
     }
     this.liquids.update(t, p.surfStamp, CHUNK_W, (i) => p.surfaces[i] ?? null, () => p.lavaSurfaces(t), dt, frame.wind, x0, x1, y0, y1)
+    // v2.4: salpicaduras exactas del flujo (RenderFrame.splashes); sin ellas, LiquidView las detecta comparando
+    // la posición del proyectil con la grilla (respaldo)
+    const exact = frame.splashes !== undefined
+    if (exact && dt > 0) for (const s of frame.splashes!) this.liquids.splashAt(this.fx, s.x, s.y)
     const impacts: Vec2[] = []
     for (const ev of events) if (ev.type === 'impact') impacts.push(ev)
-    this.liquids.trackShots(this.fx, frame.projectiles, impacts, this.lava.level)
+    this.liquids.trackShots(this.fx, frame.projectiles, impacts, this.lava.level, exact)
     this.liquids.tanks(this.fx, frame.players, dt)
     if (dt > 0 && p.fresh.length) this.liquids.flowFront(this.fx, p.fresh, x0, x1, y0, y1)
   }
@@ -418,6 +427,7 @@ export class PixiRenderer implements GameRenderer {
     this.liquids.reset()
     this.flowRect = null
     this.flowLeft = 0
+    this.collapse.reset()
     this.abyss.reset()
     this.lost.clear()
     this.lastAlive.clear()
@@ -588,13 +598,21 @@ export class PixiRenderer implements GameRenderer {
               dir = t
             }
           }
-          // v4: bien sumergida, la explosión no hace fuego ni humo (fogonazo ahogado, burbujas y géiser)
-          const sy = this.liquids.submerged(ev.x, ev.y)
-          if (sy >= 0 && ev.y - sy > ev.radius * 0.5) this.fx.underwater(ev.x, ev.y, ev.radius)
+          // v4: bien sumergida, la explosión no hace fuego ni humo (fogonazo ahogado, burbujas y géiser).
+          // v2.4: si el sim lo dice (impact.water) se usa eso; si no, se detecta con la grilla (respaldo).
+          // (el evento 'impact' todavía no declara water en GameEvent: se lee si llega)
+          const water = ev.water
+          let wet: boolean
+          if (water !== undefined) wet = water
+          else {
+            const sy = this.liquids.submerged(ev.x, ev.y)
+            wet = sy >= 0 && ev.y - sy > ev.radius * 0.5
+          }
+          if (wet) this.fx.underwater(ev.x, ev.y, ev.radius)
           else this.fx.explosion(ev.blast, ev.x, ev.y, ev.radius, ev.debris, dir.dx, dir.dy)
         }
-        if (SCORCH_STYLES.has(ev.blast)) this.painter?.addCrater(ev.x, ev.y, ev.radius)
-        this.liquids.impact(this.fx, ev.x, ev.y, ev.radius) // v4: burbujas y géiser si explotó bajo el agua
+        if (SCORCH_STYLES.has(ev.blast) && ev.water !== true) this.painter?.addCrater(ev.x, ev.y, ev.radius)
+        this.liquids.impact(this.fx, ev.x, ev.y, ev.radius, ev.water) // v4: burbujas y géiser si explotó bajo el agua
         this.impactSeen = true
         // el tanque más amenazado grita '!', los otros cercanos se preguntan '?'
         {
@@ -624,6 +642,10 @@ export class PixiRenderer implements GameRenderer {
           const L = this.lava.level
           if (p && L !== null && p.y > L - 30) this.lava.burn(this.fx, p.x, p.y)
           else if (p) this.liquids.burn(this.fx, p.x, p.y)
+        } else if (ev.cause === 'collapse') {
+          // v2.4: aplastado por un derrumbe: polvo del material que cayó y chispas sobre el casco
+          const p = frame.players.find((q) => q.id === ev.playerId)
+          if (p) this.fx.crushed(p.x, p.y, this.collapse.materialNear(p.x))
         }
         this.hitThisShot.add(ev.playerId)
         this.view(ev.playerId).alert = BUBBLE_TIME
@@ -664,17 +686,14 @@ export class PixiRenderer implements GameRenderer {
       case 'steam':
         this.liquids.steam(this.fx, ev.x, ev.y, ev.n)
         break
-      case 'flow': {
-        // mientras se aplican los parches, el diff de la grilla mira solo lo que tocan
-        if (!ev.patches.length) break
-        let r: Rect = this.flowRect ?? { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }
-        for (const q of ev.patches) r = { x0: Math.min(r.x0, q.x), y0: Math.min(r.y0, q.y), x1: Math.max(r.x1, q.x + q.w), y1: Math.max(r.y1, q.y + q.h) }
-        this.flowRect = r
-        this.flowNew = true
-        // el evento llega en su t (cuando se aplica el primer parche): quedan patches.length · dt segundos
-        this.flowLeft = Math.max(this.flowLeft, ev.patches.length * ev.dt + 0.5)
+      case 'collapse':
+        // v2.4: igual que 'flow' para el diff del pintor; los efectos los arma CollapseView
+        this.collapse.start(ev, frame.terrain)
+        this.focusPatches(ev)
         break
-      }
+      case 'flow':
+        this.focusPatches(ev)
+        break
       case 'prop':
         if (ev.destroyed && this.propToAbyss(ev, frame)) break
         if (ev.destroyed) {
@@ -688,6 +707,17 @@ export class PixiRenderer implements GameRenderer {
         this.painter?.addCrater(ev.x + ev.w / 2, ev.y, Math.max(3, ev.w / 2))
         break
     }
+  }
+
+  // Flujo o derrumbe: mientras se aplican los parches, el diff de la grilla mira solo lo que tocan.
+  private focusPatches(ev: Extract<GameEvent, { type: 'flow' | 'collapse' }>): void {
+    if (!ev.patches.length) return
+    let r: Rect = this.flowRect ?? { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }
+    for (const q of ev.patches) r = { x0: Math.min(r.x0, q.x), y0: Math.min(r.y0, q.y), x1: Math.max(r.x1, q.x + q.w), y1: Math.max(r.y1, q.y + q.h) }
+    this.flowRect = r
+    this.flowNew = true
+    // el evento llega en su t (cuando se aplica el primer parche): quedan patches.length · dt segundos
+    this.flowLeft = Math.max(this.flowLeft, ev.patches.length * ev.dt + 0.5)
   }
 
   // v3: ¿este fall/death es un tanque que se pierde en el abismo? Si lo es, lo suelta (una sola vez).

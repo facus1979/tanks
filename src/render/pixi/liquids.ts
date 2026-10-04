@@ -298,9 +298,16 @@ export class LiquidView {
   // ---------- efectos que dispara el renderer ----------
 
   // Explosión: si el centro quedó bajo el agua, burbujas que suben y, cerca de la superficie, un géiser.
-  impact(fx: Fx, x: number, y: number, radius: number): void {
-    const sy = this.submerged(x, y)
-    if (sy < 0) return
+  // water (v2.4, Impact.water): lo que dice el sim; sin él se detecta con la grilla. Si el sim dice que
+  // está sumergida pero la grilla del frame no encuentra la superficie, se busca más arriba.
+  impact(fx: Fx, x: number, y: number, radius: number, water?: boolean): void {
+    if (water === false) return
+    let sy = this.submerged(x, y)
+    if (sy < 0 && water) for (let dy = 6; dy <= radius + 6 && sy < 0; dy += 2) sy = this.surfaceAbove(x, y - dy)
+    if (sy < 0) {
+      if (water) fx.bubbles(x, y, Math.min(26, 6 + Math.round(radius * 0.8)), y - radius, Math.max(6, radius))
+      return
+    }
     const depth = y - sy
     fx.bubbles(x, y, Math.min(26, 6 + Math.round(radius * 0.8)), sy, Math.max(6, radius))
     if (depth < radius * 2 + 10) {
@@ -400,12 +407,33 @@ export class LiquidView {
     this.vents = live
   }
 
+  // v2.4: salpicadura exacta (RenderFrame.splashes): el proyectil entró al agua en (x, y). La corona y las ondas
+  // van en la superficie de esa columna; si la grilla del frame ya no tiene agua ahí, en la fila que dio el sim.
+  splashAt(fx: Fx, x: number, y: number): void {
+    let sy = -1
+    for (let dy = -2; dy <= 4 && sy < 0; dy++) sy = this.surfaceAbove(x, y + dy)
+    if (sy < 0) sy = Math.round(y)
+    fx.waterSplash(x, sy, 10, 110)
+    fx.waterSplash(x, sy, 4, 50)
+    this.ripple(x, sy, 2.2)
+  }
+
+  // Sólido de un derrumbe que entra en el agua (x, y): salpicadura pesada y ondas.
+  plunge(fx: Fx, x: number, y: number): void {
+    let sy = -1
+    for (let dy = 0; dy <= 8 && sy < 0; dy++) sy = this.surfaceAbove(x, y + dy)
+    if (sy < 0) sy = Math.round(y)
+    fx.waterSplash(x, sy, 7, 90)
+    this.ripple(x, sy, 2)
+  }
+
   // Proyectiles: entrada al agua (salpicadura y ondas) y derretidos en la lava material (chisporroteo).
   // bandLevel: superficie de la lava de muerte súbita (esa la resuelve LavaView), o null.
-  trackShots(fx: Fx, shots: Vec2[], impacts: Vec2[], bandLevel: number | null): void {
+  // exact (v2.4): las entradas al agua llegan en RenderFrame.splashes; no se detectan acá.
+  trackShots(fx: Fx, shots: Vec2[], impacts: Vec2[], bandLevel: number | null, exact = false): void {
     const prev = this.prevShots
     if (this.terrain) {
-      if (prev.length === shots.length) {
+      if (!exact && prev.length === shots.length) {
         for (let i = 0; i < shots.length; i++) this.entry(fx, prev[i], shots[i])
       }
       for (const p of prev) {

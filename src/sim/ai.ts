@@ -2,7 +2,7 @@ import { fly, muzzle, skylineOf } from './ballistics'
 import { tankTilt } from './tilt'
 import { applyCommand } from './game'
 import { flowLiquids } from './flow'
-import { blastDamage, inLava, submerged } from './physics'
+import { blastDamage, collapseAfterShot, inLava, submerged } from './physics'
 import { columnTop, hasLiquid, takeDirty } from './terrain'
 import { Rng, hashSeed } from './rng'
 import { SLIDE_MAX } from './slide'
@@ -192,6 +192,7 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
   const actor = state.players[state.current]
   const rand = random ?? rngFor(state)
   flowBudget = flowBudgetFor(state.terrain.w)
+  centerAlways = difficulty === 'hard'
   const weapons = WEAPON_ORDER.filter((id) => actor.ammo[id] > 0 && WEAPONS[id].terrain !== 'build')
   const fallback = weapons[0] ?? WEAPON_ORDER.find((id) => actor.ammo[id] > 0) ?? 'normal'
   const targets = state.players.filter((p) => p.alive && p.id !== actor.id)
@@ -415,6 +416,7 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   // empuja adentro (se verifica con la simulación completa, que resuelve el empuje)
   const brinks = brinksOf(state.terrain, targets)
   const brinkAim = brinks.map(() => ({ angle: 0, power: 0, d: Infinity }))
+  let direct = false // algún tiro de la búsqueda pega directo en un rival
   const consider = (angle: number, power: number) => {
     const r = estimate(state, actor, targets, weapons, angle, power, sky, ledges, prio)
     total++
@@ -433,6 +435,7 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
       }
     }
     if (r.blocked) blocked++
+    if (r.direct) direct = true
     for (const c of r.list) {
       const prev = perWeapon.get(c.weapon)
       if (!prev || c.score > prev.score) perWeapon.set(c.weapon, c)
@@ -446,6 +449,11 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   // en mapas anchos la potencia mínima de 24 ya tira lejos: se busca desde más abajo
   const p0 = k > 1 ? 12 : 24
   for (let angle = 6; angle <= 174; angle += da) for (let power = p0; power <= 100; power += dp) consider(angle, power)
+  // v2.4: morteros. Si la grilla no encontró ningún impacto directo (típico: el rival detrás de una montaña
+  // alta, donde la ventana de tiros que pasan la cima y caen sobre él es angosta), busca por bisección, para
+  // cada ángulo alto hacia el rival más cercano, la potencia que hace caer el tiro en su x.
+  const narrow = fine && !direct // la grilla no ve impactos directos: la ventana de tiros que pegan es angosta
+  if (narrow) mortar(state, actor, nearest(actor, targets), sky, consider)
   if (aim.d < 40) {
     // refina alrededor del tiro que cae más al centro del rival colgado: el que le rompe el piso
     // suele estar en una ventana chica que la grilla gruesa no ve
@@ -485,7 +493,51 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
     const score = simulate(state, c, prio)
     if (score > verified.score) verified = { ...c, score }
   }
+  if ((narrow || centerAlways) && verified.score > 0) {
+    // el tiro centrado tiene que valer lo mismo con la simulación completa: un tiro que pega en el borde de la
+    // caja puede servir por otra cosa (romperle el puente, empujarlo al vacío) que el del centro no hace
+    const c = center(state, actor, verified, sky)
+    if (c !== verified) {
+      const score = simulate(state, c, prio)
+      if (score >= verified.score - 1) verified = { ...c, score }
+    }
+  }
   return { best: verified, blocked: total > 0 ? blocked / total : 0 }
+}
+
+// v2.4: centrado del impacto directo. Todos los impactos directos valen lo mismo, así que la búsqueda se
+// quedaba con uno cualquiera de la ventana de tiros que pegan (por el desempate, el más plano: el borde). Por
+// encima de una montaña esa ventana mide ~2 puntos de potencia, y desde el borde el error de puntería (aun el
+// de la difícil) la saca afuera la mitad de las veces. Acá, si el tiro elegido pega directo, se lo lleva al
+// medio de la ventana: primero la potencia (el medio entre la menor y la mayor que siguen pegando en ese tanque
+// con ese ángulo, de a CENTER_STEP), después el ángulo con esa potencia y otra vez la potencia. Cada ventana se
+// recorre hasta CENTER_SPAN para cada lado. Es simétrico: en la situación espejada da el tiro espejado.
+// Después search confirma con la simulación completa que el tiro centrado vale lo mismo.
+const CENTER_STEP = 0.2
+const CENTER_SPAN = 4
+function center(state: GameState, actor: Player, c: Candidate, sky: Int16Array): Candidate {
+  const shot = (angle: number, power: number) =>
+    fly({ skyline: sky, terrain: state.terrain, players: state.players, props: state.props, ownerId: actor.id, angle, power, wind: state.wind, lava: state.lava ?? undefined }).impact
+  const first = shot(c.angle, c.power)
+  if (first.kind !== 'tank' || first.tankId === undefined || first.tankId === actor.id) return c
+  const id = first.tankId
+  const hit = (angle: number, power: number) => {
+    const imp = shot(angle, power)
+    return imp.kind === 'tank' && imp.tankId === id
+  }
+  // medio de la ventana de v alrededor de v0 (f(v) dice si pega), recorriendo de a CENTER_STEP
+  const mid = (v0: number, lo: number, hi: number, f: (v: number) => boolean) => {
+    let a = v0
+    let b = v0
+    while (a - CENTER_STEP >= lo && v0 - a < CENTER_SPAN && f(a - CENTER_STEP)) a -= CENTER_STEP
+    while (b + CENTER_STEP <= hi && b - v0 < CENTER_SPAN && f(b + CENTER_STEP)) b += CENTER_STEP
+    return Math.round(((a + b) / 2) * 100) / 100
+  }
+  let p = mid(c.power, 10, 100, (v) => hit(c.angle, v))
+  const a = mid(c.angle, 0, 180, (v) => hit(v, p))
+  if (hit(a, p)) p = mid(p, 10, 100, (v) => hit(a, v))
+  if (!hit(a, p)) return c
+  return a === c.angle && p === c.power ? c : { ...c, angle: a, power: p }
 }
 
 function estimate(
@@ -498,7 +550,7 @@ function estimate(
   skyline?: Int16Array,
   ledges: Ledge[] = [],
   prio?: Map<number, number>,
-): { list: Candidate[]; blocked: boolean; at?: { x: number; y: number } } {
+): { list: Candidate[]; blocked: boolean; at?: { x: number; y: number }; direct?: boolean } {
   const flight = fly({
     skyline,
     terrain: state.terrain,
@@ -545,7 +597,39 @@ function estimate(
     const score = (dmg > 0 ? 1000 + dmg * 10 - self * SELF_WEIGHT - cost : -near - self * SELF_WEIGHT - cost * 0.01) + flatTie(angle)
     list.push(push ? { angle, power, weapon: id, score, push } : { angle, power, weapon: id, score })
   }
-  return { list, blocked, at: flight.impact }
+  const direct = flight.impact.kind === 'tank' && targets.some((t) => t.id === flight.impact.tankId)
+  return { list, blocked, at: flight.impact, direct }
+}
+
+// v2.4: búsqueda de morteros. Para cada ángulo alto hacia el blanco (de MORTAR_A0 a MORTAR_A1 grados sobre la
+// horizontal, cada MORTAR_DA), bisección de la potencia según dónde cae el tiro respecto de la x del blanco
+// (corto: más potencia; largo: menos). Un tiro que choca contra la ladera de este lado cuenta como corto.
+// Cada resultado y sus vecinos pasan por consider (la estimación de siempre). Unos 20 ángulos × 9 vuelos.
+const MORTAR_A0 = 40
+const MORTAR_A1 = 88
+const MORTAR_DA = 2.5
+const MORTAR_STEPS = 9
+function mortar(state: GameState, actor: Player, target: Player, sky: Int16Array, consider: (angle: number, power: number) => void): void {
+  const dir = target.x > actor.x ? 1 : -1
+  for (let a = MORTAR_A0; a <= MORTAR_A1; a += MORTAR_DA) {
+    const angle = dir > 0 ? a : 180 - a
+    let lo = 10
+    let hi = 100
+    for (let k = 0; k < MORTAR_STEPS; k++) {
+      const p = (lo + hi) / 2
+      const f = fly({ skyline: sky, terrain: state.terrain, players: state.players, props: state.props, ownerId: actor.id, angle, power: p, wind: state.wind, lava: state.lava ?? undefined })
+      if (f.impact.kind === 'tank' && f.impact.tankId === target.id) {
+        lo = hi = p
+        break
+      }
+      // 'out' (se fue del mapa o por arriba): largo
+      const long = f.impact.kind === 'out' || (f.impact.x - target.x) * dir > 0
+      if (long) hi = p
+      else lo = p
+    }
+    const p = (lo + hi) / 2
+    for (const dp of [-0.5, 0, 0.5]) consider(angle, clamp(p + dp, 10, 100))
+  }
 }
 
 // v3: un rival que se sostiene sobre un abismo. Por cada columna de su caja: si es de abismo y lo
@@ -629,6 +713,8 @@ function simulate(state: GameState, c: Candidate, prio?: Map<number, number>): n
   actor.power = c.power
   const before = s.players.map((p) => ({ hp: p.hp, alive: p.alive, x: p.x, y: p.y }))
   const { events } = resolveShot(s, actor, c.weapon)
+  // v2.4: el derrumbe, con el mismo resolver que fire (sin parches): un terrón que cae sobre un rival lo aplasta
+  collapseAfterShot(s, events, 0, false)
   // v4: si el tiro tocó cerca de lava, la deja correr (como fire) y el rival que quede en ella cuenta
   // como golpeado por lo que la lava le va a quemar. El agua no daña: no hace falta simularla.
   // Tope de flujos por turno (flowBudget): pasado ese, la estimación sigue sin flujo.
@@ -782,6 +868,10 @@ const AI_FLOW_ITERS = 200
 // flujos simulados por turno de la IA (se recarga en chooseShot): acota el peor caso con lava cerca
 const AI_FLOW_BUDGET = 8
 let flowBudget = AI_FLOW_BUDGET
+// v2.4: la difícil centra siempre el impacto directo (ver center); la normal y la fácil, solo cuando la grilla
+// gruesa no encontró ninguno (ventana angosta: montaña, rival tapado). Centrar siempre con la normal cambiaba el
+// reparto de victorias por posición con 6 en Mediano (una posición ganaba 19 de 60).
+let centerAlways = false
 // v5: cada flujo simulado cuesta más cuanto más ancho el mapa (en Grande ~17 ms) y con 8 tanques hay más
 // bordes de pozo con un rival abajo: el tope baja con el cuadrado del ancho pasado Mediano (Grande: 4)
 // para que el turno siga bajo 250 ms. Chico y Mediano quedan en AI_FLOW_BUDGET.

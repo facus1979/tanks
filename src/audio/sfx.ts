@@ -53,6 +53,9 @@ export class Sfx {
   private engineGain: GainNode | null = null
   private engineOsc: OscillatorNode | null = null
   private engineOn = false
+  // v2.4: escala de tiempo actual (cámara lenta) y voces que pueden estar sonando (para reprogramarlas)
+  private scale = 1
+  private voices: Voice[] = []
 
   // Crea el contexto; tiene que llamarse desde un gesto del usuario.
   unlock(): void {
@@ -531,6 +534,53 @@ export class Sfx {
     }
   }
 
+  // ---------- derrumbe (v2.4) ----------
+
+  // Terrones que se sueltan y caen durante dur segundos: crujido de tierra que cede, rumor grave que dura
+  // lo que el derrumbe y piedras que golpean y rebotan. cells: celdas que cayeron (más fuerte y más
+  // piedras cuanto más grande).
+  collapse(dur: number, cells: number): void {
+    if (!this.ready) return
+    const r = Math.random
+    const d = Math.max(0.35, Math.min(3, dur + 0.25))
+    const k = Math.max(0.35, Math.min(1.2, Math.sqrt(cells / 400)))
+    // la tierra que cede: crujido seco al empezar
+    this.noise({ dur: 0.18, type: 'bandpass', freq: 900, to: 300, q: 1.2, gain: 0.3 * k })
+    this.tone({ freq: 90, to: 40, dur: 0.25, type: 'sine', gain: 0.4 * k })
+    // rumor: tramos solapados de ruido grave con rampa de entrada y de salida
+    const step = 0.2
+    for (let t = 0; t < d; t += step) {
+      const fade = Math.min(1, (d - t) / 0.35, (t + step) / 0.25)
+      this.noise({ dur: 0.42, type: 'lowpass', freq: 220 + r() * 120, to: 90, gain: 0.38 * k * fade, attack: 0.08, delay: t })
+      this.noise({ dur: 0.3, type: 'bandpass', freq: 500 + r() * 300, q: 0.9, gain: 0.08 * k * fade, attack: 0.06, delay: t + 0.05 })
+    }
+    // piedras y terrones que golpean: más cuanto más grande
+    const n = Math.round(d * (6 + 10 * k))
+    for (let i = 0; i < n; i++) {
+      const at = r() * d
+      if (r() < 0.55) this.noise({ dur: 0.02 + r() * 0.03, type: 'bandpass', freq: 1400 + r() * 2200, q: 3, gain: (0.07 + r() * 0.08) * k, delay: at })
+      else this.noise({ dur: 0.05 + r() * 0.04, type: 'lowpass', freq: 450 + r() * 350, gain: (0.12 + r() * 0.1) * k, delay: at })
+    }
+    // golpe sordo al asentarse
+    this.tone({ freq: 70, to: 36, dur: 0.35, type: 'sine', gain: 0.45 * k, delay: d - 0.2 })
+    this.noise({ dur: 0.4, type: 'lowpass', freq: 300, to: 80, gain: 0.3 * k, delay: d - 0.2 })
+  }
+
+  // Tanque aplastado por un derrumbe: chapa que se abolla bajo el peso.
+  crush(): void {
+    if (!this.ready) return
+    this.tone({ freq: 130, to: 50, dur: 0.25, type: 'sine', gain: 0.5 })
+    this.noise({ dur: 0.12, type: 'bandpass', freq: 1300, to: 500, q: 1.3, gain: 0.3 })
+    this.tone({ freq: 300, to: 220, dur: 0.2, type: 'square', gain: 0.04, delay: 0.02 })
+  }
+
+  // Globo "!" (v2.4): pitido corto de atención, más suave que el aviso del borde del abismo.
+  alert(): void {
+    if (!this.ready) return
+    this.tone({ freq: 1320, dur: 0.06, type: 'square', gain: 0.035 })
+    this.tone({ freq: 1760, dur: 0.08, type: 'square', gain: 0.03, delay: 0.07 })
+  }
+
   // Cartel de turno en hot-seat: corneta corta.
   banner(): void {
     if (!this.ready) return
@@ -647,20 +697,37 @@ export class Sfx {
     this.windFilter = filter
   }
 
+  // ---------- cámara lenta (v2.4) ----------
+
+  // Escala de tiempo de la partida (1 normal, < 1 cámara lenta). Los sonidos que arrancan con escala < 1
+  // se estiran (duraciones, retardos y ataques divididos por la escala) y suenan más graves (frecuencias
+  // y velocidad del ruido × pitchFor); los que ya están sonando se reprograman desde ahora con la escala
+  // nueva, así el silbido de una caída dura lo mismo que la caída. Al volver a 1, todo vuelve a la normalidad.
+  setTimeScale(scale: number): void {
+    const s = Math.max(0.05, Math.min(1, Number.isFinite(scale) ? scale : 1))
+    if (Math.abs(s - this.scale) < 1e-4) return
+    this.scale = s
+    const ctx = this.ctx
+    if (!ctx) return
+    const now = ctx.currentTime
+    this.voices = this.voices.filter((v) => this.realAt(v, v.end) > now)
+    for (const v of this.voices) this.retime(v, now)
+  }
+
   private tone(o: { freq: number; to?: number; dur: number; type: OscillatorType; gain: number; delay?: number }): void {
-    const ctx = this.ac()
-    const t0 = ctx.currentTime + (o.delay ?? 0)
-    const osc = ctx.createOscillator()
-    const amp = ctx.createGain()
-    osc.type = o.type
-    osc.frequency.setValueAtTime(o.freq, t0)
-    if (o.to) osc.frequency.exponentialRampToValueAtTime(Math.max(1, o.to), t0 + o.dur)
-    amp.gain.setValueAtTime(0.0001, t0)
-    amp.gain.exponentialRampToValueAtTime(o.gain, t0 + 0.005)
-    amp.gain.exponentialRampToValueAtTime(0.0001, t0 + o.dur)
-    osc.connect(amp).connect(this.out())
-    osc.start(t0)
-    osc.stop(t0 + o.dur + 0.02)
+    this.spawn({
+      kind: 'tone',
+      wave: o.type,
+      freq: o.freq,
+      to: o.to ? Math.max(1, o.to) : undefined,
+      dur: o.dur,
+      gain: o.gain,
+      attack: 0.005,
+      decayEnd: o.dur,
+      delay: o.delay ?? 0,
+      end: (o.delay ?? 0) + o.dur + 0.02,
+      minFreq: 1,
+    })
   }
 
   private noise(o: {
@@ -673,22 +740,181 @@ export class Sfx {
     attack?: number
     delay?: number
   }): void {
-    const ctx = this.ac()
-    const t0 = ctx.currentTime + (o.delay ?? 0)
-    const src = ctx.createBufferSource()
-    src.buffer = this.noiseBuffer()
-    const filter = ctx.createBiquadFilter()
-    filter.type = o.type
-    filter.frequency.setValueAtTime(o.freq, t0)
-    if (o.to) filter.frequency.exponentialRampToValueAtTime(Math.max(20, o.to), t0 + o.dur)
-    if (o.q) filter.Q.value = o.q
-    const amp = ctx.createGain()
     const attack = o.attack ?? 0.004
-    amp.gain.setValueAtTime(0.0001, t0)
-    amp.gain.exponentialRampToValueAtTime(o.gain, t0 + attack)
-    amp.gain.exponentialRampToValueAtTime(0.0001, t0 + Math.max(attack + 0.01, o.dur))
-    src.connect(filter).connect(amp).connect(this.out())
-    src.start(t0, Math.random() * 1.5)
-    src.stop(t0 + o.dur + 0.05)
+    this.spawn({
+      kind: 'noise',
+      filterType: o.type,
+      q: o.q,
+      freq: o.freq,
+      to: o.to ? Math.max(20, o.to) : undefined,
+      dur: o.dur,
+      gain: o.gain,
+      attack,
+      decayEnd: Math.max(attack + 0.01, o.dur),
+      delay: o.delay ?? 0,
+      end: (o.delay ?? 0) + o.dur + 0.05,
+      minFreq: 20,
+      offset: Math.random() * 1.5,
+    })
   }
+
+  // Crea una voz con la escala actual y la arranca.
+  private spawn(d: VoiceDesc): void {
+    const ctx = this.ac()
+    const now = ctx.currentTime
+    // limpieza de las que ya terminaron (la lista solo hace falta para reprogramarlas)
+    if (this.voices.length > 64) this.voices = this.voices.filter((v) => this.realAt(v, v.end) > now)
+    const v: Voice = { ...d, t0: now, u0: 0, rate: this.scale, pitch: pitchFor(this.scale), nodes: null, startAt: 0 }
+    this.build(v, now)
+    this.voices.push(v)
+  }
+
+  // Momento real (del contexto) del tiempo local u de la voz.
+  private realAt(v: Voice, u: number): number {
+    return v.t0 + (u - v.u0) / v.rate
+  }
+
+  // Arma los nodos de la voz y programa todo desde su tiempo local u0 (en el instante real t0).
+  private build(v: Voice, now: number): void {
+    const ctx = this.ac()
+    let src: OscillatorNode | AudioBufferSourceNode
+    let freqParam: AudioParam
+    let filter: BiquadFilterNode | null = null
+    if (v.kind === 'tone') {
+      const osc = ctx.createOscillator()
+      osc.type = v.wave ?? 'sine'
+      src = osc
+      freqParam = osc.frequency
+    } else {
+      const b = ctx.createBufferSource()
+      b.buffer = this.noiseBuffer()
+      // en bucle: los ruidos largos (nuke, flujos) o estirados por la cámara lenta pasan los 2 s del buffer
+      b.loop = true
+      filter = ctx.createBiquadFilter()
+      filter.type = v.filterType ?? 'lowpass'
+      if (v.q) filter.Q.value = v.q
+      src = b
+      freqParam = filter.frequency
+    }
+    const amp = ctx.createGain()
+    if (filter) src.connect(filter).connect(amp).connect(this.out())
+    else src.connect(amp).connect(this.out())
+    v.nodes = { src, freqParam, amp }
+    this.program(v)
+    // las voces con retardo arrancan recién cuando les toca (con la escala de ahora)
+    v.startAt = Math.max(now, this.realAt(v, Math.max(v.u0, v.delay)))
+    if (v.kind === 'noise') {
+      const offset = ((v.offset ?? 0) + Math.max(0, v.u0 - v.delay) * v.pitch) % 1.9
+      ;(src as AudioBufferSourceNode).start(v.startAt, offset)
+    } else src.start(v.startAt)
+    src.stop(Math.max(v.startAt + 0.01, this.realAt(v, v.end)))
+  }
+
+  // Cambio de escala con la voz sonando (o esperando su retardo): calcula su tiempo local ahora y la
+  // reprograma con la escala nueva. Si todavía no arrancó, se rearma (el start ya pedido no se puede mover).
+  private retime(v: Voice, now: number): void {
+    const u = Math.max(0, v.u0 + (now - v.t0) * v.rate)
+    v.t0 = now
+    v.u0 = u
+    v.rate = this.scale
+    v.pitch = pitchFor(this.scale)
+    const n = v.nodes
+    if (!n) return
+    if (v.startAt > now + 0.002) {
+      try {
+        n.src.stop(now)
+      } catch {
+        // ya estaba parada
+      }
+      n.amp.disconnect()
+      this.build(v, now)
+      return
+    }
+    this.program(v)
+    try {
+      n.src.stop(Math.max(now + 0.01, this.realAt(v, v.end)))
+    } catch {
+      // ya estaba parada
+    }
+  }
+
+  // Programa frecuencia y volumen desde el tiempo local u0 (instante t0) hasta el final, con la escala y
+  // el tono de la voz. Los valores en u0 salen de las mismas curvas exponenciales que las rampas.
+  private program(v: Voice): void {
+    const n = v.nodes
+    if (!n) return
+    const t0 = v.t0
+    const u = v.u0
+    const at = (uu: number): number => Math.max(t0, this.realAt(v, uu))
+    const p = v.pitch
+    // frecuencia (del oscilador o del filtro del ruido)
+    const f = n.freqParam
+    f.cancelScheduledValues(t0)
+    const k = clamp01((u - v.delay) / v.dur)
+    const fNow = v.to ? v.freq * Math.pow(v.to / v.freq, k) : v.freq
+    f.setValueAtTime(Math.max(v.minFreq, fNow * p), t0)
+    if (v.to && u < v.delay + v.dur) {
+      if (u < v.delay) f.setValueAtTime(Math.max(v.minFreq, v.freq * p), at(v.delay))
+      f.exponentialRampToValueAtTime(Math.max(v.minFreq, v.to * p), at(v.delay + v.dur))
+    }
+    if (v.kind === 'noise') {
+      const rate = (n.src as AudioBufferSourceNode).playbackRate
+      rate.cancelScheduledValues(t0)
+      rate.setValueAtTime(p, t0)
+    }
+    // volumen: 0.0001 hasta el retardo, sube en attack y baja hasta decayEnd
+    const g = n.amp.gain
+    g.cancelScheduledValues(t0)
+    const lo = 0.0001
+    const a0 = v.delay
+    const a1 = v.delay + v.attack
+    const a2 = v.delay + v.decayEnd
+    let gNow: number
+    if (u <= a0 || u >= a2) gNow = lo
+    else if (u < a1) gNow = lo * Math.pow(v.gain / lo, (u - a0) / v.attack)
+    else gNow = v.gain * Math.pow(lo / v.gain, (u - a1) / Math.max(1e-4, a2 - a1))
+    g.setValueAtTime(gNow, t0)
+    if (u < a0) g.setValueAtTime(lo, at(a0))
+    if (u < a1) g.exponentialRampToValueAtTime(v.gain, at(a1))
+    if (u < a2) g.exponentialRampToValueAtTime(lo, at(a2))
+  }
+}
+
+// Descripción de una voz en segundos de sonido (sin escalar), desde su creación (u = 0).
+interface VoiceDesc {
+  kind: 'tone' | 'noise'
+  wave?: OscillatorType
+  filterType?: BiquadFilterType
+  q?: number
+  freq: number
+  to?: number
+  dur: number
+  gain: number
+  attack: number
+  decayEnd: number // fin de la bajada del volumen (contado desde el retardo)
+  delay: number
+  end: number // parada (con el retardo)
+  minFreq: number
+  offset?: number // ruido: desde dónde del buffer arranca
+}
+
+// Una voz: su reloj (tiempo local u0 en el instante real t0, que avanza a rate por segundo real), el tono
+// (pitch), cuándo arranca y los nodos.
+interface Voice extends VoiceDesc {
+  t0: number
+  u0: number
+  rate: number
+  pitch: number
+  startAt: number
+  nodes: { src: OscillatorNode | AudioBufferSourceNode; freqParam: AudioParam; amp: GainNode } | null
+}
+
+// Tono en cámara lenta: más grave a medida que se frena (0,3 → ×0,55), sin bajar tanto como la escala
+// completa (que lo volvería irreconocible).
+function pitchFor(scale: number): number {
+  return scale >= 1 ? 1 : Math.sqrt(scale)
+}
+
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v
 }

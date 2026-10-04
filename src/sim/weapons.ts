@@ -1,6 +1,6 @@
 // Resolución de un disparo según el arma: racimo, napalm, excavadora, rodadora y el resto.
 import { PATH_DT, fly, type FlightResult } from './ballistics'
-import { blastFor, hurt, resolveBlast, submerged } from './physics'
+import { blastFor, hurt, resolveBlast, submerged, type Blast } from './physics'
 import { columnGround, columnTop, deform, isSolid, liquidAt, markDirty } from './terrain'
 import {
   AIR,
@@ -62,9 +62,15 @@ export function resolveShot(state: GameState, shooter: Player, weapon: WeaponId)
   const { x, y, tankId } = flight.impact
   if (w.rolls && flight.impact.kind === 'terrain') return roll(state, shooter, weapon, flight, flights)
   const blast = blastFor(weapon, x, y, flight.time, tankId, flight.vel.x)
-  if (w.terrain === 'dig') return { flights, events: resolveBlast(state, blast, (ev) => tunnel(state, flight, ev)) }
-  if (w.burn) return { flights, events: resolveBlast(state, blast, (ev) => napalm(state, x, y, flight.time, w.burn!, ev)) }
-  return { flights, events: resolveBlast(state, blast) }
+  const after = w.terrain === 'dig' ? (ev: GameEvent[]) => tunnel(state, flight, ev) : w.burn ? (ev: GameEvent[]) => napalm(state, x, y, flight.time, w.burn!, ev) : undefined
+  const events = resolveBlast(state, blast, after)
+  markWater(flights[0], blast)
+  return { flights, events }
+}
+
+// v2.4: Impact.water: el centro de la explosión de ese vuelo quedó sumergido (lo decide resolveBlast).
+function markWater(f: Flight, b: Blast): void {
+  if (b.water) f.impact = { ...f.impact, water: true }
 }
 
 // ---------- racimo ----------
@@ -75,7 +81,9 @@ function cluster(state: GameState, shooter: Player, weapon: WeaponId, main: Flig
   if (!main.apex) {
     if (main.impact.kind === 'out' || main.impact.kind === 'lava') return { flights, events: [] }
     const b = blastFor(weapon, main.impact.x, main.impact.y, main.time, main.impact.tankId, main.vel.x)
-    return { flights, events: resolveBlast(state, b) }
+    const events = resolveBlast(state, b)
+    markWater(flights[0], b)
+    return { flights, events }
   }
   const n = w.split ?? 1
   const origin: Vec2 = { x: main.impact.x, y: main.impact.y }
@@ -104,7 +112,9 @@ function cluster(state: GameState, shooter: Player, weapon: WeaponId, main: Flig
     flights.push(toFlight(f, main.time))
     if (f.impact.kind === 'out' || f.impact.kind === 'lava') continue
     const tankId = f.impact.tankId !== undefined && state.players[f.impact.tankId]?.alive ? f.impact.tankId : undefined
-    events.push(...resolveBlast(state, blastFor(weapon, f.impact.x, f.impact.y, main.time + f.time, tankId, f.vel.x)))
+    const b = blastFor(weapon, f.impact.x, f.impact.y, main.time + f.time, tankId, f.vel.x)
+    events.push(...resolveBlast(state, b))
+    markWater(flights[flights.length - 1], b)
   }
   return { flights, events }
 }
@@ -158,7 +168,12 @@ function napalm(state: GameState, ix: number, iy: number, t0: number, seconds: n
     const wy = liquidAt(t, cx, iy) === WATER ? iy : liquidAt(t, cx, iy - 1) === WATER ? iy - 1 : -1
     start = wy >= 0 ? waterTop(t, cx, wy) : surface(cx, Math.floor(iy) - 8)
   } else start = surface(cx, Math.floor(iy) - 8)
-  if (start >= t.h || liquidAt(t, cx, start) === LAVA) return
+  // v2.4: debajo de la superficie de la lava (la banda de muerte súbita, o lava de la grilla en la celda o
+  // justo encima) el napalm no quema ni corre: la lava ya lo cubre, como al proyectil que se derrite al
+  // tocarla. El fuego que corre tampoco baja a la banda ni la atraviesa.
+  const band = state.lava ?? Infinity
+  const underLava = (x: number, y: number) => y >= band || liquidAt(t, x, y) === LAVA || liquidAt(t, x, y - 1) === LAVA
+  if (start >= t.h || underLava(cx, start)) return
   // burning: fuego sobre sólido; crust: columnas de agua cuya superficie se vuelve piedra
   const burning: Vec2[] = []
   const crust: { x: number; y: number; n: number }[] = []
@@ -173,7 +188,7 @@ function napalm(state: GameState, ix: number, iy: number, t0: number, seconds: n
     for (let x = cx + dir; budget > 0 && x >= 0 && x < t.w; x += dir) {
       if (isSolid(t, x, y - 6)) break // pared: el fuego no sube
       const g = surface(x, y - 5)
-      if (g >= t.h || liquidAt(t, x, g) === LAVA) break
+      if (g >= t.h || underLava(x, g)) break
       budget -= 1 + Math.max(0, y - g) // cuesta arriba se agota antes; cuesta abajo corre
       y = g
       mark(x, y)
@@ -207,7 +222,7 @@ function napalm(state: GameState, ix: number, iy: number, t0: number, seconds: n
     const p = burning[i]
     markDirty(t, p.x - r - 1, p.y - r - 1, p.x + r + 1, p.y + r + 1) // v4: lo quemado puede dejar correr un líquido
     for (let y = p.y - r; y <= p.y + r; y++) {
-      if (y < 0 || y >= t.h) continue
+      if (y < 0 || y >= t.h || y >= band) continue // v2.4: bajo la banda de lava no quema
       for (let x = p.x - r; x <= p.x + r; x++) {
         if (x < 0 || x >= t.w || (x - p.x) ** 2 + (y - p.y) ** 2 > r * r) continue
         const idx = y * t.w + x
@@ -335,5 +350,8 @@ function roll(state: GameState, shooter: Player, weapon: WeaponId, flight: Fligh
   path.push({ x, y })
   push(hit ? { kind: 'tank', x, y, tankId: hit.id } : { kind: 'terrain', x, y })
   const endT = flight.time + (path.length - 1) * PATH_DT
-  return { flights, events: resolveBlast(state, blastFor(weapon, x, y, endT, hit?.id, vx)) }
+  const b = blastFor(weapon, x, y, endT, hit?.id, vx)
+  const events = resolveBlast(state, b)
+  markWater(flights[flights.length - 1], b)
+  return { flights, events }
 }

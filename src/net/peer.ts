@@ -22,6 +22,10 @@ const TURN: RTCIceServer = env.VITE_TURN_URLS
       credential: 'openrelayproject',
     }
 
+// QA (v2.4): ?relay=1 obliga a pasar por el relay TURN, como entre dos redes que no se ven directo
+// (NAT estricto, datos móviles). Sirve para probar el TURN desde una sola PC.
+const RELAY_ONLY = typeof location !== 'undefined' && new URLSearchParams(location.search).get('relay') === '1'
+
 const OPTIONS: Partial<PeerOptions> = {
   debug: 0,
   config: {
@@ -29,6 +33,7 @@ const OPTIONS: Partial<PeerOptions> = {
       { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
       TURN,
     ],
+    ...(RELAY_ONLY ? { iceTransportPolicy: 'relay' as RTCIceTransportPolicy } : {}),
   },
 }
 const CONNECT_TIMEOUT = 12000
