@@ -90,6 +90,8 @@ const NEAR_W = 0.15
 const NEAR_RANGE = 600
 const STRONG_W = 0.3
 const LEADER_W = 0.1
+const DUTY_W = 0.15
+const EDGE_W = 0.12
 const KILL_BONUS = 40 // en puntos de daño (· 10 en el puntaje; simulate suma lo mismo por kill)
 function priorities(actor: Player, targets: Player[]): Map<number, number> {
   const out = new Map<number, number>()
@@ -101,6 +103,14 @@ function priorities(actor: Player, targets: Player[]): Map<number, number> {
   const leaders = targets.filter((t) => t.roundsWon === topWins).length
   for (const t of targets) {
     let w = 1 + NEAR_W * Math.max(0, 1 - Math.abs(t.x - actor.x) / NEAR_RANGE)
+    // v2.3: si la IA es el rival más cercano de t (nadie lo tiene más a mano), le toca a ella: +DUTY_W.
+    // Sin esto, con 6 u 8 tanques los de las puntas tenían un solo vecino que les tirara mientras los del
+    // medio recibían de los dos lados: la punta izquierda ganaba ~37% de las rondas de 6 en Mediano.
+    const mine = Math.abs(t.x - actor.x)
+    if (targets.every((o) => o === t || Math.abs(o.x - t.x) >= mine)) w += DUTY_W
+    // v2.3: el de una punta (ningún tanque vivo más allá de él, contando a la IA) tiene la espalda cubierta
+    // por el borde del mapa: pesa EDGE_W más
+    if (actor.x > t.x ? targets.every((o) => o.x >= t.x) : targets.every((o) => o.x <= t.x)) w += EDGE_W
     w += (STRONG_W * Math.min(PLAYER_HP, t.hp + t.shield)) / PLAYER_HP
     if (topWins > 0 && leaders === 1 && t.roundsWon === topWins) w += LEADER_W
     out.set(t.id, w)
@@ -220,8 +230,24 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
     }
   }
 
+  // v2.3: sin tiro desde ningún lado y con la lava cortándole el camino hacia el rival más cercano:
+  // camina hasta la orilla y tira Tierra a la lava de adelante, que se vuelve piedra (un tramo de puente
+  // por turno); con el puente ya tendido (sin lava adelante), lo cruza. No en la fácil.
+  if (best.score < 1000 && difficulty !== 'easy') {
+    const b = bridgePlan(state, targets)
+    if (b?.shot) {
+      aiStats.bridges++
+      best = { angle: b.shot.angle, power: b.shot.power, weapon: 'dirt', score: 0 }
+      move = b.move
+    } else if (b) {
+      aiStats.crossings++
+      best = search(b.state, weapons, false).best
+      move = b.move
+    }
+  }
+
   // tapado y sin tiro: excavadora hacia el rival más cercano
-  if (best.score < 1000 && move === 0 && here.blocked > 0.5 && actor.ammo.digger > 0) {
+  if (best.score < 1000 && best.weapon !== 'dirt' && move === 0 && here.blocked > 0.5 && actor.ammo.digger > 0) {
     const t = nearest(actor, targets)
     return { angle: t.x > actor.x ? 30 : 150, power: 45, weapon: 'digger', ...extra }
   }
@@ -283,6 +309,80 @@ function walk(state: GameState, dx: number): { state: GameState; dx: number } | 
   const n = Math.min(limit, states.length - 1)
   if (n < 4) return null
   return { state: states[n], dx: dir * n }
+}
+
+// v2.3: medición para sim-check (no cambia la simulación): turnos en que la IA tendió un tramo de puente y
+// turnos en que caminó por un puente ya tendido.
+export const aiStats = { bridges: 0, crossings: 0 }
+
+// v2.3: puente de Tierra sobre la lava. La Tierra no se derrite (lavaSolid) y lo que construye sobre la
+// lava es piedra: cada tiro deja un montículo de piedra de ~2 · radio de ancho por el que se puede pasar.
+// Si entre la IA y su rival más cercano hay lava de la grilla a menos de BRIDGE_SCAN px (después de
+// caminar hasta la orilla con el combustible del turno), busca el tiro de Tierra que cae BRIDGE_AHEAD px
+// adentro de la lava. null si no hay lava en el camino, no le queda Tierra o ningún tiro cae a menos de
+// BRIDGE_TOL px de ese punto (o caería encima de ella misma).
+const BRIDGE_SCAN = 320
+const BRIDGE_AHEAD = 6
+const BRIDGE_TOL = 10
+const BRIDGE_CLEAR = TANK_HALF_W + WEAPONS.dirt.radius / 2 + 6 // más cerca, la Tierra (daña a medio radio) la lastima
+function bridgePlan(state: GameState, targets: Player[]): { shot?: { angle: number; power: number }; move: number; state: GameState } | null {
+  const actor = state.players[state.current]
+  if (actor.ammo.dirt <= 0 || targets.length === 0) return null
+  const goal = nearest(actor, targets)
+  const dir: -1 | 1 = goal.x > actor.x ? 1 : -1
+  const t = state.terrain
+  // atajo: sin lava entre los dos (arriba de todo en alguna columna), nada que hacer
+  let any = false
+  for (let x = Math.round(actor.x); x !== Math.round(goal.x) && !any; x += dir) {
+    const top = columnTop(t, x)
+    any = top < t.h && t.front[top * t.w + x] === LAVA
+  }
+  if (!any) return null
+  // hasta la orilla con el combustible del turno (walk frena antes de meterse en la lava)
+  let moved = actor.fuel > 0 ? walk(state, dir * Math.ceil(actor.fuel)) : null
+  let s = moved?.state ?? state
+  let p = s.players[s.current]
+  // la primera columna con lava arriba de todo (desde la altura del tanque) desde su centro hacia adelante
+  // (la que le queda bajo las orugas también: el último tramo hasta la orilla)
+  let lx = -1
+  for (let d = 0; d <= BRIDGE_SCAN && lx < 0; d++) {
+    const x = Math.round(p.x + dir * d)
+    if (x < 0 || x >= t.w || (x - goal.x) * dir >= 0) break
+    const top = columnTop(t, x, Math.max(0, p.y - 2 * TANK_H))
+    if (top < t.h && t.front[top * t.w + x] === LAVA) lx = x
+  }
+  // sin lava adelante: el puente ya llega (o la cruzó); solo camina
+  if (lx < 0) return moved ? { move: moved.dx, state: s } : null
+  // el punto: BRIDGE_AHEAD px adentro de la lava, a ras de su superficie (el montículo empalma con la
+  // orilla o con el tramo anterior). Si quedó más cerca que BRIDGE_CLEAR, camina solo hasta esa distancia.
+  const ax = lx + dir * BRIDGE_AHEAD
+  const ay = columnTop(t, lx, Math.max(0, p.y - 2 * TANK_H))
+  if (Math.abs(ax - p.x) < BRIDGE_CLEAR) {
+    const dx = Math.round(ax - dir * BRIDGE_CLEAR - actor.x)
+    moved = Math.abs(dx) >= 4 && actor.fuel > 0 ? walk(state, dx) : null
+    s = moved?.state ?? state
+    p = s.players[s.current]
+    if (Math.abs(ax - p.x) < BRIDGE_CLEAR) return null
+  }
+  const sky = skylineOf(s.terrain, s.players, s.props)
+  let best = { angle: 0, power: 0, d: Infinity }
+  const tryShot = (angle: number, power: number) => {
+    const f = fly({ skyline: sky, terrain: s.terrain, players: s.players, props: s.props, ownerId: p.id, angle, power, wind: s.wind, lava: s.lava ?? undefined, lavaSolid: true })
+    if (f.impact.kind !== 'terrain') return
+    const d = Math.hypot(f.impact.x - ax, f.impact.y - ay)
+    // que no le caiga encima (la Tierra daña a medio radio)
+    if (Math.abs(f.impact.x - p.x) < BRIDGE_CLEAR) return
+    if (d < best.d) best = { angle, power, d }
+  }
+  const k = mapScale(state)
+  const a0 = dir > 0 ? 6 : 96
+  for (let angle = a0; angle <= a0 + 78; angle += 4) for (let power = k > 1 ? 10 : 20; power <= 100; power += 4) tryShot(angle, power)
+  if (best.d < 60) {
+    const { angle: a1, power: p1 } = best
+    for (let a = -3; a <= 3; a += 1) for (let pw = -3; pw <= 3; pw += 0.5) tryShot(clamp(a1 + a, 0, 180), clamp(p1 + pw, 10, 100))
+  }
+  if (best.d > BRIDGE_TOL) return null
+  return { shot: { angle: best.angle, power: best.power }, move: moved?.dx ?? 0, state: s }
 }
 
 function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
@@ -527,7 +627,7 @@ function simulate(state: GameState, c: Candidate, prio?: Map<number, number>): n
   const actor = s.players[s.current]
   actor.angle = c.angle
   actor.power = c.power
-  const before = s.players.map((p) => ({ hp: p.hp, alive: p.alive, x: p.x }))
+  const before = s.players.map((p) => ({ hp: p.hp, alive: p.alive, x: p.x, y: p.y }))
   const { events } = resolveShot(s, actor, c.weapon)
   // v4: si el tiro tocó cerca de lava, la deja correr (como fire) y el rival que quede en ella cuenta
   // como golpeado por lo que la lava le va a quemar. El agua no daña: no hace falta simularla.
@@ -558,8 +658,8 @@ function simulate(state: GameState, c: Candidate, prio?: Map<number, number>): n
   let drift = 0
   for (const p of s.players) {
     if (!p.alive || !before[p.id].alive || p.x === before[p.id].x) continue
-    const d0 = hazardDist(mask, before[p.id].x)
-    const d1 = hazardDist(mask, p.x)
+    const d0 = hazardDist(mask, before[p.id].x, before[p.id].y)
+    const d1 = hazardDist(mask, p.x, p.y)
     if (d1 >= d0) continue
     drift += p.id === actor.id ? -2 * (d0 - d1) * HAZARD_PULL : (d0 - d1) * HAZARD_PULL
   }
@@ -569,30 +669,36 @@ function simulate(state: GameState, c: Candidate, prio?: Map<number, number>): n
 
 // Pulido v2: columnas peligrosas (abismo o lava arriba de todo) por grilla. Se calcula una vez por grilla
 // real (la búsqueda la comparte; la grilla de trabajo de simulate no se usa para esto).
+// v2.3: por columna, la fila desde la que es peligrosa: lava arriba de todo, 0 (siempre); abismo, la fila
+// desde la que no hay nada hasta el fondo (la boca es peligrosa para un tanque con el piso por debajo de
+// eso; una cornisa o un puente bajo el tanque, no); el resto, nunca (HAZARD_NONE).
 const HAZARD_RANGE = 160
 const HAZARD_PULL = 3 // puntos de puntaje por pixel que el empuje acerca a un rival al peligro
-const hazardCache = new WeakMap<Terrain, Uint8Array>()
-function hazardMask(t: Terrain): Uint8Array {
+const HAZARD_NONE = 0x7fff
+const hazardCache = new WeakMap<Terrain, Int16Array>()
+function hazardMask(t: Terrain): Int16Array {
   const cached = hazardCache.get(t)
   if (cached) return cached
-  const m = new Uint8Array(t.w)
+  const m = new Int16Array(t.w).fill(HAZARD_NONE)
   for (let x = 0; x < t.w; x++) {
-    if (t.pits?.[x]) m[x] = 1
-    else {
-      const top = columnTop(t, x)
-      if (top < t.h && t.front[top * t.w + x] === LAVA) m[x] = 1
+    const top = columnTop(t, x)
+    if (top < t.h && t.front[top * t.w + x] === LAVA) m[x] = 0
+    else if (t.pits?.[x]) {
+      let y = t.h
+      while (y > 0 && t.front[(y - 1) * t.w + x] === 0) y--
+      m[x] = y
     }
   }
   hazardCache.set(t, m)
   return m
 }
-// Distancia del borde de la caja del tanque en x al peligro más cercano (HAZARD_RANGE si no hay).
-function hazardDist(m: Uint8Array, x: number): number {
+// Distancia del borde de la caja del tanque con el piso en (x, y) al peligro más cercano (HAZARD_RANGE si no hay).
+function hazardDist(m: Int16Array, x: number, y: number): number {
   const cx = Math.round(x)
   for (let d = 0; d < HAZARD_RANGE; d++) {
     const a = cx - TANK_HALF_W - d
     const b = cx + TANK_HALF_W - 1 + d
-    if ((a >= 0 && m[a]) || (b < m.length && m[b])) return d
+    if ((a >= 0 && m[a] <= y) || (b < m.length && m[b] <= y)) return d
   }
   return HAZARD_RANGE
 }
@@ -657,7 +763,7 @@ function brinksOf(t: Terrain, targets: Player[]): { x: number; y: number }[] {
       for (let d = TANK_HALF_W; d <= TANK_HALF_W + BRINK_REACH && !hazard; d += 2) {
         const x = Math.round(p.x + side * d)
         if (x < 0 || x >= t.w) break
-        if (t.pits?.[x]) hazard = true
+        if (t.pits?.[x] && columnTop(t, x, Math.max(0, p.y - TANK_H)) >= t.h) hazard = true // v2.3: la boca, a su altura
         else {
           const top = columnTop(t, x, Math.max(0, p.y - TANK_H))
           if (top < t.h && t.front[top * t.w + x] === LAVA) hazard = true

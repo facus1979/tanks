@@ -51,6 +51,18 @@ export interface Generated {
   basins?: Basin[]
   // v3: los tramos del mapa en orden, ya espejados (para sim-check y herramientas de QA)
   segments?: Segment[]
+  // v2.3 (Mediano y Grande): columnas de la boca de cada abismo (donde se termina el piso a la altura de
+  // la superficie) y las cornisas y puentes generados, ya espejados
+  mouth?: Uint8Array
+  ledges?: LedgeInfo[]
+}
+
+// v2.3: una cornisa (costra fina sobre el vacío, columnas [x0, x1)) o un puente que cruza la boca.
+export interface LedgeInfo {
+  kind: 'cornice' | 'bridge'
+  x0: number
+  x1: number
+  thick: number // espesor de la costra o del puente
 }
 
 // v3: tipos de tramo de los mapas Mediano y Grande.
@@ -115,7 +127,7 @@ export const SPAWN_GAP_CROWD = 120
 // Medición (para sim-check; no afecta la generación): cuántos spawns salieron de cada nivel de la
 // búsqueda de spreadSpawns (0 = lugar bueno del tramo, 1-3 = columna que sirve a la separación buscada,
 // 4 = a 64 px, 5-6 = sin el chequeo estricto de piso, 7 = cualquier columna).
-export const spawnStats = { levels: [0, 0, 0, 0, 0, 0, 0, 0] }
+export const spawnStats = { levels: [0, 0, 0, 0, 0, 0, 0, 0], brinks: [0, 0, 0] }
 
 interface Tramo {
   terrain: Terrain // TRAMO_W × TRAMO_H, sin espejar
@@ -432,7 +444,7 @@ function pickSpawns(L: Layout, rng: Rng, count: number, industrial: boolean): nu
 // se mezclan en el resto.
 // ok: el lugar sirve para un tanque (lejos de abismos y cuencas, piso donde entra, sin estructuras).
 // loose: lo mínimo cuando no hay nada mejor (muchos jugadores): lejos de abismos y cuencas.
-function spreadSpawns(t: Terrain, slots: number[], rng: Rng, count: number, ok: (x: number) => boolean, loose: (x: number) => boolean): number[] {
+function spreadSpawns(t: Terrain, slots: number[], rng: Rng, count: number, ok: (x: number) => boolean, loose: (x: number) => boolean, brink: Set<number> = new Set()): number[] {
   const n = Math.max(1, count)
   const span = t.w / n
   const taken: number[] = []
@@ -447,7 +459,9 @@ function spreadSpawns(t: Terrain, slots: number[], rng: Rng, count: number, ok: 
     let level = 0
     for (const x of slots) {
       if (!away(x, gap) || Math.abs(x - ideal) > span * 0.34) continue
-      if (best < 0 || Math.abs(x - ideal) < Math.abs(best - ideal)) best = x
+      // v2.3: los lugares al borde de un abismo (brink) ganan dentro de la ventana: que haya tanques cerca del vacío
+      const cost = (q: number) => Math.abs(q - ideal) - (brink.has(q) ? span : 0)
+      if (best < 0 || cost(x) < cost(best)) best = x
     }
     // los de las puntas buscan primero de su lado (que los tanques cubran el ancho del mapa)
     const edge = (x: number) => (i === 0 ? x < span : i === n - 1 && n > 1 ? x > t.w - span : true)
@@ -710,8 +724,16 @@ const MIN_TAIL = 200
 const LAST_MAX = 340
 // Rampa de los costados de la meseta (la de v1).
 const MESA_SLOPE = 37
-// Distancia mínima entre el borde de un abismo y la caja de un tanque al nacer.
-export const SPAWN_PIT_GAP = 40
+// Distancia mínima entre el borde de un abismo y la caja de un tanque al nacer. v2.3: se mide hasta la
+// boca (donde se termina el piso; ver spawnOk) y baja de 40 a 14: un tanque puede nacer a un empujón
+// del vacío (el empuje llega a KNOCKBACK_MAX = 24 px; con 20 o más, las muertes por abismo no llegaban
+// a 1 de cada 20), sobre una cornisa o al pie de ella.
+export const SPAWN_PIT_GAP = 14
+// v2.3: sobre una cornisa (columnas de abismo con costra), el piso bajo la caja no puede variar más que
+// esto: el pad se aplana sin comerse la costra.
+export const CORNICE_SPAWN_FLAT = 3
+// v2.3: cuánto se aleja de la boca, como mucho, el lugar al borde de un abismo si el primero no sirve.
+const BRINK_SCAN = 30
 
 const isHole = (k: SegKind) => k === 'abyss' || k === 'lake' || k === 'lavapit'
 
@@ -875,6 +897,9 @@ function params(seg: Seg, biome: Biome, rng: Rng): void {
       p.a = x0 + Math.floor((w - pit) / 2) + rng.int(-6, 6)
       p.b = p.a + pit - 1
       p.seed = rng.int(1, 100000)
+      // v2.3: cornisas y puentes (ver ledgeParams). Salen de p.seed, sin sortear con el rng: el resto
+      // del mapa (y los mapas sin abismo) quedan iguales.
+      ledgeParams(seg, biome)
       break
     }
     case 'lake':
@@ -886,6 +911,47 @@ function params(seg: Seg, biome: Biome, rng: Rng): void {
       break
     }
   }
+}
+
+// v2.3: abismo que mata. Hasta v2.2 las paredes del abismo eran tierra hasta el fondo: el que pasaba el
+// borde quedaba enganchado en la pared y casi nadie caía. Ahora, en la mayoría de los abismos, uno o los
+// dos labios son una cornisa: una costra fina (CORNICE_CRUST px de tierra) que sobresale sobre el vacío,
+// con la pared socavada debajo (el abismo es más ancho abajo que en la boca). Un tanque parado en la
+// cornisa se sostiene, pero un tiro que rompe la costra o un empujón que lo pasa del borde lo tira al
+// vacío sin pared que lo frene. A veces, además, un puente fino cruza la boca (piedra en la jungla,
+// vigas en industrial, tierra en el bosque).
+// cornL / cornR: largo de la cornisa de cada lado (0 = labio común); crust: espesor de la costra;
+// bridge: 1 si hay puente; bridgeT: su espesor.
+export const CORNICE_LEN: [number, number] = [30, 56]
+export const CORNICE_CRUST: [number, number] = [6, 9]
+// Lo que baja el techo del socavón desde la punta de la cornisa hasta la pared (forma de arco).
+const CORNICE_ARCH = 28
+export const CORNICE_SPILL = 16
+// Labio sin cornisa: socavón de LIP_UNDERCUT px (la pared serpentea ±8 px por fila: con 18 o más, un
+// tanque que pasa el borde no encuentra pared debajo) con costra gruesa.
+export const LIP_UNDERCUT = 18
+export const LIP_CRUST = 20
+function ledgeParams(seg: Seg, biome: Biome): void {
+  const { p, x0, x1 } = seg
+  const roll = (k: number) => hash2(p.seed, k, 0x51ed)
+  // 20%: sin cornisa; 25% izquierda; 25% derecha; 30% las dos
+  const r = roll(1)
+  const left = r >= 0.2 && (r < 0.45 || r >= 0.7)
+  const right = r >= 0.45
+  // el socavón puede meterse hasta CORNICE_SPILL px bajo el tramo vecino (por debajo de su superficie): así
+  // la cornisa llega a ser más larga que un tanque (la pared serpentea hasta 8 px)
+  const len = (k: number, room: number) => Math.max(0, Math.min(Math.round(CORNICE_LEN[0] + roll(k) * (CORNICE_LEN[1] - CORNICE_LEN[0])), room + CORNICE_SPILL - 9))
+  p.cornL = left ? len(2, p.a - x0) : 0
+  p.cornR = right ? len(3, x1 - 1 - p.b) : 0
+  if (p.cornL < 16) p.cornL = 0
+  if (p.cornR < 16) p.cornR = 0
+  p.crust = Math.round(CORNICE_CRUST[0] + roll(4) * (CORNICE_CRUST[1] - CORNICE_CRUST[0]))
+  // el lado sin cornisa es un labio grueso, pero también socavado: la pared no sigue derecha hasta el
+  // fondo, así que el que pasa el borde cae al vacío en vez de quedar enganchado en la pared
+  p.lipL = p.cornL ? 0 : Math.min(LIP_UNDERCUT, Math.max(0, p.a - x0 - 9))
+  p.lipR = p.cornR ? 0 : Math.min(LIP_UNDERCUT, Math.max(0, x1 - 1 - p.b - 9))
+  p.bridge = roll(5) < (biome === 'jungle' ? 0.4 : 0.25) ? 1 : 0
+  p.bridgeT = biome === 'industrial' ? 4 : biome === 'jungle' ? 6 : 7
 }
 
 function smooth01(u: number): number {
@@ -967,9 +1033,14 @@ interface Build {
   surf: number[]
   specs: PropSpec[]
   slots: number[] // lugares buenos para un tanque
+  brinks: { x: number; dir: -1 | 1 }[] // v2.3: lugares al borde de cada abismo y hacia dónde alejarse si no sirven
   socks: number[] // lugares para la manga de viento
   pits: Uint8Array
   bowls: { kind: 'water' | 'lava'; b0: number; b1: number }[]
+  // v2.3: boca del abismo (columnas abiertas a la altura de la superficie: sin cornisa debajo del
+  // borde) y las cornisas y puentes que arma el tallado
+  mouth: Uint8Array
+  ledges: LedgeInfo[]
 }
 
 function chain(biome: Biome, rng: Rng, count: number, width: number, height: number): Generated {
@@ -982,7 +1053,7 @@ function chain(biome: Biome, rng: Rng, count: number, width: number, height: num
     for (let x = seg.x0; x < seg.x1; x++) surf[x] = Math.round(clampN(segSurface(seg, biome, x, noiseSeed), 100, height - 40))
   }
   for (let x = 0; x < width; x++) fillRect(t, x, surf[x], x, height - 1, DIRT)
-  const b: Build = { t, biome, rng, surf, specs: [], slots: [], socks: [], pits: new Uint8Array(width), bowls: [] }
+  const b: Build = { t, biome, rng, surf, specs: [], slots: [], socks: [], pits: new Uint8Array(width), bowls: [], mouth: new Uint8Array(width), ledges: [], brinks: [] }
 
   for (const seg of segs) solids(b, seg)
   t.back.set(t.front) // la pared de fondo es lo que había
@@ -1003,11 +1074,26 @@ function chain(biome: Biome, rng: Rng, count: number, width: number, height: num
   }
 
   // spawns: lejos de abismos y cuencas, en piso donde entra el tanque
-  const ok = (x: number) => spawnOk(t, x, basins, surf)
+  const ok = (x: number) => spawnOk(t, b.mouth, x, basins, surf)
   const slots = b.slots.map((x) => Math.round(x)).filter((x) => x >= 40 && x <= width - 40 && ok(x))
-  const spawnXs = spreadSpawns(t, slots, rng, count, ok, (x) => spawnOk(t, x, basins, null))
+  // v2.3: al borde de cada abismo, el primer lugar que sirva alejándose de la boca (hasta BRINK_SCAN px):
+  // spreadSpawns los prefiere, así casi siempre hay alguien a un empujón del vacío
+  const brinks = new Set<number>()
+  for (const q of b.brinks) {
+    for (let k = 0; k <= BRINK_SCAN; k += 2) {
+      const x = q.x + q.dir * k
+      if (x < 40 || x > width - 40 || !ok(x)) continue
+      brinks.add(x)
+      slots.push(x)
+      break
+    }
+  }
+  const spawnXs = spreadSpawns(t, slots, rng, count, ok, (x) => spawnOk(t, b.mouth, x, basins, null), brinks)
+  spawnStats.brinks[0] += b.brinks.length
+  spawnStats.brinks[1] += brinks.size
+  spawnStats.brinks[2] += spawnXs.filter((x) => brinks.has(x)).length
   const targets = spawnXs.map((x) => flatten(t, x))
-  ramps(t, spawnXs, targets, { stop: (x) => nearPit(t, x, 3) || basins.some((q) => x >= q.x0 - 2 && x < q.x1 + 2), long: true })
+  ramps(t, spawnXs, targets, { stop: (x) => nearCols(b.mouth, x, 3) || basins.some((q) => x >= q.x0 - 2 && x < q.x1 + 2), long: true })
   // v4: las cuencas se llenan con su líquido hasta level y el flujo asienta lo que haya quedado suelto
   fillBasins(t, basins)
 
@@ -1022,6 +1108,7 @@ function chain(biome: Biome, rng: Rng, count: number, width: number, height: num
   if (mirror) {
     mirrorTerrain(t)
     t.pits.reverse()
+    b.mouth.reverse()
   }
   const flipX = (x0: number, x1: number): [number, number] => (mirror ? [width - x1, width - x0] : [x0, x1])
   const spawns = spawnXs.map((x) => (mirror ? width - x : x))
@@ -1037,6 +1124,11 @@ function chain(biome: Biome, rng: Rng, count: number, width: number, height: num
     basins: basins.map((q) => {
       const [x0, x1] = flipX(q.x0, q.x1)
       return { ...q, x0, x1 }
+    }),
+    mouth: b.mouth,
+    ledges: b.ledges.map((l) => {
+      const [x0, x1] = flipX(l.x0, l.x1)
+      return { ...l, x0, x1 }
     }),
     segments: segs.map((s) => {
       const [x0, x1] = flipX(s.x0, s.x1)
@@ -1091,6 +1183,12 @@ function fillBasins(t: Terrain, basins: Basin[]): void {
   flowLiquids(t, { seed: { x0, y0, x1, y1: t.h - 1 }, record: false })
 }
 
+// Alguna columna marcada en cols a menos de d px de x.
+function nearCols(cols: Uint8Array, x: number, d: number): boolean {
+  for (let i = Math.max(0, x - d); i <= Math.min(cols.length - 1, x + d); i++) if (cols[i]) return true
+  return false
+}
+
 // La columna x tiene un abismo a menos de d px.
 function nearPit(t: Terrain, x: number, d: number): boolean {
   const pits = t.pits
@@ -1104,9 +1202,24 @@ function nearPit(t: Terrain, x: number, d: number): boolean {
 // mapa, antes de las rampas), además: piso a ras de la superficie y libre de estructuras
 // (openGround) y donde entra, no en la cima filosa de una montaña (el piso no varía más de 26 px en
 // ±24 px). Sin strict, lo mínimo: lejos de abismos y cuencas y con piso.
-function spawnOk(t: Terrain, x: number, basins: Basin[], strict: number[] | null): boolean {
+// v2.3: con las cornisas, SPAWN_PIT_GAP se mide hasta la boca del abismo (donde se termina el piso). Puede
+// nacer sobre una cornisa (nunca sobre un puente: está en la boca), pero estable: costra en todas las
+// columnas del pad y piso parejo (CORNICE_SPAWN_FLAT), así el pad no la corta y el tanque no se vuelca
+// solo; para caer hace falta que un tiro rompa la costra o lo empuje hasta el borde.
+export function spawnOk(t: Terrain, mouth: Uint8Array | undefined, x: number, basins: Basin[], strict: number[] | null): boolean {
   // +1: la caja del tanque es [x - TANK_HALF_W, x + TANK_HALF_W) y al espejar se corre un px
-  if (nearPit(t, x, TANK_HALF_W + SPAWN_PIT_GAP + 1)) return false
+  if (mouth ? nearCols(mouth, x, TANK_HALF_W + SPAWN_PIT_GAP + 1) : nearPit(t, x, TANK_HALF_W + SPAWN_PIT_GAP + 1)) return false
+  if (nearPit(t, x, TANK_HALF_W + 5)) {
+    const [x0, x1] = padBounds(x)
+    let lo = Infinity
+    let hi = -Infinity
+    for (let i = x0 - 1; i <= x1 + 1; i++) {
+      const g = columnGround(t, i)
+      lo = Math.min(lo, g)
+      hi = Math.max(hi, g)
+    }
+    if (hi >= t.h || hi - lo > CORNICE_SPAWN_FLAT) return false
+  }
   for (const q of basins) if (x + TANK_HALF_W + 20 > q.x0 && x - TANK_HALF_W - 20 < q.x1) return false
   if (!strict) return columnGround(t, x) < t.h - BEDROCK_ROWS - 4
   let lo = Infinity
@@ -1234,7 +1347,7 @@ function solids(b: Build, seg: Seg): void {
       b.socks.push(Math.round((p.c0 + p.c1) / 2) + 14)
       break
     }
-    case 'abyss':
+    case 'abyss': // v2.3: los lugares al borde del abismo se agregan al tallar (ver carve)
       break
     case 'lake':
     case 'lavapit': {
@@ -1342,17 +1455,40 @@ function carve(b: Build, seg: Seg): void {
       const yb = t.h - 12
       // la pared de fondo (back de tierra) asoma unas filas por encima del labio, con borde irregular
       const lip = Math.min(surf[a - 12], surf[z + 12])
+      // v2.3: cornisas (ver ledgeParams). Debajo de la costra, la pared se socava cornL / cornR px: el
+      // techo del socavón baja en arco desde la punta (crust px bajo la superficie) hasta la pared.
+      // Los labios sin cornisa se socavan igual (lipL / lipR px, con costra de LIP_CRUST).
+      const { cornL, cornR, crust } = p
+      const uL = cornL || p.lipL
+      const uR = cornR || p.lipR
+      const cL = cornL ? crust : LIP_CRUST
+      const cR = cornR ? crust : LIP_CRUST
+      const under = (x: number, c: number, f: number) => surf[x] + c + Math.round(CORNICE_ARCH * f * f)
       for (let y = 0; y < t.h; y++) {
         const yy = Math.min(y, yb)
         const xl = a + wob(yy, 0)
         const xr = z + wob(yy, 3)
-        for (let x = xl; x <= xr; x++) {
+        for (let x = xl - uL; x <= xr + uR; x++) {
+          if (x < xl && y <= under(x, cL, (xl - x) / uL)) continue
+          if (x > xr && y <= under(x, cR, (x - xr) / uR)) continue
           const i = y * t.w + x
           t.front[i] = AIR
           if (t.back[i] === AIR && y >= lip - 4 - Math.round(noise1(x, 9, seed + 11) * 8)) t.back[i] = DIRT
         }
       }
-      for (let x = a + wob(yb, 0); x <= z + wob(yb, 3); x++) b.pits[x] = 1
+      const pa = a + wob(yb, 0) - uL
+      const pz = z + wob(yb, 3) + uR
+      for (let x = pa; x <= pz; x++) b.pits[x] = 1
+      // la boca: de punta a punta de los labios, a la altura de la superficie
+      const ma = uL ? a + wob(Math.min(surf[a], yb), 0) : pa
+      const mz = uR ? z + wob(Math.min(surf[z], yb), 3) : pz
+      for (let x = ma; x <= mz; x++) b.mouth[x] = 1
+      // un lugar para un tanque a cada lado de la boca, a SPAWN_PIT_GAP del borde (sobre la cornisa o el
+      // labio, si spawnOk lo acepta); spreadSpawns los prefiere
+      b.brinks.push({ x: ma - SPAWN_PIT_GAP - TANK_HALF_W - 2, dir: -1 }, { x: mz + SPAWN_PIT_GAP + TANK_HALF_W + 2, dir: 1 })
+      if (cornL) b.ledges.push({ kind: 'cornice', x0: pa, x1: ma, thick: crust })
+      if (cornR) b.ledges.push({ kind: 'cornice', x0: mz + 1, x1: pz + 1, thick: crust })
+      if (p.bridge) b.ledges.push({ kind: 'bridge', x0: ma, x1: mz + 1, thick: p.bridgeT })
       break
     }
   }
@@ -1436,8 +1572,10 @@ function front(b: Build, seg: Seg): void {
         const gl = surf[a - 8]
         const gr = surf[z + 8]
         const top = Math.min(gl, gr) - rng.int(40, 50)
-        fillRect(t, a - 9, top, a - 7, gl - 1, POST)
-        fillRect(t, z + 6, top, z + 8, gr - 1, POST)
+        // v2.3: los postes van en la pared de fondo (detrás de los tanques): en el frente eran una pared
+        // al borde de la boca y ningún empujón podía tirar a un tanque al pozo
+        fillRect(t, a - 9, top, a - 7, gl - 1, POST, 'back')
+        fillRect(t, z + 6, top, z + 8, gr - 1, POST, 'back')
         fillRect(t, a - 13, top - 4, z + 12, top - 1, BEAM)
         specs.push({ kind: 'lamp', x: Math.round((a + z) / 2) - 2, y: top })
         // la escalera va pegada a la pared real (las paredes son irregulares)
@@ -1449,6 +1587,22 @@ function front(b: Build, seg: Seg): void {
         // restos de un puente de piedra: dos cabezales contra el borde
         stoneSlab(t, a - 16, surf[a - 16] - 6, a - 2, surf[a - 16] - 1)
         stoneSlab(t, z + 2, surf[z + 16] - 6, z + 16, surf[z + 16] - 1)
+      }
+      if (p.bridge) {
+        // v2.3: puente fino de labio a labio, a ras de la superficie (de una punta a la otra en línea
+        // recta); solo llena el aire de la boca, así que empalma con las cornisas o las paredes
+        const xa = a - 10
+        const xz = z + 10
+        const ya = surf[xa]
+        const yz = surf[xz]
+        const m = biome === 'industrial' ? BEAM : biome === 'jungle' ? STONE : DIRT
+        for (let x = xa; x <= xz; x++) {
+          const y0 = Math.round(ya + ((yz - ya) * (x - xa)) / (xz - xa))
+          for (let y = y0; y < y0 + p.bridgeT; y++) {
+            const i = y * t.w + x
+            if (t.front[i] === AIR) t.front[i] = m
+          }
+        }
       }
       break
     }

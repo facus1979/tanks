@@ -21,8 +21,8 @@ import {
   CRUST_CELL,
   CRUST_TOP,
   CRUST_V,
-  DEEP_DARK,
   DEPTH,
+  deepColor,
   GLOW_TINT,
   LB,
   LEVELS,
@@ -85,11 +85,7 @@ export function lavaBody(x: number, dep: number): number {
   const n = NOISE[(x + Math.min(dep >> 1, NOISE_CAP)) & 1023]
   const b = bayer(x, dep)
   const l = level(dep, n, b)
-  let c = LEVELS[l]
-  if (l === 8) {
-    if (n > 0.7 && b < (n - 0.7) * 2) c = LEVELS[7]
-    else if (n < 0.4 && b < (0.4 - n) * 2.5) c = DEEP_DARK
-  }
+  let c = l === 8 ? deepColor(x, dep) : LEVELS[l] // v2.3: fondo moteado sin vetas verticales (lava.ts)
   if (dep < DEPTH + 12 && hash(Math.floor(x / 5), dep >> 1, 44) > SUNK_T) c = CRUST
   return c
 }

@@ -34,8 +34,10 @@ export const ABYSS_DROP = 60
 //   round(KNOCKBACK_MAX · min(1, golpe / KNOCKBACK_REF)) px
 // en sentido contrario al centro, donde golpe es el daño crudo que le haría esa explosión (antes del
 // escudo; el impacto directo cuenta el daño entero del arma). Con 2 px o menos no se mueve. La Tierra
-// (build) no empuja: tapa.
-export const KNOCKBACK_REF = 36
+// (build) no empuja: tapa. v2.3: KNOCKBACK_REF baja de 36 a 22 (un impacto directo de la normal ya empuja
+// el tope; con 36 hacía falta la pesada y casi nadie llegaba al borde del abismo) y el impacto directo
+// empuja en el sentido en que venía el proyectil (ver resolveBlast).
+export const KNOCKBACK_REF = 22
 // Segundos entre que el tanque cae a su piso nuevo y empieza a deslizarse (la caída se ve casi instantánea).
 export const FALL_SETTLE = 0.15
 // Veces que se repite caer + deslizarse al asentar un tanque (un deslizamiento puede terminar en otra caída).
@@ -52,6 +54,8 @@ export interface Blast {
   t: number
   directTank?: number
   source?: 'shot' | 'barrel'
+  // v2.3: sentido horizontal en que venía el proyectil (impacto directo: ver resolveBlast)
+  heading?: -1 | 1
 }
 
 // Distancia del punto a la caja del tanque (0 si está adentro).
@@ -127,7 +131,12 @@ export function resolveBlast(state: GameState, first: Blast, after?: (events: Ga
       if (amount > 0) hurt(p, amount, events)
       const dist = b.terrain === 'build' || amount <= 0 ? 0 : Math.round(KNOCKBACK_MAX * Math.min(1, amount / KNOCKBACK_REF))
       const dx = p.x - b.x
-      if (dist > 2 && Math.abs(dx) >= 1) pushes.push({ p, dist, dir: dx > 0 ? 1 : -1 })
+      // v2.3: el impacto directo empuja en el sentido en que venía el proyectil (antes, desde el punto
+      // del impacto sobre la caja: un globo que caía sobre el techo empujaba para cualquier lado y un
+      // tiro que pegaba en el centro no empujaba). Así, al que tiene el abismo a la espalda un tiro de
+      // frente lo manda para atrás.
+      if (dist > 2 && p.id === b.directTank && b.heading) pushes.push({ p, dist, dir: b.heading })
+      else if (dist > 2 && Math.abs(dx) >= 1) pushes.push({ p, dist, dir: dx > 0 ? 1 : -1 })
     }
     for (const prop of state.props) {
       if (!prop.alive) continue
@@ -418,7 +427,12 @@ export function fallTank(state: GameState, p: Player, events: GameEvent[], free 
   return drop
 }
 
-export function blastFor(weapon: WeaponId, x: number, y: number, t: number, directTank?: number): Blast {
+// vx: velocidad horizontal del proyectil al pegar (v2.3: da el sentido del empuje de un impacto directo;
+// casi vertical, menos de HEADING_MIN px/s, no cuenta y empuja desde el punto del impacto como antes).
+export const HEADING_MIN = 4
+export function blastFor(weapon: WeaponId, x: number, y: number, t: number, directTank?: number, vx = 0): Blast {
   const w = WEAPONS[weapon]
-  return { x, y, radius: w.radius, damage: w.damage, weapon, blast: w.blast, terrain: w.terrain, t, directTank }
+  const b: Blast = { x, y, radius: w.radius, damage: w.damage, weapon, blast: w.blast, terrain: w.terrain, t, directTank }
+  if (directTank !== undefined && Math.abs(vx) >= HEADING_MIN) b.heading = vx > 0 ? 1 : -1
+  return b
 }

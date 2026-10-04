@@ -34,6 +34,8 @@ const MAX_ZOOM = 4
 const CULL_MARGIN = 48
 // Parallax: el cielo casi quieto; las capas siguientes de 0,15 a 0,7 de la velocidad del terreno.
 const SKY_PARALLAX = 0.04
+// v2.3: segundos que el "!" de RenderFrame.alerts sigue a la vista después de que el id sale de la lista
+const ALERT_LINGER = 0.3
 const LAMP_R = 34
 const LAMP_TEX = 72 // lado de la textura de luz de un foco (radio 34 más el corrimiento de la trama)
 // QA: ?fxpeek=0.3 adelanta los efectos esos segundos al congelarse (para comparar capturas).
@@ -140,7 +142,7 @@ export class PixiRenderer implements GameRenderer {
   private lampTex = new Map<string, Texture>()
   private lampKey = ''
 
-  private bgLayers: { tex: Texture; holder: Container; tiles: Sprite[] }[] = []
+  private bgLayers: { tex: Texture; wrap: boolean; holder: Container; tiles: Sprite[] }[] = []
   // Cámara aplicada en el último frame, sin sacudón: el origen del mundo cae en (camX, camY) de la pantalla lógica.
   private camX = 0
   private camY = 0
@@ -158,6 +160,7 @@ export class PixiRenderer implements GameRenderer {
   private players: Player[] = []
   private lastShooter: number | null = null
   private near = new Set<number>()
+  private alerted = new Set<number>() // v2.3: ids que estaban en RenderFrame.alerts el frame anterior
   private hitThisShot = new Set<number>()
   private impactSeen = false
   private trailLast: { x: number; y: number; acc: number; dx: number; dy: number; ground: number; spin: number }[] = []
@@ -429,6 +432,7 @@ export class PixiRenderer implements GameRenderer {
     for (const c of this.lampLayer.removeChildren()) c.destroy()
     this.lastShooter = null
     this.near.clear()
+    this.alerted.clear()
     this.hitThisShot.clear()
     this.impactSeen = false
     this.version = -1
@@ -439,10 +443,10 @@ export class PixiRenderer implements GameRenderer {
     this.biome = biome
     for (const c of this.bg.removeChildren()) c.destroy({ children: true })
     const def = art.backgrounds[biome] ?? art.backgrounds.forest
-    this.bgLayers = def.layers.map((tex) => {
+    this.bgLayers = def.layers.map((tex, i) => {
       const holder = new Container()
       this.bg.addChild(holder)
-      return { tex, holder, tiles: [] }
+      return { tex, wrap: def.wrap?.[i] ?? false, holder, tiles: [] }
     })
     this.app.renderer.background.color = def.fog
     this.fx.fog = def.fog
@@ -516,7 +520,9 @@ export class PixiRenderer implements GameRenderer {
     }
   }
 
-  // Capas del fondo repetidas a lo ancho (alternando con la copia espejada, sin costuras) y con parallax:
+  // Capas del fondo repetidas a lo ancho y con parallax. Por capa (v2.3, repeat del manifiesto): 'mirror'
+  // alterna la capa con su copia espejada (sin costuras aunque la capa no sea periódica); 'wrap' pone la
+  // misma capa una al lado de la otra (la capa empalma sola). En ambos casos
   // cada capa se corre una fracción f del movimiento del terreno, se achica con el zoom en esa proporción
   // y se apoya entre el pie de la pantalla (f = 0) y el pie del mundo (f = 1).
   private placeBackground(t: Terrain): void {
@@ -547,7 +553,7 @@ export class PixiRenderer implements GameRenderer {
       L.tiles.forEach((sp, k) => {
         sp.visible = k < need
         if (k >= need) return
-        const mirrored = ((first + k) & 1) === 1
+        const mirrored = !L.wrap && ((first + k) & 1) === 1
         const x = startX + k * tw
         sp.scale.set(mirrored ? -s : s, s)
         sp.position.set(mirrored ? x + tw : x, y)
@@ -904,10 +910,19 @@ export class PixiRenderer implements GameRenderer {
   private syncTanks(art: Art, frame: RenderFrame, dt: number): void {
     const seen = new Set<number>()
     const currentId = frame.players[frame.current]?.id
+    const alerts = frame.alerts ?? []
     for (const p of frame.players) {
       seen.add(p.id)
       const v = this.view(p.id)
       v.recoil = Math.max(0, v.recoil - dt)
+      // v2.3: RenderFrame.alerts (lo llena el flujo; por ejemplo, frenado en el borde del abismo). Al entrar
+      // en la lista el "!" aparece con su tiempo completo; mientras siga, no se apaga; al salir le queda
+      // ALERT_LINGER (o lo que le quede de BUBBLE_TIME) y se va solo.
+      const inAlerts = alerts.includes(p.id)
+      if (inAlerts && !this.alerted.has(p.id)) v.alert = BUBBLE_TIME
+      else if (inAlerts) v.alert = Math.max(v.alert, ALERT_LINGER)
+      if (inAlerts) this.alerted.add(p.id)
+      else this.alerted.delete(p.id)
       // un globo tapado por la explosión no gasta su tiempo hasta que se despeja
       const hold = v.held && v.heldFor < BUBBLE_HOLD
       v.heldFor = v.held ? v.heldFor + dt : 0

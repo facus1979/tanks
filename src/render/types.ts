@@ -50,6 +50,7 @@ export interface RenderFrame {
   aimPreviewShort?: boolean
   camera: Camera // v2; el tamaño del mundo es terrain.w × terrain.h
   lava: number | null // v2: y de la superficie de la lava de muerte súbita (ya animada por la sesión); null = no hay
+  alerts?: number[] // v2.3: ids de jugadores que muestran el globo "!" ahora (por ejemplo, frenado en el borde del abismo)
 }
 
 export interface GameRenderer {

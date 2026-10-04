@@ -23,7 +23,7 @@ const PAD = 16 // margen pintado a cada lado de la vista
 const STRIP_W = 1700 // ancho visible con zoom 0,5 (1600) más el margen del sacudón y PAD
 const PAINT_DT = 1 / 30
 export const DEEP_W = 1024 // período horizontal del ruido (y de la textura profunda)
-const DEEP_H = 128 // período vertical de la textura profunda
+const DEEP_H = 128 // período vertical de la textura profunda (potencia de 2: deepColor enmascara con & )
 const GLOW_H = 72 // alto del resplandor sobre la superficie
 const GLOW_K = 0.24 // intensidad del resplandor junto a la superficie (el light del lookdev usa 0,32 en un pozo)
 export const GLOW_TINT = 0xff6a20
@@ -83,6 +83,66 @@ export const BAYER8 = Float32Array.from({ length: 16 }, (_, i) => bayer(i & 3, i
 export const SPARK_T = 0.72 * 4294967296 // umbrales de hash() (sin dividir)
 export const SUNK_T = 0.985 * 4294967296
 
+// v2.3: moteado del fondo (donde el degradé ya llegó al rojo oscuro). Antes salía del ruido 1D en x y
+// dibujaba vetas verticales repetidas; ahora es ruido de valor 2D periódico (DEEP_W × DEEP_H, así la textura
+// del fondo se repite sin costura en los dos sentidos), con manchas más anchas que altas (como lava que corre
+// de costado), cuantizado con la trama de Bayer, más costras hundidas sueltas como las del lookdev.
+// Tabla precalculada una vez (128 KB): 0 = nada, 1 = mancha más clara, 2 = más oscura, 3 = costra.
+const MOTTLE_NONE = 0
+const MOTTLE_LIGHT = 1
+const MOTTLE_DARK = 2
+const MOTTLE_CRUST = 3
+const MOTTLE = (() => {
+  const W = DEEP_W
+  const H = DEEP_H
+  // una octava de ruido de valor periódico con celdas de cw × ch px
+  const octave = (cw: number, ch: number, seed: number): Float32Array => {
+    const nx = W / cw
+    const ny = H / ch
+    const v = (i: number, j: number): number => hash(((i % nx) + nx) % nx, ((j % ny) + ny) % ny, seed) / 4294967296
+    const out = new Float32Array(W * H)
+    for (let y = 0; y < H; y++) {
+      const ty = y / ch
+      const j = Math.floor(ty)
+      let fy = ty - j
+      fy = fy * fy * (3 - 2 * fy)
+      for (let x = 0; x < W; x++) {
+        const tx = x / cw
+        const i = Math.floor(tx)
+        let fx = tx - i
+        fx = fx * fx * (3 - 2 * fx)
+        const a = v(i, j) * (1 - fx) + v(i + 1, j) * fx
+        const b = v(i, j + 1) * (1 - fx) + v(i + 1, j + 1) * fx
+        out[y * W + x] = a * (1 - fy) + b * fy
+      }
+    }
+    return out
+  }
+  const o1 = octave(32, 16, 61)
+  const o2 = octave(16, 8, 62)
+  const m = new Uint8Array(W * H)
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x
+      const n = (o1[i] * 0.7 + o2[i] * 0.3 - 0.5) * 1.6 + 0.5 // más contraste que el promedio de octavas
+      const b = bayer(x, y)
+      let c = MOTTLE_NONE
+      if (n > 0.66 && b < (n - 0.66) * 2.2) c = MOTTLE_LIGHT
+      else if (n < 0.34 && b < (0.34 - n) * 2.2) c = MOTTLE_DARK
+      // costras hundidas: bloques de 6 × 3 px, pocos (el lookdev pone 8 × 4 al 10% en un pozo chico)
+      if (hash((x / 6) | 0, (y / 3) | 0, 45) > 0.992 * 4294967296) c = MOTTLE_CRUST
+      m[i] = c
+    }
+  }
+  return m
+})()
+
+// Color del fondo de la lava (nivel 8 del degradé) en (x, profundidad dep): rojo oscuro con el moteado.
+export function deepColor(x: number, dep: number): number {
+  const k = MOTTLE[(dep & (DEEP_H - 1)) * DEEP_W + (x & (DEEP_W - 1))]
+  return k === MOTTLE_NONE ? LEVELS[8] : k === MOTTLE_LIGHT ? LEVELS[7] : k === MOTTLE_DARK ? DEEP_DARK : CRUST
+}
+
 // Nivel del degradé a profundidad d (px bajo la superficie) con el ruido n y la trama b.
 export const level = (d: number, n: number, b: number): number => {
   const l = Math.floor(((d / 46) * 0.8 + n * 0.35) * 8 + b)
@@ -97,8 +157,8 @@ function canvasTexture(c: HTMLCanvasElement): Texture {
 }
 
 // Textura profunda: sigue el degradé desde la profundidad DEPTH (empalma con la franja) hasta el rojo oscuro;
-// ya en el fondo, vetas más claras y más oscuras donde el ruido (que ondula en vertical con período DEEP_H,
-// sin costura) es alto o bajo, y costras hundidas cerca de la superficie. Fila k = DEPTH + first + k px
+// ya en el fondo, el moteado 2D de deepColor (v2.3: sin las vetas verticales de antes), y costras hundidas
+// cerca de la superficie. Fila k = DEPTH + first + k px
 // bajo la superficie: first 0 es el tramo de transición; first DEEP_H es el fondo, que se repite hacia abajo.
 function deepTexture(first: number): Texture {
   const r = new Raster(DEEP_W, DEEP_H)
@@ -114,11 +174,7 @@ function deepTexture(first: number): Texture {
       const n = NOISE[(x + shift + DEEP_W) & (DEEP_W - 1)]
       const b = bayer(x, kk + DEPTH)
       const l = level(DEPTH + kk, n, b)
-      let c = LEVELS[l]
-      if (l === 8) {
-        if (n > 0.7 && b < (n - 0.7) * 2) c = LEVELS[7]
-        else if (n < 0.4 && b < (0.4 - n) * 2.5) c = DEEP_DARK
-      }
+      let c = l === 8 ? deepColor(x, DEPTH + kk) : LEVELS[l]
       if (kk < 12 && hash(Math.floor(x / 5), (DEPTH + kk) >> 1, 44) > SUNK_T) c = CRUST
       const i = (k * DEEP_W + x) * 4
       d[i] = (c >> 16) & 255

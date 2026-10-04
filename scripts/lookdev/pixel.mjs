@@ -214,6 +214,32 @@ export class Canvas {
   }
 }
 
+// Canvas periódico en x (v2.3, capas de fondo con repeat 'wrap'): todo lo que se pinta fuera de [0, w) entra
+// por el otro borde (x módulo w). Un árbol, una nube o un humo que cruza el borde derecho sigue en el izquierdo
+// con los mismos pixels (el ruido por pixel usa la x sin envolver, así que no hay costura dentro del elemento),
+// y la capa repetida una al lado de la otra empalma pixel a pixel. En y no envuelve.
+export class WrapCanvas extends Canvas {
+  wx(x) {
+    const w = this.w
+    return ((Math.round(x) % w) + w) % w
+  }
+  put(x, y, c, a = 1) {
+    super.put(this.wx(x), y, c, a)
+  }
+  tint(x, y, c, a) {
+    super.tint(this.wx(x), y, c, a)
+  }
+  get(x, y) {
+    return super.get(this.wx(x), y)
+  }
+  alpha(x, y) {
+    return super.alpha(this.wx(x), y)
+  }
+  clear(x, y) {
+    super.clear(this.wx(x), y)
+  }
+}
+
 // ---------- PNG ----------
 
 function crc32(buf) {
@@ -340,55 +366,47 @@ export function waterTower(cv, x0, base, c, h = 150) {
   cv.rect(x0 + 16, top - 8, 2, 6, c)
 }
 
-// Fondos repetibles (v2): el renderer repite cada capa a lo ancho alternando copia y copia espejada, así que
-// los bordes x = 0 y x = W se juntan siempre consigo mismos en espejo. Un elemento que asoma por un borde se
-// ve "doble" (él y su reflejo pegados), salvo que quede centrado justo en el borde: ahí el espejo lo completa
-// y se lee como uno solo. edgeSafe(x, hw) devuelve el centro corregido para un elemento de medio ancho hw:
-// si cruza un borde, lo centra en el borde (si ya estaba cerca) o lo mete entero (si no).
-export function edgeSafe(x, hw, W = 800) {
-  if (x - hw < 0) return x < hw / 2 ? 0 : Math.ceil(hw)
-  if (x + hw > W) return W - x < hw / 2 ? W : Math.floor(W - hw)
-  return x
-}
-// medio ancho de un pino de alto h (copa más ancha más el temblor del borde)
-export const pineHalfW = (h) => Math.ceil(h * 0.23 + 2)
-
 // Fondo del bosque de la referencia. Capas: 0 cielo, 1 pinos lejanos, 2 torre + pinos medios,
 // 3 pinos grises cercanos, 4 pinos verdes. rand con la semilla que dejó el llamador (42 en look-test).
-// Con `tileable` (las capas del juego) los pinos que asoman por los bordes se centran en el borde o se meten
-// enteros (edgeSafe), y la torre de agua queda en x = 60: su reflejo no entra en cámara con zoom 1 en ningún
-// tamaño de mapa (en Grande la capa 2 llega hasta x = 1480 y el reflejo empieza en ~1495). Las tiradas de
-// rand son las mismas que sin `tileable`: la composición es la de la referencia, corrida solo en los bordes.
-export function paintForestBackground(target, rand, { tileable = false } = {}) {
+//
+// Con `periodic` (las capas del juego, v2.3) las capas 1 a 4 son periódicas en x con período W: el renderer las
+// repite tal cual una al lado de la otra (repeat 'wrap') y el borde derecho empalma pixel a pixel con el
+// izquierdo. Para eso las capas tienen que ser WrapCanvas (lo que cruza un borde entra por el otro) y los pinos
+// se reparten en W justo (separación 32 / 40 / 50 en vez de 33 / 42 / 52, así la densidad es pareja también en
+// la unión). Las tiradas de rand son las mismas que sin `periodic`: alturas y corrimientos de la referencia.
+// El pino gigante va a x = GIANT_X: entra casi entero en pantalla y lo que sobra de su base asoma por el borde
+// izquierdo, donde se funde con el pino chico de x = 25 (en la referencia está a 783 y su mitad derecha cae
+// afuera de la pantalla; envuelta, esa mitad taparía medio borde izquierdo).
+// El cielo (capa 0) no cambia: queda con repeat 'mirror' (parallax 0,04, solo se ven ~64 px de la copia).
+export const GIANT_X = 750
+export function paintForestBackground(target, rand, { periodic = false } = {}) {
   const W = target.w
-  const fit = (x, h) => (tileable ? edgeSafe(x, pineHalfW(h), W) : x)
   paintForestSky(target.layer(0))
   let L = target.layer(1)
   for (let i = 0; i < 25; i++) {
-    const x = Math.round(i * 33 + rand() * 20)
+    const x = Math.round(i * (periodic ? W / 25 : 33) + rand() * 20)
     const h = 233 + rand() * 150
-    pine(L, fit(x, h), 417, h, { dark: 0xc8b193 }, 100 + i, rand() < 0.4 ? 0.3 : 0)
+    pine(L, x, 417, h, { dark: 0xc8b193 }, 100 + i, rand() < 0.4 ? 0.3 : 0)
   }
   target.fog(() => 0.35, FOG)
   L = target.layer(2)
-  waterTower(L, tileable ? 60 : 75, 422, 0xb29c7e, 208)
+  waterTower(L, 75, 422, 0xb29c7e, 208)
   for (let i = 0; i < 20; i++) {
-    const x = Math.round(20 + i * 42 + rand() * 18)
+    const x = Math.round(20 + i * (periodic ? W / 20 : 42) + rand() * 18)
     const h = 175 + rand() * 125
-    pine(L, fit(x, h), 421, h, { dark: 0xa8957a }, 200 + i, rand() < 0.3 ? 0.35 : 0)
+    pine(L, x, 421, h, { dark: 0xa8957a }, 200 + i, rand() < 0.3 ? 0.35 : 0)
   }
   target.fog(() => 0.3, FOG)
   L = target.layer(3)
   for (let i = 0; i < 16; i++) {
-    const x = Math.round(i * 52 + rand() * 24)
+    const x = Math.round(i * (periodic ? W / 16 : 52) + rand() * 24)
     const h = 125 + rand() * 92
-    pine(L, fit(x, h), 425, h, { dark: 0x7d7660, light: 0x8e8770 }, 300 + i)
+    pine(L, x, 425, h, { dark: 0x7d7660, light: 0x8e8770 }, 300 + i)
   }
   target.fog(() => 0.18, FOG)
   // niebla de suelo entre capas
   target.fog((x, y) => (y < 242 ? 0 : Math.floor(Math.min(1, (y - 242) / 142) * 0.6 * 10 + bayer(x, y)) / 10), FOG)
-  // capa cercana, pinos verdes oscuros. Repetible: el pino chico de la izquierda queda centrado en x = 0 y el
-  // gigante de la derecha en x = W, así cada uno aparece una sola vez cada 2·W, completado por su reflejo.
+  // capa cercana, pinos verdes oscuros
   L = target.layer(4)
   const near = [
     [25, 217],
@@ -398,9 +416,9 @@ export function paintForestBackground(target, rand, { tileable = false } = {}) {
     [492, 275],
     [535, 167],
     [587, 125],
-    [783, 467],
+    [periodic ? GIANT_X : 783, 467],
   ]
-  near.forEach(([x, h], i) => pine(L, fit(x, h), 437, h, { dark: 0x3c4a38, light: 0x5a6c4c, shade: 0x2c3629, trunk: 0x3a2e24 }, 400 + i))
+  near.forEach(([x, h], i) => pine(L, x, 437, h, { dark: 0x3c4a38, light: 0x5a6c4c, shade: 0x2c3629, trunk: 0x3a2e24 }, 400 + i))
   target.fog((x, y) => (y < 287 ? 0 : Math.floor(Math.min(1, (y - 287) / 108) * 0.35 * 8 + bayer(x, y)) / 8), FOG)
 }
 

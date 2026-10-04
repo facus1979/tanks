@@ -8,8 +8,10 @@
 // - Arriba al centro: el minimapa (mapas que scrollean) y debajo, en una sola columna centrada, los
 //   carteles: estado ("TU TURNO", …), aviso o cartel de muerte súbita y "ESPERANDO A …" de la red.
 // - Arriba a la derecha: las placas compactas de los demás tanques apiladas, y debajo de ellas el panel
-//   de red (código de sala, peers con ping) y la cuenta regresiva del turno.
-// - Flechas en los bordes hacia los tanques fuera de cámara, entre los paneles de arriba y el tablero.
+//   de red (código de sala, peers con ping) y la cuenta regresiva del turno. v2.3: con 5 a 8 tanques las
+//   placas se reparten en dos columnas espejadas (la izquierda debajo de ronda e ítems), máximo 4 por lado.
+// - Flechas en los bordes hacia los tanques fuera de cámara, entre los paneles de arriba de cada lado y el
+//   tablero; se juntan o se agrupan si no entran, y la del tanque del turno va en dorado y titila.
 // Sin extras (demo congelado) no hay tablero ni ítems: solo las placas de todos y el estado.
 import { ITEM_ORDER, SHIELD_HP, WEAPONS, type CrewId, type ItemId, type Vec2, type WeaponId } from '../sim/types'
 import { HUD_BAR_H, VIEW_H, VIEW_W, type Viewport } from '../render/types'
@@ -109,10 +111,13 @@ const DIAL_R = 17
 const ITEM_STEP = BTN + 2
 // Margen táctil alrededor de cada botón, en px lógicos (≈ 8 px CSS a ×2). Entre vecinos gana el más cercano.
 const TOUCH = 4
-// Placas de los demás tanques: con más de 4 se apilan más juntas y el Pn pasa a la izquierda.
+// Placas de los demás tanques. v2.3: desde SPLIT_AT placas se reparten en dos columnas compactas (izquierda
+// y derecha), más juntas, con el Pn en un chip al costado y el nombre recortado a PLATE_NAME_MAX.
 const PLATE_H = 20
 const PLATE_STEP = 30
 const PLATE_STEP_DENSE = 24
+const SPLIT_AT = 4
+const PLATE_NAME_MAX = 56
 
 interface HitBox {
   x: number
@@ -203,14 +208,18 @@ export class Hud implements MinimapInput {
       below = this.banner(assets, text, below + 1, /RECONECT|DESCONECT/.test(text) ? 0xff8a6a : GOLD, BRONZE) + 3
     }
 
-    // arriba a la derecha: placas y, debajo, la red
-    let rightBottom = this.plates(assets, plates)
+    // placas: arriba a la derecha (y con 5 o más tanques también a la izquierda, debajo de los ítems);
+    // debajo de la columna derecha, la red
+    const pl = this.plates(assets, plates, leftBottom)
+    let rightBottom = pl.right
     if (ex?.net) rightBottom = this.net(assets, ex.net, rightBottom + 6)
 
     if (subject) this.board(assets, model, subject, ex?.shield ?? 0, sock)
     if (mm) {
+      // las flechas de cada borde arrancan debajo de lo que haya arriba de ese lado
       const pad = Math.max(10, assets.font.h + 4)
-      drawEdgeArrows(ctx, assets.font, mm, { leftTop: leftBottom + pad, rightTop: rightBottom + pad, bottom: (subject ? BAR_Y : VIEW_H) - 12 })
+      const lim = { leftTop: (pl.left ?? leftBottom) + pad, rightTop: rightBottom + pad, bottom: (subject ? BAR_Y : VIEW_H) - 12 }
+      drawEdgeArrows(ctx, assets.font, mm, lim, blink)
     }
   }
 
@@ -509,54 +518,95 @@ export class Hud implements MinimapInput {
     return by + bh + 3
   }
 
-  // ---------- arriba a la derecha ----------
+  // ---------- placas de los demás tanques ----------
 
-  // Placas compactas apiladas contra el borde derecho: nombre, pips y retrato de 16, con el Pn arriba
-  // (o a la izquierda si son más de 4). Devuelve la y de abajo de la columna.
-  private plates(assets: UiAssets, list: HudSide[]): number {
-    if (!list.length) return 3
+  // Con 1 a 3 placas (2 a 4 tanques con tablero): columna contra el borde derecho como siempre, con el Pn
+  // arriba de cada placa. Con 4 o más (5 a 8 tanques; en el demo sin tablero, 4 o más tanques): dos
+  // columnas compactas espejadas, la mitad (redondeando para abajo) a la izquierda, debajo de ronda e
+  // ítems, y el resto a la derecha; en orden de Pn, de izquierda a derecha y de arriba abajo. Así ningún
+  // costado pasa de 4 placas y las flechas de borde tienen lugar debajo de cada columna.
+  // leftTop: y desde donde puede arrancar la columna izquierda. Devuelve la y de abajo de cada lado
+  // (left = null si a la izquierda no hay placas).
+  private plates(assets: UiAssets, list: HudSide[], leftTop: number): { left: number | null; right: number } {
+    if (!list.length) return { left: null, right: 3 }
+    if (list.length < SPLIT_AT) return { left: null, right: this.plateStack(assets, list) }
+    const nLeft = Math.floor(list.length / 2)
+    const left = this.plateColumn(assets, list.slice(0, nLeft), -1, leftTop + 6)
+    const right = this.plateColumn(assets, list.slice(nLeft), 1, 4)
+    return { left, right }
+  }
+
+  // Columna clásica (2 a 4 tanques): nombre, pips y retrato de 16, con el Pn (y VOS) arriba.
+  private plateStack(assets: UiAssets, list: HudSide[]): number {
     const ctx = this.ctx
     const font = assets.font
-    const dense = list.length > 4
-    const step = dense ? PLATE_STEP_DENSE : PLATE_STEP
     const right = VIEW_W - 3
-    let y = dense ? 4 : font.h + 7
+    let y = font.h + 7
     for (const side of list) {
       const name = side.name.toUpperCase()
-      const col = side.alive ? side.color : DEAD
       const bw = Math.max(PIPS * 6 + 8, measure(font, name) + 10)
       const bx = right - (PLATE_H - 1) - bw
-      panel(ctx, bx, y, bw, PLATE_H, col)
-      drawText(ctx, font, name, bx + 5, y + 4, side.alive ? WHITE : GREY)
-      this.hpBar(assets, bx + 5, y + PLATE_H - 8, bw - 10, 5, side.alive ? side.hp : 0, 1)
+      this.plateBody(assets, side, bx, y, bw, name)
       this.portrait(assets, side, bx + bw - 1, y, PLATE_H, true)
-      if (side.active && side.alive) {
-        rect(ctx, bx + 2, y - 2, bw - 4, 1, OUT)
-        rect(ctx, bx + 2, y - 3, bw - 4, 1, GOLD)
-      }
-      // número de jugador: el mismo "Pn" del globo sobre el tanque; el humano de esta pantalla, en dorado
+      // número de jugador: el mismo "Pn" del globo sobre el tanque; el humano de esta pantalla, con VOS
       const tw = measure(font, side.tag)
-      const edge = side.you ? GOLD : OUT
-      if (dense) {
-        const tx = bx - tw - 5
-        const ty = y + Math.floor((PLATE_H - font.h) / 2)
-        rect(ctx, tx - 2, ty - 2, tw + 4, font.h + 4, edge)
-        rect(ctx, tx - 1, ty - 1, tw + 2, font.h + 2, OUT)
-        drawText(ctx, font, side.tag, tx, ty, side.alive ? side.color : GREY)
-      } else {
-        const tx = right - tw - 1
-        rect(ctx, tx - 2, y - font.h - 3, tw + 4, font.h + 3, OUT)
-        drawText(ctx, font, side.tag, tx, y - font.h - 2, side.alive ? side.color : GREY)
-        if (side.you) {
-          const vw = measure(font, 'VOS')
-          rect(ctx, tx - vw - 7, y - font.h - 3, vw + 4, font.h + 3, OUT)
-          drawText(ctx, font, 'VOS', tx - vw - 5, y - font.h - 2, GOLD)
-        }
+      const tx = right - tw - 1
+      rect(ctx, tx - 2, y - font.h - 3, tw + 4, font.h + 3, OUT)
+      drawText(ctx, font, side.tag, tx, y - font.h - 2, side.alive ? side.color : GREY)
+      if (side.you) {
+        const vw = measure(font, 'VOS')
+        rect(ctx, tx - vw - 7, y - font.h - 3, vw + 4, font.h + 3, OUT)
+        drawText(ctx, font, 'VOS', tx - vw - 5, y - font.h - 2, GOLD)
       }
-      y += step
+      y += PLATE_STEP
     }
-    return y - step + PLATE_H
+    return y - PLATE_STEP + PLATE_H
   }
+
+  // Columna compacta pegada a un borde (dir −1 izquierda, 1 derecha): retrato hacia afuera, el cuerpo
+  // con nombre y vida, y el Pn en un chip hacia adentro (borde dorado si es el humano de esta pantalla).
+  // Todas las placas de la columna miden lo mismo (el nombre más largo, con tope; los demás se recortan)
+  // para que los chips queden alineados. Devuelve la y de abajo.
+  private plateColumn(assets: UiAssets, list: HudSide[], dir: -1 | 1, y0: number): number {
+    const ctx = this.ctx
+    const font = assets.font
+    let nameW = 0
+    for (const s of list) nameW = Math.max(nameW, measure(font, s.name.toUpperCase()))
+    nameW = Math.min(nameW, PLATE_NAME_MAX)
+    const bw = Math.max(PIPS * 6 + 8, nameW + 10)
+    const tw = measure(font, 'P8') // chip de ancho fijo
+    // x del retrato y del cuerpo según el lado; el retrato se superpone 1 px con el cuerpo
+    const px = dir > 0 ? VIEW_W - 3 - PLATE_H : 3
+    const bx = dir > 0 ? px - bw + 1 : px + PLATE_H - 1
+    const tx = dir > 0 ? bx - tw - 5 : bx + bw + 5
+    let y = y0
+    for (const side of list) {
+      this.plateBody(assets, side, bx, y, bw, clip(font, side.name.toUpperCase(), nameW))
+      // retrato mirando hacia el centro de la pantalla
+      this.portrait(assets, side, px, y, PLATE_H, dir > 0)
+      const ty = y + Math.floor((PLATE_H - font.h) / 2)
+      rect(ctx, tx - 2, ty - 2, tw + 4, font.h + 4, side.you ? GOLD : OUT)
+      rect(ctx, tx - 1, ty - 1, tw + 2, font.h + 2, OUT)
+      drawText(ctx, font, side.tag, tx + Math.floor((tw - measure(font, side.tag)) / 2), ty, side.alive ? side.color : GREY)
+      y += PLATE_STEP_DENSE
+    }
+    return y - PLATE_STEP_DENSE + PLATE_H
+  }
+
+  // Cuerpo de una placa: panel del color del jugador (gris si murió), nombre, barra de vida y, si tiene
+  // el turno (solo pasa en el demo, donde no hay tablero), la raya dorada encima.
+  private plateBody(assets: UiAssets, side: HudSide, bx: number, y: number, bw: number, name: string): void {
+    const ctx = this.ctx
+    panel(ctx, bx, y, bw, PLATE_H, side.alive ? side.color : DEAD)
+    drawText(ctx, assets.font, name, bx + 5, y + 4, side.alive ? WHITE : GREY)
+    this.hpBar(assets, bx + 5, y + PLATE_H - 8, bw - 10, 5, side.alive ? side.hp : 0, 1)
+    if (side.active && side.alive) {
+      rect(ctx, bx + 2, y - 2, bw - 4, 1, OUT)
+      rect(ctx, bx + 2, y - 3, bw - 4, 1, GOLD)
+    }
+  }
+
+  // ---------- arriba a la derecha ----------
 
   // Panel de red debajo de las placas, contra el borde derecho: código de sala, peers con conexión y
   // ping, y debajo la cuenta regresiva del turno. Devuelve la y de abajo.

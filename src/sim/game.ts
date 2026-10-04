@@ -140,6 +140,9 @@ export function createMatch(config: MatchConfig): GameState {
   return state
 }
 
+// v2.3: sal del sorteo de lugares y primer turno (ver setupRound).
+export const ORDER_SALT = 0x2545f491
+
 // Mapa nuevo, tanques en sus posiciones, vida llena. Muta el estado.
 function setupRound(state: GameState): void {
   const rng = new Rng(roundSeed(state.seed, state.round))
@@ -148,8 +151,19 @@ function setupRound(state: GameState): void {
   state.biome = biome
   state.terrain = gen.terrain
   state.props = gen.props
+  // v2.3: quién nace dónde y quién abre la ronda se sortean con la seed de la ronda (rng aparte: el mapa
+  // y el viento no cambian). Antes el jugador 0 nacía siempre en una punta y abría la ronda 1 (con 6 en
+  // Mediano a una ronda ganaba ~40%); la ronda r la abría el jugador (r - 1) % jugadores.
+  const draw = new Rng(hashSeed(roundSeed(state.seed, state.round) ^ ORDER_SALT))
+  const seat = state.players.map((_, i) => i)
+  for (let i = seat.length - 1; i > 0; i--) {
+    const j = draw.int(0, i)
+    const tmp = seat[i]
+    seat[i] = seat[j]
+    seat[j] = tmp
+  }
   state.players.forEach((p, i) => {
-    const x = gen.spawns[i]
+    const x = gen.spawns[seat[i]]
     p.x = x
     p.y = tankFloor(gen.terrain, x, 0)
     p.hp = PLAYER_HP
@@ -167,7 +181,7 @@ function setupRound(state: GameState): void {
   state.wind = wind.value
   state.rng = wind.state
   state.windLeft = state.players.length
-  state.current = (state.round - 1) % state.players.length
+  state.current = draw.int(0, state.players.length - 1)
   state.phase = 'aiming'
   state.roundWinnerId = null
   state.turn = 1

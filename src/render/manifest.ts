@@ -37,7 +37,10 @@ export interface AssetManifest {
 
   // Fondo por bioma: capas de atrás hacia adelante, WORLD_W × WORLD_H, con alfa.
   // La capa 0 es el cielo (opaca). La última es la más cercana (pinos oscuros, siluetas).
-  backgrounds: Record<Biome, { layers: string[]; fog: number; tint: number }>
+  // v2.3: repeat dice cómo se repite cada capa a lo ancho en mapas Mediano y Grande: 'mirror' (copia,
+  // copia espejada, ...; lo de v2) o 'wrap' (la misma capa una al lado de la otra; la capa tiene que ser
+  // periódica: el borde derecho empalma con el izquierdo). Sin repeat, 'mirror' para todas.
+  backgrounds: Record<Biome, { layers: string[]; fog: number; tint: number; repeat?: ('mirror' | 'wrap')[] }>
 
   // Paleta del bioma para el renderer: pasto, musgo, borde de tierra, luz ambiente.
   biomePalette: Record<Biome, { grass: number[]; moss: number; rim: number; ambient: number }>

@@ -5,7 +5,7 @@ import { TouchControls, fullscreenButton, isTouchDevice, vibrate } from './input
 import { MousePan } from './input/mouse'
 import { VIEW_H, VIEW_W, type Viewport } from './render/types'
 import { Sfx } from './audio/sfx'
-import { Session, abyssDrop, isAbyssFall } from './game/session'
+import { Session, abyssLostAt, isAbyssFall } from './game/session'
 import type { NetSeat } from './game/session'
 import { Online } from './game/online'
 import { normalizeCode, readNetParams } from './net'
@@ -757,8 +757,9 @@ function playSounds(events: GameEvent[]): void {
         if (e.destroyed && e.kind === 'barrel') sfx.barrel()
         break
       case 'fall':
-        // v3: al abismo, silbido que se aleja durante la caída (la sesión la anima con abyssDrop)
-        if (isAbyssFall(e, h)) sfx.abyssFall(abyssDrop(e.from, h).dur)
+        // v3: al abismo, silbido que se aleja durante la caída; v2.3: dura hasta que el tanque se pierde
+        // de vista, que es cuando llega la muerte con el golpe lejano (abyssLostAt)
+        if (isAbyssFall(e, h)) sfx.abyssFall(abyssLostAt(e.from, h))
         else if (e.water) sfx.plunge(Math.abs(e.to - e.from)) // v4: cayó al agua, sin daño
         else if (e.parachute) sfx.parachute()
         else sfx.fall(Math.abs(e.to - e.from))
