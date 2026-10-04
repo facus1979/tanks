@@ -324,6 +324,20 @@ Rama `v2.3-pendientes`. Seis agentes en paralelo (sim, red, render, vistas, fluj
   - **Sorteo**: con la seed de cada ronda (rng aparte, `ORDER_SALT`) se mezcla quién nace en cada lugar (jugador 0 incluido) y quién abre la ronda (antes el jugador 0 nacía en una punta y la ronda r la abría el jugador (r − 1) % n). En Chico cambia quién nace dónde y quién empieza; el terreno no.
   - `sim-check` 38380/38380. Balance con abismo (Mediano y Grande, 4 y 6 tanques, 60 partidas): 24 de 241 muertes por abismo (10,0%), 31,5 tiros por partida; la IA tendió 5 tramos de puente y cruzó 4 veces. 6 en Mediano, 60 partidas: ganador por posición 4/9/9/16/10/12 (máx. 27%), gana el que abre 15/60. Tiros por partida 2 / 4 tanques: Chico 10,6 / 16,9, Mediano 14,9 / 25,9, Grande 10,8 / 26,4; Mediano 6: 33,6 (máx. 55); Grande 8: 37,0 (máx. 46). Empuje en mapas generados: 14 de 16 tanques nacidos al borde caen con un impacto directo desde el otro lado. IA peor caso 69 ms.
 
+## v2.4: cierre de pendientes (2026-10-03)
+
+Rama `v2.4-cierre`. Tres agentes en paralelo (sim, flujo, render); contrato, documentación y QA del integrador.
+
+- Spawns: los humanos nunca nacen sobre una cornisa al borde de un abismo (las IA sí).
+- `sim-check`: el balance de Mediano y Grande se mide con 20 partidas (menos ruido en los topes que bloquean el deploy).
+- Sonido: los efectos se estiran con la cámara lenta.
+- Napalm que cae debajo de la lava: no quema (la lava ya lo cubre) y no atraviesa la banda.
+- IA: tiro por encima de una montaña alta con margen (al menos 5/6 en la prueba).
+- Derrumbe: los terrones sueltos que deja una explosión (tierra o piedra sin apoyo) caen y se asientan; tierra que cae sobre lava → piedra. Los salientes unidos al terreno (cornisas, techos de cuevas) no se caen. Evento `collapse`, daño `cause: 'collapse'` si aplasta un tanque.
+- Contrato: `Impact.water` (explosión sumergida exacta) y `RenderFrame.splashes` (salpicaduras en su momento exacto).
+- Globo "!" (`RenderFrame.alerts`) también en: sin munición, sin combustible, cambio de viento fuerte, inicio de la muerte súbita y tanque en lava al empezar su turno.
+- Contratos v2.4: `Impact.water`, evento `collapse`, `damage.cause` `'collapse'`, `RenderFrame.splashes`.
+
 ## Cómo se agrega algo
 
 - Arma nueva: un registro en `WEAPONS` y, si el efecto es nuevo, un modo de terreno en `sim` y un `BlastStyle` en el renderer.

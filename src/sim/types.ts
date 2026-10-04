@@ -370,6 +370,7 @@ export interface Impact {
   y: number
   tankId?: number
   propId?: number
+  water?: boolean // v2.4: el centro de la explosión quedó sumergido (radio × WATER_BLAST_SCALE)
 }
 
 // Un disparo puede tener varios proyectiles (racimo). Cada uno con su camino y su impacto.
@@ -394,7 +395,7 @@ export type GameEvent =
       source?: 'shot' | 'barrel' // 'barrel': explosión en cadena de un barril
     }
   // t opcional: momento de playback. Sin t, el evento va con el impacto anterior de la lista.
-  | { type: 'damage'; playerId: number; amount: number; hp: number; t?: number; cause?: 'lava' } // cause: v2, quemado por la lava
+  | { type: 'damage'; playerId: number; amount: number; hp: number; t?: number; cause?: 'lava' | 'collapse' } // collapse: v2.4, aplastado por un derrumbe // cause: v2, quemado por la lava
   | { type: 'death'; playerId: number; t?: number; cause?: 'abyss' | 'lava' } // cause: v3/v2, sin explosión de restos si es 'abyss'
   | { type: 'fall'; playerId: number; from: number; to: number; parachute?: boolean; t?: number; water?: boolean } // water: v4, cayó al agua (sin daño)
   | { type: 'prop'; propId: number; kind: PropKind; x: number; y: number; destroyed: boolean; t?: number }
@@ -408,6 +409,9 @@ export type GameEvent =
   | { type: 'slide'; playerId: number; cause: 'blast' | 'slope'; path: Vec2[]; t?: number }
   // v4: los líquidos se asentaron. patches[i] se aplica a la grilla en t + i * dt (el último deja el estado final).
   | { type: 'flow'; t: number; dt: number; patches: TerrainPatch[] }
+  // v2.4: derrumbe. Terrones sueltos (tierra o piedra sin apoyo tras una explosión) caen y se asientan.
+  // Mismo formato y misma forma de aplicar que 'flow'; va antes del flow de líquidos del mismo tiro.
+  | { type: 'collapse'; t: number; dt: number; patches: TerrainPatch[]; cells: number }
   | { type: 'steam'; x: number; y: number; n: number; t?: number } // v4: agua y lava hicieron piedra (n celdas)
   | { type: 'lava'; from: number | null; to: number; warn: number } // v2: la lava subió (from null = apareció); warn = tiros sin daño que faltan para la muerte súbita (0 si ya empezó)
   | { type: 'calm'; left: number } // v2: tiros sin daño que faltan para que empiece la muerte súbita (se emite al cambiar, 0 = empezó)
