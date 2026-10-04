@@ -405,7 +405,7 @@ export class MenuScreen implements MenuView {
           setLabel(e.nameLabel, personalityName(s.personality), s.personality ? 0x9ad0ff : 0x7aa0c0)
         } else {
           const shown = s.name || CREW_NAMES[s.crew]
-          const cursor = this.editing && this.curSlot() === i && this.col % PER === C_NAME ? '_' : ''
+          const cursor = this.editing && this.curSlot() === i && this.col % PER === C_NAME ? '-' : '' // la fuente no tiene '_'
           setLabel(e.nameLabel, empty ? '' : shown.toUpperCase() + cursor, s.name || cursor ? 0xffffff : 0x9a8e80)
         }
       }

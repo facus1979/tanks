@@ -390,7 +390,7 @@ class LobbyScreen implements LobbyView, LobbyProfileHooks {
       if (m.mySlot === i && slot.kind === 'human') {
         // propio: el borrador mientras se escribe, con cursor
         const name = this.editing ? (this.draft ?? '') : slot.name
-        const caret = this.editing ? '_' : ''
+        const caret = this.editing ? '-' : '' // la fuente no tiene '_'
         setLabel(e.nameLabel, (name ? name.toUpperCase() : this.editing ? '' : CREW_NAMES[slot.crew]) + caret, name || caret ? 0xffffff : 0x9a8e80)
       } else setLabel(e.nameLabel, off ? '' : slot.kind === 'ai' ? CREW_NAMES[slot.crew] : same ? CREW_NAMES[slot.crew] : slot.name.toUpperCase(), 0xffffff)
       setLabel(e.ownerLabel, own.text, own.color)
