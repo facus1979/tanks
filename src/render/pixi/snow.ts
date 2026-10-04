@@ -228,6 +228,7 @@ interface Mote {
   life: number
   age: number
   a0: number
+  ph: number // fase propia (giro de las monedas, aleteo de los billetes)
   size: number
   rest: boolean // apoyado en el piso
 }
@@ -244,6 +245,7 @@ export interface MoteSpec {
   color: number
   alpha?: number
   size?: number // lado en pixels (solo 'px')
+  phase?: number
 }
 
 const MOTES_MAX = 600
@@ -281,7 +283,7 @@ export class Motes {
     p.scaleY = kind === 'px' ? size : 1
     p.anchorX = 0.5
     p.anchorY = 0.5
-    this.list.push({ p, kind, x: s.x, y: s.y, vx: s.vx ?? 0, vy: s.vy ?? 0, ay: s.ay ?? 0, drag: s.drag ?? 0, life: s.life, age: 0, a0: s.alpha ?? 1, size, rest: false })
+    this.list.push({ p, kind, x: s.x, y: s.y, vx: s.vx ?? 0, vy: s.vy ?? 0, ay: s.ay ?? 0, drag: s.drag ?? 0, life: s.life, age: 0, a0: s.alpha ?? 1, ph: s.phase ?? 0, size, rest: false })
   }
 
   clear(): void {
@@ -306,7 +308,7 @@ export class Motes {
         m.vx *= k
         m.vy = m.vy * k + m.ay * dt
         let sway = 0
-        if (m.kind === 'bill') sway = Math.sin(m.age * 7 + m.a0 * 13) * 22
+        if (m.kind === 'bill') sway = Math.sin(m.age * 7 + m.ph) * 22
         const nx = m.x + (m.vx + sway) * dt
         const ny = m.y + m.vy * dt
         if (this.solid && m.ay > 0 && m.vy > 0 && this.solid(nx, ny)) {
@@ -331,8 +333,8 @@ export class Motes {
       let a = m.a0 * Math.min(1, left / Math.min(0.35, m.life * 0.5))
       if (m.kind === 'star') a *= 0.55 + 0.45 * Math.abs(Math.sin(m.age * 18))
       p.alpha = a
-      if (m.kind === 'coin') p.scaleX = Math.abs(Math.cos(m.age * 11 + m.a0)) > 0.45 ? 1 : 0.34 // gira
-      else if (m.kind === 'bill') p.scaleY = Math.floor(time * 8 + m.a0 * 5) % 3 === 0 ? 0.67 : 1 // aletea
+      if (m.kind === 'coin') p.scaleX = Math.abs(Math.cos(m.age * 11 + m.ph)) > 0.45 ? 1 : 0.34 // gira
+      else if (m.kind === 'bill') p.scaleY = Math.floor(time * 8 + m.ph) % 3 === 0 ? 0.67 : 1 // aletea
       out[n++] = m
     }
     out.length = n
@@ -506,7 +508,8 @@ export class SnowView {
     this.time += dt
     if (changed) this.scanDirty = true
     this.scanAge += dt
-    if (this.scanDirty && (this.scanAge >= SCAN_EVERY || this.scanW !== t.w)) this.scan(t)
+    // la nieve y el hielo solo existen en el bioma nieve: en los otros no se escanea la grilla
+    if (this.on && this.scanDirty && (this.scanAge >= SCAN_EVERY || this.scanW !== t.w)) this.scan(t)
     for (const [id, s] of this.iceSlide) {
       s.left -= dt
       if (s.left <= 0) this.iceSlide.delete(id)
@@ -516,7 +519,7 @@ export class SnowView {
       this.placeMist(t, x0, x1, wind)
       if (dt > 0) this.breathe(players, dt, wind, crewIn)
     }
-    this.surfaceGlints(t, x0, x1, y0, y1)
+    if (this.on) this.surfaceGlints(t, x0, x1, y0, y1)
     this.motes.update(dt, this.time)
   }
 

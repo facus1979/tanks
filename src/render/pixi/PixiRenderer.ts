@@ -1046,7 +1046,7 @@ export class PixiRenderer implements GameRenderer {
       seen.add(p.id)
       let v = this.props.get(p.id)
       if (!v) {
-        v = isLootKind(p.kind) ? this.loot.make(p) : new PropView(p)
+        v = isLootKind(p.kind) ? this.loot.make() : new PropView(p)
         this.props.set(p.id, v)
         this.propLayer.addChild(v.root)
       }

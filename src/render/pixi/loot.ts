@@ -11,6 +11,7 @@ import type { Art } from './assets'
 import { loadManifest, loadTexture } from './assets'
 import { OUT } from './fallback'
 import type { Fx } from './fx'
+import { LIQ } from './liquids'
 import { Motes } from './snow'
 import { mix, mul, rnd } from './raster'
 
@@ -163,7 +164,7 @@ export class LootKit {
       const yi = Math.round(y)
       if (xi < 0 || yi < 0 || xi >= t.w || yi >= t.h) return false
       const m = t.front[yi * t.w + xi]
-      return m !== 0 && m !== 10 && m !== 11 // ni aire ni líquido
+      return m !== 0 && LIQ[m] === 0 // ni aire ni líquido
     }
   }
 
@@ -203,8 +204,8 @@ export class LootKit {
     return this.dollarTex
   }
 
-  make(p: Prop): LootProp {
-    return new LootProp(p, this)
+  make(): LootProp {
+    return new LootProp(this)
   }
 
   reset(): void {
@@ -229,7 +230,7 @@ export class LootKit {
     const cx = ev.x + w / 2
     const cy = ev.y + h / 2
     if (big) {
-      fx.explosion('bigfire', cx, cy - 2, 30, { [METAL]: 40 })
+      fx.explosion('bigfire', cx, cy - 2, 24, { [METAL]: 40 })
       fx.splinters(cx, cy, [0x8a8a84, 0x5a5a56, 0xb0b0a8, 0x2a2622], 16)
     } else fx.splinters(cx, cy, [0xa8845a, 0x8a6a44, 0x6e5236, 0x8a8a84], 12)
     const nCoins = big ? 22 : 14
@@ -238,12 +239,12 @@ export class LootKit {
     for (let i = 0; i < nCoins; i++) {
       const a = -Math.PI * (0.15 + 0.7 * rnd(i, s, 231))
       const sp = 60 + rnd(i, s, 232) * (big ? 130 : 100)
-      this.motes.spawn({ kind: 'coin', x: cx + (rnd(i, s, 233) - 0.5) * w * 0.6, y: cy, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, ay: 300, life: 1.6 + rnd(i, s, 234) * 0.8, color: i % 4 === 0 ? 0xffe680 : GOLD, alpha: 1 + rnd(i, s, 235) * 0.001 })
+      this.motes.spawn({ kind: 'coin', x: cx + (rnd(i, s, 233) - 0.5) * w * 0.6, y: cy, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, ay: 300, life: 1.6 + rnd(i, s, 234) * 0.8, color: i % 4 === 0 ? 0xffe680 : GOLD, phase: rnd(i, s, 235) * 6.28 })
     }
     for (let i = 0; i < nBills; i++) {
       const a = -Math.PI * (0.2 + 0.6 * rnd(i, s, 241))
       const sp = 40 + rnd(i, s, 242) * 70
-      this.motes.spawn({ kind: 'bill', x: cx, y: cy - 2, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 30, drag: 2.2, ay: 40, life: 2.2 + rnd(i, s, 243) * 1, color: i % 3 === 0 ? 0x8ac86a : BILL, alpha: 1 - rnd(i, s, 244) * 0.001 })
+      this.motes.spawn({ kind: 'bill', x: cx, y: cy - 2, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 30, drag: 2.2, ay: 40, life: 2.2 + rnd(i, s, 243) * 1, color: i % 3 === 0 ? 0x8ac86a : BILL, phase: rnd(i, s, 244) * 6.28 })
     }
     for (let i = 0; i < (big ? 10 : 7); i++) {
       this.motes.spawn({ kind: 'star', x: cx + (rnd(i, s, 251) - 0.5) * w * 1.4, y: cy + (rnd(i, s, 252) - 0.5) * h * 1.6, vy: -8, life: 0.4 + rnd(i, s, 253) * 0.5, color: i % 2 ? 0xffffff : 0xfff0a0 })
@@ -270,10 +271,7 @@ export class LootProp {
   private sightKey = ''
   private sparkleAcc = 0
 
-  constructor(
-    private p0: Prop,
-    private kit: LootKit,
-  ) {
+  constructor(private kit: LootKit) {
     this.flash.blendMode = 'add'
     this.chute.anchor.set(0.5, 1)
     this.chute.visible = false
@@ -376,7 +374,6 @@ export class LootProp {
         }
       }
     }
-    void this.p0
   }
 
   private openChute(): void {
