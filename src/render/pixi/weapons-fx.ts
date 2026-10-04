@@ -646,7 +646,7 @@ export class WeaponsFx {
       const w = u < 0.5 ? 3 : 1
       g.rect(tailX - ux * s - (w >> 1), tailY - uy * s - (w >> 1), w, w, c, 1 - u * 0.5)
     }
-    glow.sprite(glowTexture(steering ? 14 : 9), tailX - ux * 2, tailY - uy * 2, { tint: steering ? 0x60c0ff : 0xffa040, alpha: steering ? 0.55 + 0.25 * Math.sin(this.time * 18) : 0.4 })
+    glow.sprite(glowTexture(steering ? 11 : 8), tailX - ux * 2, tailY - uy * 2, { tint: steering ? 0x2a7aff : 0xff8a30, alpha: steering ? 0.4 + 0.2 * Math.sin(this.time * 18) : 0.35 })
     if (this.missileTex) {
       g.sprite(this.missileTex, x, y, { rot: Math.atan2(uy, ux) })
     } else {
