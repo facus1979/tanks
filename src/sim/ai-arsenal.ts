@@ -39,6 +39,8 @@ export function planSteer(state: GameState, g: GuidedState, target: Player, sky?
         best = d
       }
     }
+    // ya va derecho al blanco sin tocar nada: el resto en 0
+    if (best === 0 && bestMiss === 0) break
     dirs.push(best)
     const r = steerGuided(state, cur, [best], false)
     if (r.hit) break

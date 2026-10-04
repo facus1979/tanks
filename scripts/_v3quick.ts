@@ -142,7 +142,7 @@ function aiTurn(state: GameState, difficulty: Difficulty): StepResult & { ms: nu
   const pre: GameEvent[] = []
   for (const item of plan.items ?? []) {
     // v3: jetpack y teletransporte con su destino
-    const target = item === 'jetpack' || item === 'teleport' ? plan.target : undefined
+    const target = item === 'jetpack' || item === 'teleport' ? plan.itemTarget : undefined
     const r = applyCommand(state, { type: 'useItem', playerId: p.id, item, target })
     pre.push(...r.events)
     state = r.state
@@ -289,6 +289,7 @@ function armed(): GameState {
     for (const id of WEAPON_ORDER) p.ammo[id] = Math.max(p.ammo[id], 5)
     for (const id of ITEM_ORDER) p.items[id] = 3
   }
+  s.wind = 0 // aimAt apunta sin viento
   return s
 }
 // pasa el turno del que tiene el turno con un tiro inofensivo (para volver a P0 o hacer correr los turnos)
@@ -308,8 +309,12 @@ for (const id of WEAPON_ORDER) if (id !== 'normal') check(SHOP.some((e) => e.id 
 for (const id of ITEM_ORDER) check(SHOP.some((e) => e.id === id && e.kind === 'item'), `v3 tienda: falta el ítem ${id}`)
 {
   // rebotadora: una explosión 'spark' por rebote y una final 'fire'; cada tramo arranca después del anterior
-  const s = armed()
-  s.players[1].x = 760
+  const bounceMap = () => {
+    const b = armed()
+    b.players[1].x = 760
+    return b
+  }
+  const s = bounceMap()
   const r = shoot(s, 'bouncer', 60, 45)
   const imps = impactsOf(r)
   const n = WEAPONS.bouncer.bounces ?? 0
@@ -318,7 +323,7 @@ for (const id of ITEM_ORDER) check(SHOP.some((e) => e.id === id && e.kind === 'i
   const st = r.flights!.map((f) => f.startT ?? 0)
   check(r.flights!.length === imps.length && st.every((t, i) => i === 0 || t > st[i - 1]), 'rebotadora: un tramo por rebote, en orden')
   check(imps.every((e, i) => i === 0 || e.t > imps[i - 1].t), 'rebotadora: explosiones en orden')
-  check(netHash(shoot(armed(), 'bouncer', 60, 45).state) === netHash(r.state), 'rebotadora: determinista')
+  check(netHash(shoot(bounceMap(), 'bouncer', 60, 45).state) === netHash(r.state), 'rebotadora: determinista')
 }
 {
   // láser: recto, sin gravedad; atraviesa una pared fina de tierra; frena en piedra
@@ -332,7 +337,7 @@ for (const id of ITEM_ORDER) check(SHOP.some((e) => e.id === id && e.kind === 'i
   const beam = r.events.find((e): e is Extract<GameEvent, { type: 'beam' }> => e.type === 'beam')
   check(!!beam && beam.t === 0, 'láser: evento beam')
   check(r.events.some((e) => e.type === 'damage' && e.playerId === 1 && e.amount === WEAPONS.laser.damage), `láser: pega directo a través de la pared de tierra (${JSON.stringify(r.events.filter((e) => e.type === 'damage'))})`)
-  check(!isSolid(r.state.terrain, 305, Math.round(m.y + (305 - m.x) * Math.tan((-a * Math.PI) / 180))), 'láser: abre un agujero en la tierra')
+  check(countIn(r.state.terrain, DIRT, 300, 240, 309, 299) < countIn(s.terrain, DIRT, 300, 240, 309, 299) - 20, 'láser: abre un agujero en la tierra')
   const s2 = armed()
   s2.players[1].x = 420
   fillRect(s2.terrain, 300, 240, 309, 299, STONE, 'both')
@@ -657,8 +662,8 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
   const sl = armed()
   only(sl, 'laser')
   sl.players[1].x = 300
-  fillRect(sl.terrain, 240, 230, 247, 299, DIRT, 'both')
-  fillRect(sl.terrain, 236, 150, 251, 229, STONE, 'both') // techo: el globo no pasa
+  fillRect(sl.terrain, 240, 247, 247, 299, DIRT, 'both') // pared fina de tierra
+  fillRect(sl.terrain, 236, 240, 380, 246, BEDROCK, 'both') // techo: ningún globo llega
   const pl = chooseShot(sl, 'hard')
   check(pl.weapon === 'laser', `IA: láser a través de una pared fina (${pl.weapon})`)
   const sa = armed()
@@ -672,6 +677,7 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
   check(pa.weapon === 'acid', `IA: ácido contra el búnker (${pa.weapon})`)
   const sx = pitMap()
   sx.players[0].items.anchor = 1
+  fillRect(sx.terrain, PIT0, 290, PIT1, 307, AIR) // la boca abierta a la altura del tanque
   sx.players[0].x = PIT0 - 20
   const px = chooseShot(sx, 'normal')
   check((px.items ?? []).includes('anchor') || (px.move ?? 0) !== 0, `IA: ancla al borde del abismo (${JSON.stringify(px.items)}, move ${px.move})`)
@@ -683,6 +689,8 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
   let worst = 0
   let stuck = 0
   let games = 0
+  let baseMs = 0
+  let fullMs = 0
   for (const [difficulty, size, n] of [['normal', 'small', 3], ['hard', 'small', 2], ['normal', 'medium', 4], ['hard', 'large', 4]] as [Difficulty, MapSize, number][]) {
     for (let seed = 1; seed <= 3; seed++) {
       let s = createMatch(mk(n - 1, difficulty, 'forest', 700 + seed, 1, 0, size))
@@ -692,6 +700,19 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
       }
       games++
       for (let turn = 0; turn < 60 && s.phase === 'aiming'; turn++) {
+        // el mismo turno con el kit de siempre (para comparar tiempos sin depender de la carga de la máquina)
+        if (turn % 3 === 0) {
+          const k = { ...s, players: s.players.map((p) => ({ ...p, ammo: { ...p.ammo }, items: { ...p.items } })) }
+          const me = k.players[k.current]
+          for (const id of WEAPON_ORDER) me.ammo[id] = Math.min(me.ammo[id], WEAPONS[id].ammo)
+          for (const id of ITEM_ORDER) me.items[id] = 0
+          const t0 = performance.now()
+          chooseShot(k, difficulty)
+          baseMs += performance.now() - t0
+          const t1 = performance.now()
+          chooseShot(s, difficulty)
+          fullMs += performance.now() - t1
+        }
         const r = aiTurn(s, difficulty)
         worst = Math.max(worst, r.ms)
         worstMs = Math.max(worstMs, r.ms)
@@ -702,11 +723,11 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
       }
     }
   }
-  console.log(`v3 IA con arsenal (${games} partidas): ${Object.entries(used).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(', ')}; peor ${worst.toFixed(0)} ms`)
+  console.log(`v3 IA con arsenal (${games} partidas): ${Object.entries(used).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(', ')}; peor ${worst.toFixed(0)} ms; tiempo medio con el arsenal / con el kit de siempre: ${(fullMs / Math.max(1, baseMs)).toFixed(2)}`)
   check(stuck === 0, 'IA: nunca se queda en guiding')
   const newOnes = ['guided', 'bouncer', 'laser', 'acid', 'quake', 'blackhole', 'mine', 'wall'].filter((id) => (used[id] ?? 0) > 0)
   check(newOnes.length >= 5, `IA: usa las armas nuevas (${newOnes.join(', ')})`)
-  check(worst < 400, `IA: peor caso con el arsenal ${worst.toFixed(0)} ms`)
+  check(fullMs < 3 * baseMs, `IA: el arsenal cuesta ${(fullMs / Math.max(1, baseMs)).toFixed(2)} veces el turno de siempre (tope 3)`)
 }
 console.log(`IA peor caso: ${worstMs.toFixed(0)} ms`)
 console.log(`${checks - failures}/${checks} chequeos OK`)

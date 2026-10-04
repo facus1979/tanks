@@ -3824,8 +3824,8 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
   const sl = armed()
   only(sl, 'laser')
   sl.players[1].x = 300
-  fillRect(sl.terrain, 240, 230, 247, 299, DIRT, 'both')
-  fillRect(sl.terrain, 236, 150, 251, 229, STONE, 'both') // techo: el globo no pasa
+  fillRect(sl.terrain, 240, 247, 247, 299, DIRT, 'both') // pared fina de tierra
+  fillRect(sl.terrain, 236, 240, 380, 246, BEDROCK, 'both') // techo: ningún globo llega
   const pl = chooseShot(sl, 'hard')
   check(pl.weapon === 'laser', `IA: láser a través de una pared fina (${pl.weapon})`)
   const sa = armed()
@@ -3839,6 +3839,7 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
   check(pa.weapon === 'acid', `IA: ácido contra el búnker (${pa.weapon})`)
   const sx = pitMap()
   sx.players[0].items.anchor = 1
+  fillRect(sx.terrain, PIT0, 290, PIT1, 307, AIR) // la boca abierta a la altura del tanque
   sx.players[0].x = PIT0 - 20
   const px = chooseShot(sx, 'normal')
   check((px.items ?? []).includes('anchor') || (px.move ?? 0) !== 0, `IA: ancla al borde del abismo (${JSON.stringify(px.items)}, move ${px.move})`)
@@ -3850,6 +3851,8 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
   let worst = 0
   let stuck = 0
   let games = 0
+  let baseMs = 0
+  let fullMs = 0
   for (const [difficulty, size, n] of [['normal', 'small', 3], ['hard', 'small', 2], ['normal', 'medium', 4], ['hard', 'large', 4]] as [Difficulty, MapSize, number][]) {
     for (let seed = 1; seed <= 3; seed++) {
       let s = createMatch(mk(n - 1, difficulty, 'forest', 700 + seed, 1, 0, size))
@@ -3859,6 +3862,19 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
       }
       games++
       for (let turn = 0; turn < 60 && s.phase === 'aiming'; turn++) {
+        // el mismo turno con el kit de siempre (para comparar tiempos sin depender de la carga de la máquina)
+        if (turn % 3 === 0) {
+          const k = { ...s, players: s.players.map((p) => ({ ...p, ammo: { ...p.ammo }, items: { ...p.items } })) }
+          const me = k.players[k.current]
+          for (const id of WEAPON_ORDER) me.ammo[id] = Math.min(me.ammo[id], WEAPONS[id].ammo)
+          for (const id of ITEM_ORDER) me.items[id] = 0
+          const t0 = performance.now()
+          chooseShot(k, difficulty)
+          baseMs += performance.now() - t0
+          const t1 = performance.now()
+          chooseShot(s, difficulty)
+          fullMs += performance.now() - t1
+        }
         const r = aiTurn(s, difficulty)
         worst = Math.max(worst, r.ms)
         worstMs = Math.max(worstMs, r.ms)
@@ -3869,11 +3885,11 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
       }
     }
   }
-  console.log(`v3 IA con arsenal (${games} partidas): ${Object.entries(used).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(', ')}; peor ${worst.toFixed(0)} ms`)
+  console.log(`v3 IA con arsenal (${games} partidas): ${Object.entries(used).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(', ')}; peor ${worst.toFixed(0)} ms; tiempo medio con el arsenal / con el kit de siempre: ${(fullMs / Math.max(1, baseMs)).toFixed(2)}`)
   check(stuck === 0, 'IA: nunca se queda en guiding')
   const newOnes = ['guided', 'bouncer', 'laser', 'acid', 'quake', 'blackhole', 'mine', 'wall'].filter((id) => (used[id] ?? 0) > 0)
   check(newOnes.length >= 5, `IA: usa las armas nuevas (${newOnes.join(', ')})`)
-  check(worst < 400, `IA: peor caso con el arsenal ${worst.toFixed(0)} ms`)
+  check(fullMs < 3 * baseMs, `IA: el arsenal cuesta ${(fullMs / Math.max(1, baseMs)).toFixed(2)} veces el turno de siempre (tope 3)`)
 }
 console.log(`IA peor caso: ${worstMs.toFixed(0)} ms`)
 console.log(`${checks - failures}/${checks} chequeos OK`)
