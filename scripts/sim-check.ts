@@ -3783,6 +3783,14 @@ const missShot = (s: GameState) => shoot(s, 'normal', s.players[s.current].x < s
   check(c.players[0].personality === 'sniper' && c.players[1].personality === 'digger', 'v3 personalidades: la del casillero')
 }
 {
+  // v3 perfil: el color pedido en el casillero (SlotConfig.color); repetido, el siguiente libre; sin pedido, por índice
+  const col = (slots: SlotConfig[]) => createMatch({ slots, rounds: 1, difficulty: 'normal', seed: 2 }).players.map((p) => TANK_COLORS.indexOf(p.color)).join()
+  check(col([{ kind: 'human' }, { kind: 'ai' }, { kind: 'ai' }]) === '0,1,2', 'v3 colores: sin pedido, por índice')
+  check(col([{ kind: 'human', color: 5 }, { kind: 'ai' }]) === '5,1', 'v3 colores: el pedido')
+  check(col([{ kind: 'human', color: 1 }, { kind: 'ai' }]) === '1,2', 'v3 colores: el del índice ya tomado pasa al siguiente')
+  check(col([{ kind: 'human', color: 3 }, { kind: 'human', color: 3 }, { kind: 'ai', color: 9 }]) === '3,4,2', `v3 colores: repetidos (${col([{ kind: 'human', color: 3 }, { kind: 'human', color: 3 }, { kind: 'ai', color: 9 }])})`)
+}
+{
   // personalidades: perfil (armas, distancia de tiro, movimiento) y victorias. 4 IA, una de cada una, con el
   // orden de los casilleros rotando; Chico y Mediano.
   interface Prof { turns: number; shots: number; dist: number; moved: number; weapons: Record<string, number>; wins: number; bonus: number; cover: number }

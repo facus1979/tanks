@@ -89,13 +89,14 @@ export function createMatch(config: MatchConfig): GameState {
   const rounds = Math.max(1, Math.floor(config.rounds || 1))
   const biomeMode = config.biome ?? BIOMES[0]
   const size: MapSize = config.size && MAP_SIZES[config.size] ? config.size : 'small'
+  const colors = slotColors(slots)
   const players: Player[] = slots.map((slot, i) => {
     const crew = slot.crew && CREWS.includes(slot.crew) ? slot.crew : CREWS[i % CREWS.length]
     return {
       id: i,
       name: slot.name?.trim() || CREW_NAMES[crew],
       kind: slot.kind === 'human' ? 'human' : 'ai',
-      color: TANK_COLORS[i % TANK_COLORS.length],
+      color: colors[i],
       crew,
       x: 0,
       y: 0,
@@ -149,6 +150,31 @@ export function createMatch(config: MatchConfig): GameState {
   }
   setupRound(state)
   return state
+}
+
+// v3: color de cada casillero. El pedido (SlotConfig.color, índice en TANK_COLORS) si viene y está libre; si
+// dos casilleros piden el mismo, el segundo toma el siguiente libre. Los que no piden, el de su índice como
+// antes (o el siguiente libre si ya lo tomó un pedido). Sin pedidos da los mismos colores que antes de v3.
+export function slotColors(slots: { color?: number }[]): number[] {
+  const n = TANK_COLORS.length
+  const used = new Set<number>()
+  const idx: number[] = new Array(slots.length).fill(-1)
+  const free = (from: number) => {
+    for (let k = 0; k < n; k++) if (!used.has((from + k) % n)) return (from + k) % n
+    return from % n
+  }
+  slots.forEach((s, i) => {
+    const c = s.color
+    if (c === undefined || !Number.isInteger(c) || c < 0 || c >= n) return
+    idx[i] = free(c)
+    used.add(idx[i])
+  })
+  slots.forEach((_, i) => {
+    if (idx[i] >= 0) return
+    idx[i] = free(i % n)
+    used.add(idx[i])
+  })
+  return idx.map((k) => TANK_COLORS[k])
 }
 
 // v2.3: sal del sorteo de lugares y primer turno (ver setupRound).
