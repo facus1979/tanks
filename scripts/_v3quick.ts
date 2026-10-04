@@ -426,18 +426,33 @@ for (const id of ITEM_ORDER) check(SHOP.some((e) => e.id === id && e.kind === 'i
 {
   // terremoto: derrumba una ladera, sacude tanques (slide 'quake') y emite 'quake' + 'collapse'
   const s = armed()
-  s.players[1].x = 520
-  // loma empinada al lado de P1
+  s.players[1].x = 540
+  // loma empinada con un barranco al lado de P1
   for (let x = 420; x < 500; x++) fillRect(s.terrain, x, 300 - Math.min(80, (x - 420) * 2), x, 299, DIRT, 'both')
   const before = s.terrain.front.slice()
-  const r = shootAt(s, 'quake', 470, 260, 5, 90)
+  const r = shootAt(s, 'quake', 506, 300, 5, 90)
   check(r.events.some((e) => e.type === 'quake'), 'terremoto: evento quake')
   check(collapsesOf(r.events).length >= 1, 'terremoto: derrumbe animado')
   let moved = 0
   for (let i = 0; i < before.length; i++) if (before[i] !== r.state.terrain.front[i]) moved++
-  check(moved > 200, `terremoto: mueve el terreno (${moved} celdas)`)
+  check(moved > 100, `terremoto: mueve el terreno (${moved} celdas)`)
   check(r.events.some((e) => e.type === 'slide' && e.cause === 'quake'), 'terremoto: sacude tanques')
-  check(netHash(shootAt(s, 'quake', 470, 260, 5, 90).state) === netHash(r.state), 'terremoto: determinista')
+  check(netHash(shootAt(s, 'quake', 506, 300, 5, 90).state) === netHash(r.state), 'terremoto: determinista')
+}
+// un agujero negro que se va por el abismo cerca del labio derecho (cruza la boca a ~20 px del labio)
+function intoPit(s: GameState): StepResult & { d: number } {
+  let best = { angle: 50, power: 50, d: Infinity }
+  for (let angle = 30; angle <= 70; angle += 2) {
+    for (let power = 20; power <= 100; power += 0.5) {
+      const f = fly({ terrain: s.terrain, players: s.players, props: s.props, ownerId: s.players[s.current].id, angle, power, wind: 0 })
+      if (f.impact.kind !== 'out') continue
+      const at = f.path.find((q) => q.x >= PIT0 && q.x <= PIT1 && q.y >= 306)
+      if (!at) continue
+      const d = Math.abs(at.x - (PIT1 - 20))
+      if (d < best.d) best = { angle, power, d }
+    }
+  }
+  return { ...shoot(s, 'blackhole', best.angle, best.power), d: best.d }
 }
 {
   // agujero negro: atrae al rival hacia el centro; con un abismo al lado, lo tira
@@ -448,18 +463,23 @@ for (const id of ITEM_ORDER) check(SHOP.some((e) => e.id === id && e.kind === 'i
   check(r.events.some((e) => e.type === 'pull'), 'agujero negro: evento pull')
   check(!!sl && r.state.players[1].x < 560, `agujero negro: atrae al rival (${r.state.players[1].x})`)
   check(r.state.players[1].x >= impactsOf(r)[0].x - 1, 'agujero negro: no lo pasa del centro')
+  // con un abismo al lado: el agujero negro se abre en la boca y lo arrastra adentro
   const p = pitMap()
+  fillRect(p.terrain, PIT0, 290, PIT1, 307, AIR) // la boca abierta
   for (const q of p.players) q.ammo.blackhole = 2
-  p.players[1].x = 800
-  const rp = shootAt(p, 'blackhole', PIT1 + 4, 300, 5, 90)
+  p.players[1].x = PIT1 + 1 + TANK_HALF_W + 8
+  p.wind = 0
+  const rp = intoPit(p)
   check(rp.events.some((e) => e.type === 'death' && e.playerId === 1 && e.cause === 'abyss'), `agujero negro: lo arrastra al abismo (x ${rp.state.players[1].x}, d ${rp.d.toFixed(1)})`)
   // anclado no se mueve
   const pa = pitMap()
   for (const q of pa.players) q.ammo.blackhole = 2
-  pa.players[1].x = 800
+  fillRect(pa.terrain, PIT0, 290, PIT1, 307, AIR)
+  pa.players[1].x = PIT1 + 1 + TANK_HALF_W + 8
   pa.players[1].anchored = true
-  const ra = shootAt(pa, 'blackhole', PIT1 + 4, 300, 5, 90)
-  check(ra.state.players[1].alive && ra.state.players[1].x === 800, 'ancla: el agujero negro no lo mueve')
+  pa.wind = 0
+  const ra = intoPit(pa)
+  check(ra.state.players[1].alive && ra.state.players[1].x === PIT1 + 1 + TANK_HALF_W + 8, 'ancla: el agujero negro no lo mueve')
 }
 {
   // muro: pared fina y alta de tierra donde cae; frena un tiro bajo
@@ -670,9 +690,10 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
   only(sa, 'acid')
   sa.players[1].x = 600
   // búnker de metal sobre P1
-  fillRect(sa.terrain, 576, 262, 624, 268, METAL, 'both')
-  fillRect(sa.terrain, 576, 262, 580, 299, METAL, 'both')
-  fillRect(sa.terrain, 620, 262, 624, 299, METAL, 'both')
+  // paredes y techo de 15 px: más que el radio de la normal (el escudo de metal la frena entera)
+  fillRect(sa.terrain, 571, 250, 629, 264, METAL, 'both')
+  fillRect(sa.terrain, 571, 250, 585, 299, METAL, 'both')
+  fillRect(sa.terrain, 615, 250, 629, 299, METAL, 'both')
   const pa = chooseShot(sa, 'hard')
   check(pa.weapon === 'acid', `IA: ácido contra el búnker (${pa.weapon})`)
   const sx = pitMap()

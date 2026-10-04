@@ -174,6 +174,18 @@ function aiTurn(state: GameState, difficulty: Difficulty): StepResult & { ms: nu
   return { ...r, events: [...pre, ...r.events], ms, plan }
 }
 
+// v3: las correcciones del teledirigido de un plan, en tandas de 2 ticks (como las manda la red); vacío si no es
+// teledirigido. Las tandas que sobran después de que el misil cayó no hacen nada.
+function steerChunks(plan: ShotPlan): (-1 | 0 | 1)[][] {
+  if (plan.weapon !== 'guided') return []
+  const out: (-1 | 0 | 1)[][] = []
+  for (let i = 0; i < 30; i += 2) out.push([plan.steer?.[i] ?? 0, plan.steer?.[i + 1] ?? 0])
+  return out
+}
+function targetOf2(plan: ShotPlan, item: ItemId) {
+  return item === 'jetpack' || item === 'teleport' ? plan.itemTarget : undefined
+}
+
 function playTurns(s: GameState, turns: number, difficulty: Difficulty = 'normal'): { state: GameState; events: GameEvent[] } {
   let state = s
   const events: GameEvent[] = []
@@ -1311,12 +1323,14 @@ function toRoundover(): GameState {
       if (a.phase === 'aiming') {
         const p = a.players[a.current]
         const plan = chooseShot(a, config.difficulty)
-        for (const item of plan.items ?? []) send({ type: 'useItem', playerId: p.id, item })
+        for (const item of plan.items ?? []) send({ type: 'useItem', playerId: p.id, item, target: targetOf2(plan, item) })
         for (let i = 0; i < Math.abs(plan.move ?? 0); i++) send({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
         if (a.current !== p.id || a.phase !== 'aiming') continue
         send({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon })
         send({ type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power })
         send({ type: 'fire', playerId: p.id })
+      for (const dirs of steerChunks(plan)) send({ type: 'steer', playerId: p.id, dirs })
+        for (const dirs of steerChunks(plan)) send({ type: 'steer', playerId: p.id, dirs })
       } else if (a.phase === 'roundover') send({ type: 'nextRound' })
       else if (a.phase === 'shop') {
         for (const p of a.players) {
@@ -1885,9 +1899,9 @@ type DeathEv = Extract<GameEvent, { type: 'death' }>
       const p = a.players[a.current]
       const plan = chooseShot(a, 'normal')
       const cmds: Command[] = []
-      for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item })
+      for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item, target: targetOf2(plan, item) })
       for (let i = 0; i < Math.abs(plan.move ?? 0); i++) cmds.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
-      cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+      cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id }, ...steerChunks(plan).map((dirs): Command => ({ type: 'steer', playerId: p.id, dirs })))
       for (const cmd of cmds) {
         a = applyCommand(a, cmd).state
         b = applyCommand(b, cmd).state
@@ -2295,7 +2309,7 @@ function breakWall(m: number): { before: GameState; r: StepResult } {
       const plan = chooseShot(a, 'normal')
       const cmds: Command[] = []
       for (let i = 0; i < Math.abs(plan.move ?? 0); i++) cmds.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
-      cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+      cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id }, ...steerChunks(plan).map((dirs): Command => ({ type: 'steer', playerId: p.id, dirs })))
       for (const cmd of cmds) {
         a = applyCommand(a, cmd).state
         b = applyCommand(b, cmd).state
@@ -2832,12 +2846,13 @@ function targetOf(s: GameState, ammo?: Partial<Record<WeaponId, number>>): numbe
       if (a.round === 2 && opener < 0) opener = a.current
       const p = a.players[a.current]
       const plan = chooseShot(a, 'normal')
-      for (const item of plan.items ?? []) send({ type: 'useItem', playerId: p.id, item })
+      for (const item of plan.items ?? []) send({ type: 'useItem', playerId: p.id, item, target: targetOf2(plan, item) })
       for (let i = 0; i < Math.abs(plan.move ?? 0); i++) send({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
       if (a.current !== p.id || a.phase !== 'aiming') continue
       send({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon })
       send({ type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power })
       send({ type: 'fire', playerId: p.id })
+      for (const dirs of steerChunks(plan)) send({ type: 'steer', playerId: p.id, dirs })
       if (!snap && steps > 60) {
         snap = true
         b = decodeState(encodeState(b))
@@ -3396,9 +3411,9 @@ const countIn = (t: { w: number; front: Uint8Array }, m: number, x0: number, y0:
     const p = a.players[a.current]
     const plan = chooseShot(a, 'normal')
     const cmds: Command[] = []
-    for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item })
+    for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item, target: targetOf2(plan, item) })
     for (let i = 0; i < Math.abs(plan.move ?? 0); i++) cmds.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
-    cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+    cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id }, ...steerChunks(plan).map((dirs): Command => ({ type: 'steer', playerId: p.id, dirs })))
     for (const cmd of cmds) {
       const ra = applyCommand(a, cmd)
       const rb = applyCommand(b, cmd)
@@ -3417,9 +3432,9 @@ const countIn = (t: { w: number; front: Uint8Array }, m: number, x0: number, y0:
     const p = c.players[c.current]
     const plan = chooseShot(c, 'normal')
     const cmds: Command[] = []
-    for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item })
+    for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item, target: targetOf2(plan, item) })
     for (let i = 0; i < Math.abs(plan.move ?? 0); i++) cmds.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
-    cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+    cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id }, ...steerChunks(plan).map((dirs): Command => ({ type: 'steer', playerId: p.id, dirs })))
     for (const cmd of cmds) {
       const rc = applyCommand(c, cmd)
       log2 += JSON.stringify(rc.events.map((e) => (e.type === 'collapse' ? { ...e, patches: e.patches.length } : e.type === 'flow' ? { ...e, patches: e.patches.length } : e)))
@@ -3604,7 +3619,7 @@ for (const id of ITEM_ORDER) check(SHOP.some((e) => e.id === id && e.kind === 'i
 // un agujero negro que se va por el abismo cerca del labio derecho (cruza la boca a ~20 px del labio)
 function intoPit(s: GameState): StepResult & { d: number } {
   let best = { angle: 50, power: 50, d: Infinity }
-  for (let angle = 30; angle <= 70; angle += 2) {
+  for (let angle = 8; angle <= 70; angle += 2) {
     for (let power = 20; power <= 100; power += 0.5) {
       const f = fly({ terrain: s.terrain, players: s.players, props: s.props, ownerId: s.players[s.current].id, angle, power, wind: 0 })
       if (f.impact.kind !== 'out') continue
@@ -3629,7 +3644,7 @@ function intoPit(s: GameState): StepResult & { d: number } {
   const p = pitMap()
   fillRect(p.terrain, PIT0, 290, PIT1, 307, AIR) // la boca abierta
   for (const q of p.players) q.ammo.blackhole = 2
-  p.players[1].x = PIT1 + 1 + TANK_HALF_W + 8
+  p.players[1].x = PIT1 + 1 + TANK_HALF_W + 2
   p.wind = 0
   const rp = intoPit(p)
   check(rp.events.some((e) => e.type === 'death' && e.playerId === 1 && e.cause === 'abyss'), `agujero negro: lo arrastra al abismo (x ${rp.state.players[1].x}, d ${rp.d.toFixed(1)})`)
@@ -3637,11 +3652,11 @@ function intoPit(s: GameState): StepResult & { d: number } {
   const pa = pitMap()
   for (const q of pa.players) q.ammo.blackhole = 2
   fillRect(pa.terrain, PIT0, 290, PIT1, 307, AIR)
-  pa.players[1].x = PIT1 + 1 + TANK_HALF_W + 8
+  pa.players[1].x = PIT1 + 1 + TANK_HALF_W + 2
   pa.players[1].anchored = true
   pa.wind = 0
   const ra = intoPit(pa)
-  check(ra.state.players[1].alive && ra.state.players[1].x === PIT1 + 1 + TANK_HALF_W + 8, 'ancla: el agujero negro no lo mueve')
+  check(ra.state.players[1].alive && ra.state.players[1].x === PIT1 + 1 + TANK_HALF_W + 2, 'ancla: el agujero negro no lo mueve')
 }
 {
   // muro: pared fina y alta de tierra donde cae; frena un tiro bajo
@@ -3753,6 +3768,15 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
   const a30 = runIn(30)
   check(a1.c.phase === 'aiming' && a1.c.current === 1 && a1.c.guided === null, 'teledirigido: termina el turno')
   check(netHash(a1.c) === netHash(a2.c) && netHash(a1.c) === netHash(a30.c), 'teledirigido: mismo resultado en tandas de 1, 2 y 30')
+  // partir una tanda en cualquier punto da el mismo estado (la red predice con tandas parciales)
+  let splitBad = 0
+  for (let k = 1; k < 12; k++) {
+    const whole = applyCommand(r.state, { type: 'steer', playerId: 0, dirs: dirs.slice(0, 12) }).state
+    const half = applyCommand(r.state, { type: 'steer', playerId: 0, dirs: dirs.slice(0, k) }).state
+    const both = applyCommand(half, { type: 'steer', playerId: 0, dirs: dirs.slice(k, 12) }).state
+    if (netHash(whole) !== netHash(both)) splitBad++
+  }
+  check(splitBad === 0, `teledirigido: [a] y después [b] = [a, b] (${splitBad} cortes distintos)`)
   check(a1.ev.some((e) => e.type === 'impact') && a1.ev.some((e) => e.type === 'turn'), 'teledirigido: explota y pasa el turno')
   const imp = a1.ev.find((e): e is Extract<GameEvent, { type: 'impact' }> => e.type === 'impact')
   check(!!imp && imp.t > r.state.guided!.t, 'teledirigido: tiempos desde el disparo')

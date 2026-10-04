@@ -8,8 +8,8 @@
 //   WOBBLE_KNOT ticks, interpolados) derivado de GuidedState.seed: determinista, pero nadie lo ve venir (la IA
 //   planifica sin él). Por eso nunca es un tiro seguro.
 // - Si choca durante el guiado, explota ahí. Si se acaba el guiado, cae libre (sin giro ni temblor).
-// - Todo con subpasos enteros (SUBSTEP = 1/240: 12 por tick), así el resultado no depende de en cuántas tandas
-//   lleguen los 'steer'.
+// - Todo con subpasos enteros (SUBSTEP = 1/240: 12 por tick; GuidedState.t también va en esa grilla), así el
+//   resultado no depende de en cuántas tandas lleguen los 'steer': [a] y después [b] da el mismo estado que [a, b].
 import { fly, type FlightResult, type FlyOptions } from './ballistics'
 import { hash2, hashSeed } from './rng'
 import { GUIDE_TIME, STEER_RATE, STEER_TICK, STEER_WOBBLE, SUBSTEP, type GameState, type GuidedState, type Player } from './types'
@@ -84,7 +84,8 @@ export function steerGuided(state: GameState, g: GuidedState, dirs: readonly num
       y: hit ? flight.impact.y : end.y,
       vx: flight.vel.x,
       vy: flight.vel.y,
-      t: g.t + flight.time,
+      // t en la grilla de subpasos (enteros): partir una tanda en dos da exactamente el mismo estado
+      t: (Math.round(g.t / SUBSTEP) + (hit ? Math.round(flight.time / SUBSTEP) : n * TICK_STEPS)) * SUBSTEP,
       guide: hit ? 0 : Math.max(0, (ticksLeft(g) - used) * STEER_TICK),
     },
   }
@@ -104,7 +105,7 @@ export function startGuided(state: GameState, shooter: Player, apex: FlightResul
     y: apex.impact.y,
     vx: apex.vel.x,
     vy: apex.vel.y,
-    t,
+    t: Math.round(t / SUBSTEP) * SUBSTEP,
     guide: GUIDE_TICKS * STEER_TICK,
     seed: guidedSeed(state, shooter),
   }
