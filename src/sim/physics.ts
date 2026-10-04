@@ -24,6 +24,8 @@ import {
 } from './types'
 
 export const BARREL_RADIUS = 18
+// v3: fracción del radio de una explosión que rompe un objetivo pago (más grande y más duro que una caja)
+export const TARGET_BREAK = 0.8
 export const BARREL_DAMAGE = 30
 export const CHAIN_DELAY = 0.18
 export const CRUSH_DEPTH = 8
@@ -150,7 +152,8 @@ export function resolveBlast(state: GameState, first: Blast, after?: (events: Ga
     for (const prop of state.props) {
       if (!prop.alive) continue
       const d = propDistance(prop, b.x, b.y)
-      const breaks = prop.kind === 'barrel' || prop.kind === 'crate' ? d <= b.radius : d <= b.radius * 0.6
+      // v3: la caja de botín se rompe como una caja; el objetivo pago, con el 80% del radio
+      const breaks = prop.kind === 'barrel' || prop.kind === 'crate' || prop.kind === 'loot' ? d <= b.radius : prop.kind === 'target' ? d <= b.radius * TARGET_BREAK : d <= b.radius * 0.6
       if (!breaks) continue
       prop.alive = false
       events.push({ type: 'prop', propId: prop.id, kind: prop.kind, x: prop.x, y: prop.y, destroyed: true })
@@ -243,7 +246,7 @@ function cover(t: Terrain, p: Player): number {
 
 function solidPropAt(props: Prop[], self: Prop, x: number, y: number): boolean {
   for (const o of props) {
-    if (o === self || !o.alive || (o.kind !== 'barrel' && o.kind !== 'crate')) continue
+    if (o === self || !o.alive || !FALLS[o.kind]) continue
     if (x >= o.x && x < o.x + o.w && y >= o.y && y < o.y + o.h) return true
   }
   return false
@@ -279,12 +282,15 @@ export function propSupported(state: GameState, prop: Prop): boolean {
   }
 }
 
+// Utilería que cae si pierde el apoyo (el resto se rompe). v3: botín y objetivos también caen.
+const FALLS: Partial<Record<Prop['kind'], boolean>> = { barrel: true, crate: true, loot: true, target: true }
+
 function settleProps(state: GameState, events: GameEvent[]): void {
   // de abajo hacia arriba, para que las pilas caigan juntas
   const order = state.props.filter((p) => p.alive).sort((a, b) => b.y + b.h - (a.y + a.h) || a.id - b.id)
   for (const prop of order) {
     if (propSupported(state, prop)) continue
-    if (prop.kind !== 'barrel' && prop.kind !== 'crate') {
+    if (!FALLS[prop.kind]) {
       prop.alive = false
       events.push({ type: 'prop', propId: prop.id, kind: prop.kind, x: prop.x, y: prop.y, destroyed: true })
       continue

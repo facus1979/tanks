@@ -84,7 +84,7 @@ export function skylineOf(terrain: Terrain, players: Player[], props: Prop[] = [
     for (let x = Math.max(0, x0); x <= Math.min(terrain.w - 1, x1); x++) if (top < sky[x]) sky[x] = top
   }
   for (const p of players) if (p.alive) lower(Math.floor(p.x - TANK_HALF_W), Math.floor(p.x + TANK_HALF_W), Math.floor(p.y - TANK_H))
-  for (const p of props) if (p.alive && (p.kind === 'barrel' || p.kind === 'crate')) lower(Math.floor(p.x), Math.ceil(p.x + p.w), Math.floor(p.y))
+  for (const p of props) if (p.alive && (p.kind === 'barrel' || p.kind === 'crate' || p.kind === 'loot' || p.kind === 'target')) lower(Math.floor(p.x), Math.ceil(p.x + p.w), Math.floor(p.y))
   return sky
 }
 
@@ -108,7 +108,7 @@ export function fly(opts: FlyOptions): FlightResult {
   const gravity = phys.gravity
   const path: Vec2[] = [{ x, y }]
   const tanks = opts.ignoreTanks ? [] : players.filter((p) => p.alive)
-  const solidProps = (opts.props ?? []).filter((p) => p.alive && (p.kind === 'barrel' || p.kind === 'crate'))
+  const solidProps = (opts.props ?? []).filter((p) => p.alive && (p.kind === 'barrel' || p.kind === 'crate' || p.kind === 'loot' || p.kind === 'target'))
   // el propio tanque solo cuenta cuando el proyectil ya salió de su caja
   let armed = !owner || !inTank(owner, x, y)
   let elapsed = 0
