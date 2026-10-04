@@ -526,6 +526,29 @@ async function steerLayerTest(a, b) {
 
 // ---------- v3: perfiles y teledirigido con la sim real ----------
 
+// applyCommand de las pestañas de la prueba del teledirigido. Con NET_TEST_FAKE_GUIDED=1 (solo para probar la
+// red mientras la sim tiene el 'steer' de mentira) simula un guiado de 30 ticks que mueve el misil y, al
+// terminar, resuelve el tiro con el fire real desde el estado de apuntado. Determinista como la sim.
+function guidedApply() {
+  const fake = process.env.NET_TEST_FAKE_GUIDED === '1'
+  return `
+  window.__apply3 = (s, c) => {
+    if (!${fake}) return sim.applyCommand(s, c)
+    const p = s.players[s.current]
+    if (c.type === 'fire' && s.phase === 'aiming' && p && p.id === c.playerId && p.weapon === 'guided')
+      return { state: { ...s, phase: 'guiding', guided: { ownerId: p.id, x: p.x, y: p.y - 100, vx: 0, vy: 50, t: 1, guide: 30, seed: 1 } }, events: [] }
+    if (c.type === 'steer') {
+      const g = s.guided
+      if (s.phase !== 'guiding' || !g || g.ownerId !== c.playerId) return { state: s, events: [] }
+      const ng = { ...g }
+      for (const d of c.dirs) { ng.x += d * 2; ng.y += 2; ng.guide-- }
+      if (ng.guide > 0) return { state: { ...s, guided: { ...ng, guide: ng.guide } }, events: [{ type: 'guide', guided: ng }] }
+      return sim.applyCommand({ ...s, phase: 'aiming', guided: null }, { type: 'fire', playerId: c.playerId })
+    }
+    return sim.applyCommand(s, c)
+  }`
+}
+
 // Anfitrión (A) y cliente (B) humanos en Chico, con la sim real y sin vistas. Los perfiles tienen que
 // llegar iguales a las dos réplicas. Después, si la sim tiene el guiado, cada uno tira un teledirigido:
 // el anfitrión lo dirige con dispatch y el cliente con steer + predicción (réplica + pendingSteers()).
@@ -552,9 +575,10 @@ async function guidedSimTest() {
     `(async () => {
       const sim = await import('/src/sim/index.ts')
       const net = await import('/src/net/index.ts')
+      ${guidedApply()}
       const S = (window.__G = { st: null, live: [] })
       const room = new net.HostRoom(net.createTransport('${TRANSPORT}'), {
-        apply: (c) => { const r = sim.applyCommand(S.st, c); if (r.state === S.st && !r.events.length) return false; S.st = r.state; return true },
+        apply: (c) => { const r = window.__apply3(S.st, c); if (r.state === S.st && !r.events.length) return false; S.st = r.state; return true },
         hash: () => sim.hashState(S.st),
         snapshot: () => sim.encodeState(S.st),
         guided: () => S.st?.guided ?? null,
@@ -572,9 +596,10 @@ async function guidedSimTest() {
     `(async () => {
       const sim = await import('/src/sim/index.ts')
       const net = await import('/src/net/index.ts')
+      ${guidedApply()}
       const S = (window.__G = { st: null, cfg: null, corrections: [] })
       const room = new net.ClientRoom(net.createTransport('${TRANSPORT}'), {
-        apply: (c) => { S.st = sim.applyCommand(S.st, c).state },
+        apply: (c) => { S.st = window.__apply3(S.st, c).state },
         hash: () => sim.hashState(S.st),
         onStart: (config, info) => { S.cfg = config; if (info.seq === 0) S.st = sim.createMatch(config) },
         onSnapshot: (seq, data) => { S.st = sim.decodeState(data) },
@@ -659,7 +684,7 @@ async function guidedSimTest() {
         `(async () => {
           const sim = await import('/src/sim/index.ts')
           const room = window.__room3, S = window.__G
-          const predicted = () => room.pendingSteers().reduce((s, c) => sim.applyCommand(s, c).state, S.st)
+          const predicted = () => room.pendingSteers().reduce((s, c) => window.__apply3(s, c).state, S.st)
           let ticks = 0
           await new Promise((res) => {
             const id = setInterval(() => {
