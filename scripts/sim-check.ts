@@ -78,7 +78,7 @@ import {
   type WeaponId,
 } from '../src/sim'
 import { tankTilt } from '../src/sim/tilt'
-import { propSupported, resolveBlast, blastFor } from '../src/sim/physics'
+import { propSupported, resolveBlast, blastFor, collapseAfterShot } from '../src/sim/physics'
 import { aiStats, lavaRisk } from '../src/sim/ai'
 import { LAVA_DELAY } from '../src/sim/game'
 import { skylineOf } from '../src/sim/ballistics'
@@ -3211,8 +3211,8 @@ const countIn = (t: { w: number; front: Uint8Array }, m: number, x0: number, y0:
     const t = s.terrain
     fillRect(t, 400, 300, WORLD_W - 1, WORLD_H - 4, AIR, 'front')
     for (let x = 400; x < WORLD_W; x++) fillRect(t, x, Math.min(360, 300 + Math.round((x - 400) * 1.2)), x, WORLD_H - 4, DIRT, 'front')
-    s.players[1].x = 470
-    s.players[1].y = tankFloor(t, 470, 0)
+    s.players[1].x = 455
+    s.players[1].y = tankFloor(t, 455, 0)
     s.players[1].hp = 100
     s.lava = lava
     s.calm = lava === null ? 0 : SUDDEN_DEATH_CALM
@@ -3246,8 +3246,9 @@ const countIn = (t: { w: number; front: Uint8Array }, m: number, x0: number, y0:
   const r = applyCommand(pre, { type: 'fire', playerId: 0 })
   const cols = collapsesOf(r.events)
   const debris = impactsOf(r).reduce((n, e) => n + (e.debris[DIRT] ?? 0), 0)
-  const high = countIn(r.state.terrain, DIRT, 380, 170, 392, 240)
-  check(cols.length === 1 && cols[0].cells > 600 && high === 0, `v2.4 derrumbe: el pilar no cayó (${cols.length} eventos, ${cols[0]?.cells} celdas, ${high} arriba)`)
+  // la parte de arriba (unas 90 filas) cae al cráter: la punta baja de y 170 a más de y 200
+  const high = countIn(r.state.terrain, DIRT, 380, 170, 392, 200)
+  check(cols.length === 1 && cols[0].cells > 900 && high === 0, `v2.4 derrumbe: el pilar no cayó (${cols.length} eventos, ${cols[0]?.cells} celdas, ${high} arriba)`)
   check(countT(r.state.terrain, DIRT) === dirt0 - debris, 'v2.4 derrumbe: la tierra que cae se conserva')
   // reproducir: impactos sobre una copia + parches del derrumbe + parches del flujo = grilla final
   const rep = cloneState(pre)
@@ -3288,7 +3289,7 @@ const countIn = (t: { w: number; front: Uint8Array }, m: number, x0: number, y0:
   const c = aimAt(br, PIT0 + 6, 300)
   const r1 = shoot(br, 'heavy', c.angle, c.power)
   const left = countIn(r1.state.terrain, DIRT, PIT0 + 40, 300, PIT1, 307)
-  check(left > 0 && collapsesOf(r1.events).length === 0, `v2.4 derrumbe: el puente cortado de un lado se cayó (${left})`)
+  check(left === 40 * 8, `v2.4 derrumbe: el puente cortado de un lado se cayó (${left})`)
   let s2 = r1.state
   s2.current = 0
   s2 = cloneState(s2)
@@ -3326,17 +3327,32 @@ const countIn = (t: { w: number; front: Uint8Array }, m: number, x0: number, y0:
     fillRect(t, 700, 240, 712, 299, DIRT, 'both')
     return s
   }
+  // se corta el puentecito con deform (el bloque tapa los tiros desde los dos lados) y se derrumba con el
+  // mismo resolver que usa fire
+  const cut = (s: GameState) => {
+    deform(s.terrain, 685, 241, 8, 'destroy')
+    const ev: GameEvent[] = []
+    collapseAfterShot(s, ev, 0, true)
+    return ev
+  }
   const lv = hang(LAVA)
-  const a = aimAt(lv, 690, 241, 20, 85)
   const st0 = countT(lv.terrain, STONE)
-  const rl = shoot(lv, 'normal', a.angle, a.power)
-  const dirtLeft = countIn(rl.state.terrain, DIRT, 630, 240, 669, 299)
-  check(collapsesOf(rl.events).length === 1 && countT(rl.state.terrain, STONE) > st0 + 400 && dirtLeft === 0, `v2.4 derrumbe: la tierra sobre la lava no se volvió piedra (${dirtLeft} de tierra)`)
+  const l0 = countT(lv.terrain, LAVA)
+  const el = cut(lv)
+  // la capa que toca la lava se vuelve piedra y flota; lo que cae encima queda apoyado ahí. Ninguna celda de
+  // tierra queda tocando la lava y la lava no se mueve.
+  let touching = 0
+  const ft = lv.terrain
+  for (let i = ft.w; i < ft.front.length - ft.w; i++) if (ft.front[i] === DIRT && ft.front[i + ft.w] === LAVA) touching++
+  const fell = countIn(ft, DIRT, 630, 240, 669, 259)
+  check(collapsesOf(el).length === 1 && fell === 0 && touching === 0 && countT(ft, STONE) >= st0 + 40 && countT(ft, LAVA) === l0, `v2.4 derrumbe: la tierra sobre la lava (${touching} celdas de tierra tocan la lava, ${fell} no cayeron)`)
   const wt = hang(WATER)
   const w0 = countT(wt.terrain, WATER)
-  const rw = shoot(wt, 'normal', a.angle, a.power)
-  const sunk = countIn(rw.state.terrain, DIRT, 600, 300, 699, 339)
-  check(collapsesOf(rw.events).length === 1 && countT(rw.state.terrain, WATER) === w0 && sunk > 400, `v2.4 derrumbe: al agua (${countT(rw.state.terrain, WATER)}/${w0} de agua, ${sunk} de tierra en el fondo)`)
+  const ew = cut(wt)
+  const sunk = countIn(wt.terrain, DIRT, 630, 300, 669, 339)
+  check(collapsesOf(ew).length === 1 && countT(wt.terrain, WATER) === w0 && sunk >= 790, `v2.4 derrumbe: al agua (${countT(wt.terrain, WATER)}/${w0} de agua, ${sunk} de tierra en el fondo)`)
+  flowLiquids(wt.terrain, { seed: null, record: false })
+  check(countT(wt.terrain, WATER) === w0, 'v2.4 derrumbe: el flujo después del derrumbe conserva el agua')
 }
 {
   // derrumbe 5: determinismo y réplicas con derrumbes (Grande, 4 IA)
