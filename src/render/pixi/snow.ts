@@ -11,6 +11,7 @@
 import { Container, Particle, ParticleContainer, Rectangle, Sprite, Texture } from 'pixi.js'
 import type { Biome, GameEvent, Player, Terrain } from '../../sim/types'
 import { AIR, ICE, SNOW, TANK_H, TANK_W } from '../../sim/types'
+import { PATH_DT } from '../../sim'
 import { VIEW_H, VIEW_W } from '../types'
 import { vnoise } from './abyss'
 import { LIQ } from './liquids'
@@ -637,7 +638,7 @@ export class SnowView {
   onEvent(ev: GameEvent, t: Terrain): void {
     if (ev.type === 'slide' && ev.cause === 'ice' && ev.path.length >= 2) {
       const dir = Math.sign(ev.path[ev.path.length - 1].x - ev.path[0].x) || 1
-      this.iceSlide.set(ev.playerId, { left: ev.path.length * (1 / 30) + 0.2, dir })
+      this.iceSlide.set(ev.playerId, { left: ev.path.length * PATH_DT + 0.2, dir })
     } else if (ev.type === 'impact') {
       const sn = ev.debris[SNOW] ?? 0
       const ic = ev.debris[ICE] ?? 0
