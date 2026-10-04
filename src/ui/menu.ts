@@ -2,9 +2,14 @@
 // v5: los casilleros van en dos columnas de 4 (P1–P4 a la izquierda, P5–P8 a la derecha). Los que pasan el máximo
 // del mapa elegido (MAX_PLAYERS_BY_SIZE: Chico 4, Mediano 6, Grande 8) se ven bloqueados con "SOLO MAPA …".
 // v2.3: al achicar el mapa los ocupados se compactan hacia arriba conservando su configuración (compactSlots).
-import { CREWS, MAP_SIZE_ORDER, MAX_PLAYERS, MAX_PLAYERS_BY_SIZE, TANK_COLORS, type Biome, type CrewId, type Difficulty, type MapSize, type MatchConfig, type PlayerKind, type SlotConfig } from '../sim/types'
+// v3 perfil: cada casillero tiene tipo | tripulante | color de tanque | nombre (humano, editable hasta NAME_MAX,
+// con teclado o con el teclado del sistema en táctil) o personalidad (IA: agresiva, francotiradora, cavadora,
+// oportunista o al azar). Colores únicos entre casilleros (SlotConfig.color, índice en TANK_COLORS).
+import { CREWS, MAP_SIZE_ORDER, MAX_PLAYERS, MAX_PLAYERS_BY_SIZE, NAME_MAX, TANK_COLORS, type Biome, type CrewId, type Difficulty, type MapSize, type MatchConfig, type Personality, type PlayerKind, type SlotConfig } from '../sim/types'
 import { DEFAULT_CONFIG, type MenuView } from './types'
 import { bindNav, button, el, label, portrait, screenRoot, setLabel, setPortrait, type Nav } from './kit'
+import { CREW_NAMES, cleanName, nameInput, nextColor, nextCrew, nextPersonality, personalityName, setSwatch, swatch, uniqueColors } from './profile'
+import { isTouchDevice } from '../input/touch'
 
 export { refreshLabels, uiScale } from './kit'
 
@@ -13,6 +18,8 @@ interface Slot {
   kind: SlotKind
   name: string
   crew: CrewId
+  color: number // índice en TANK_COLORS (v3)
+  personality: Personality | null // IA; null = al azar (v3)
 }
 type BiomeChoice = Biome | 'random' | 'rotate'
 
@@ -34,25 +41,17 @@ export const SIZE_NAMES: Record<MapSize, string> = { small: 'CHICO', medium: 'ME
 const SIZE_CHOICES: { id: MapSize; name: string }[] = MAP_SIZE_ORDER.map((id) => ({ id, name: SIZE_NAMES[id] }))
 const KIND_NAMES: Record<SlotKind, string> = { human: 'HUMANO', ai: 'IA', empty: 'VACIO' }
 const KIND_CYCLE: SlotKind[] = ['human', 'ai', 'empty']
-const CREW_NAMES: Record<CrewId, string> = {
-  bandana: 'BANDANA',
-  sarge: 'SARGENTO',
-  rookie: 'NOVATO',
-  desert: 'DESIERTO',
-  commando: 'COMANDO',
-  goggles: 'TANQUISTA',
-  pilot: 'PILOTO',
-  colonel: 'CORONEL',
-}
-const NAME_MAX = 10
 const STORE = 'tanks.menu2'
 
 // Casilleros por columna: los 8 se reparten en dos columnas de SLOT_ROWS.
 const SLOT_ROWS = MAX_PLAYERS / 2
-// Columnas de cursor dentro de un casillero (la columna absoluta suma 3 por cada columna de casilleros).
+// Columnas de cursor dentro de un casillero (la columna absoluta suma PER por cada columna de casilleros).
+// C_NAME es el nombre en los humanos y la personalidad en las IA.
 const C_KIND = 0
 const C_CREW = 1
-const C_NAME = 2
+const C_COLOR = 2
+const C_NAME = 3
+const PER = 4
 
 // Filas navegables: 0-3 filas de casilleros, 4 rondas, 5 dificultad, 6 bioma, 7 mapa, 8 jugar.
 const ROW_ROUNDS = SLOT_ROWS
@@ -105,7 +104,10 @@ interface SlotEls {
   root: HTMLElement
   kind: HTMLElement
   crew: HTMLElement
+  color: HTMLElement
+  swatch: HTMLElement
   name: HTMLElement
+  input: HTMLInputElement | null // táctil: campo real para el teclado del sistema
   num: HTMLElement
   portrait: HTMLCanvasElement
   kindLabel: HTMLCanvasElement
@@ -166,8 +168,9 @@ export class MenuScreen implements MenuView {
     // una config de antes de v5 trae hasta 4 casilleros: el resto queda vacío
     this.slots = Array.from({ length: MAX_PLAYERS }, (_, i) => {
       const s = config.slots[i]
-      return { kind: s ? s.kind : 'empty', name: s?.name ?? '', crew: s?.crew ?? CREWS[i] }
+      return { kind: s ? s.kind : 'empty', name: cleanName(s?.name ?? ''), crew: s?.crew ?? CREWS[i], color: s?.color ?? i, personality: s?.personality ?? null }
     })
+    uniqueColors(this.slots, (s) => s.kind !== 'empty')
     this.rounds = ROUNDS.includes(config.rounds) ? config.rounds : 3
     this.difficulty = config.difficulty
     this.biome = config.biome ?? 'rotate'
@@ -191,8 +194,9 @@ export class MenuScreen implements MenuView {
     const slots: SlotConfig[] = this.slots
       .filter((s, i) => s.kind !== 'empty' && !this.locked(i))
       .map((s) => {
-        const out: SlotConfig = { kind: s.kind as PlayerKind, crew: s.crew }
-        if (s.name.trim()) out.name = s.name.trim()
+        const out: SlotConfig = { kind: s.kind as PlayerKind, crew: s.crew, color: s.color }
+        if (s.kind === 'human' && s.name.trim()) out.name = s.name.trim()
+        if (s.kind === 'ai' && s.personality) out.personality = s.personality
         return out
       })
     return { slots, rounds: this.rounds, difficulty: this.difficulty, biome: this.biome, size: this.size }
@@ -220,9 +224,11 @@ export class MenuScreen implements MenuView {
   // se compactan hacia arriba y los que no entran se descartan desde el final, con un aviso.
   private fitSize(silent: boolean): void {
     const limit = this.limit()
-    const { slots, dropped } = compactSlots(this.slots, limit, (s) => s.kind !== 'empty', (crew): Slot => ({ kind: 'empty', name: '', crew }))
+    const prev = this.slots
+    const { slots, dropped } = compactSlots(this.slots, limit, (s) => s.kind !== 'empty', (crew): Slot => ({ kind: 'empty', name: '', crew, color: prev.find((o) => o.crew === crew)?.color ?? 0, personality: null }))
     this.slots = slots
     freeCrews(this.slots)
+    uniqueColors(this.slots, (s) => s.kind !== 'empty')
     if (silent) return
     const n = dropped.length
     this.notice = n > 0 ? `${n === 1 ? '1 CASILLERO QUEDO AFUERA' : `${n} CASILLEROS QUEDARON AFUERA`}: ${SIZE_NAMES[this.size]} ADMITE ${limit}` : ''
@@ -231,7 +237,7 @@ export class MenuScreen implements MenuView {
 
   // Casillero bajo el cursor (solo tiene sentido en las filas de casilleros).
   private curSlot(): number {
-    return this.row + (this.col >= 3 ? SLOT_ROWS : 0)
+    return this.row + (this.col >= PER ? SLOT_ROWS : 0)
   }
 
   // Columnas de cursor disponibles en una fila de casilleros: se saltean los bloqueados y el nombre de los vacíos.
@@ -240,8 +246,8 @@ export class MenuScreen implements MenuView {
     for (let side = 0; side < 2; side++) {
       const i = row + side * SLOT_ROWS
       if (this.locked(i)) continue
-      out.push(side * 3 + C_KIND, side * 3 + C_CREW)
-      if (this.slots[i].kind !== 'empty') out.push(side * 3 + C_NAME)
+      out.push(side * PER + C_KIND, side * PER + C_CREW)
+      if (this.slots[i].kind !== 'empty') out.push(side * PER + C_COLOR, side * PER + C_NAME)
     }
     return out
   }
@@ -274,19 +280,48 @@ export class MenuScreen implements MenuView {
       const kindLabel = label(KIND_NAMES[slot.kind])
       kind.append(kindLabel)
       const crew = el('div', 'cell crew')
-      const port = portrait(slot.crew, TANK_COLORS[i] ?? 0xffffff, 1)
+      const port = portrait(slot.crew, TANK_COLORS[slot.color] ?? 0xffffff, 1)
       crew.append(port)
+      const color = el('div', 'cell color')
+      const sw = swatch()
+      color.append(sw)
       const name = el('div', 'cell name')
       const nameLabel = label('')
       name.append(nameLabel)
-      const base = i >= SLOT_ROWS ? 3 : 0
+      const base = i >= SLOT_ROWS ? PER : 0
       const r = i % SLOT_ROWS
       kind.addEventListener('click', () => this.pick(r, base + C_KIND))
       crew.addEventListener('click', () => this.pick(r, base + C_CREW))
-      name.addEventListener('click', () => this.pick(r, base + C_NAME))
-      row.append(num, kind, crew, name)
+      color.addEventListener('click', () => this.pick(r, base + C_COLOR))
+      name.addEventListener('click', () => {
+        // con el campo táctil, el toque lo atiende el propio campo (abre el teclado del sistema)
+        if (this.slotEls[i]?.input && this.slots[i].kind === 'human') return
+        this.pick(r, base + C_NAME)
+      })
+      let input: HTMLInputElement | null = null
+      if (isTouchDevice()) {
+        input = nameInput(
+          () => {
+            this.row = r
+            this.col = base + C_NAME
+            this.editing = true
+            this.sync()
+          },
+          (text) => {
+            this.slots[i].name = text
+            this.sync()
+          },
+          () => {
+            this.editing = false
+            this.sync()
+          },
+        )
+        name.classList.add('has-input')
+        name.append(input)
+      }
+      row.append(num, kind, crew, color, name)
       slotsBox.append(row)
-      this.slotEls.push({ root: row, kind, crew, name, num, portrait: port, kindLabel, nameLabel, numLabel })
+      this.slotEls.push({ root: row, kind, crew, color, swatch: sw, name, input, num, portrait: port, kindLabel, nameLabel, numLabel })
     })
 
     const opts = el('div', 'rows')
@@ -340,12 +375,13 @@ export class MenuScreen implements MenuView {
   // Repinta todo lo que depende del modelo y del cursor.
   private sync(): void {
     let n = 0
-    const sel = (i: number, c: number) => this.row === i % SLOT_ROWS && this.col === (i >= SLOT_ROWS ? 3 : 0) + c
+    const sel = (i: number, c: number) => this.row === i % SLOT_ROWS && this.col === (i >= SLOT_ROWS ? PER : 0) + c
     this.slots.forEach((s, i) => {
       const e = this.slotEls[i]
       const locked = this.locked(i)
       const empty = s.kind === 'empty' || locked
-      const color = empty ? 0x4a4440 : (TANK_COLORS[n] ?? 0xffffff)
+      // v3: el color elegido (antes, el de su orden entre los ocupados)
+      const color = empty ? 0x4a4440 : (TANK_COLORS[s.color] ?? 0xffffff)
       if (!empty) n++
       e.root.classList.toggle('empty', empty && !locked)
       e.root.classList.toggle('locked', locked)
@@ -356,16 +392,32 @@ export class MenuScreen implements MenuView {
         setLabel(e.numLabel, '-', 0x4a4440)
         setPortrait(e.portrait, s.crew, 0x3a3430)
         setLabel(e.nameLabel, need ? `SOLO MAPA ${SIZE_NAMES[need]}${need === 'large' ? '' : '+'}` : '', 0x7a7068)
+        setSwatch(e.swatch, null)
+        e.color.classList.add('off')
       } else {
+        setSwatch(e.swatch, empty ? null : color)
+        e.color.classList.toggle('off', empty)
         setLabel(e.kindLabel, KIND_NAMES[s.kind], s.kind === 'human' ? 0xffd23a : s.kind === 'ai' ? 0x9ad0ff : 0x8a8078)
         setLabel(e.numLabel, empty ? '-' : `P${n}`, color)
         setPortrait(e.portrait, s.crew, color)
-        const shown = s.name || CREW_NAMES[s.crew]
-        const cursor = this.editing && this.curSlot() === i && this.col % 3 === C_NAME ? '_' : ''
-        setLabel(e.nameLabel, empty ? '' : shown.toUpperCase() + cursor, s.name || cursor ? 0xffffff : 0x9a8e80)
+        if (s.kind === 'ai') {
+          // IA: la personalidad en lugar del nombre
+          setLabel(e.nameLabel, personalityName(s.personality), s.personality ? 0x9ad0ff : 0x7aa0c0)
+        } else {
+          const shown = s.name || CREW_NAMES[s.crew]
+          const cursor = this.editing && this.curSlot() === i && this.col % PER === C_NAME ? '-' : '' // la fuente no tiene '_'
+          setLabel(e.nameLabel, empty ? '' : shown.toUpperCase() + cursor, s.name || cursor ? 0xffffff : 0x9a8e80)
+        }
+      }
+      e.name.classList.toggle('ai', s.kind === 'ai' && !locked)
+      if (e.input) {
+        // el campo táctil solo existe en humanos habilitados; no se pisa lo que se está escribiendo
+        e.input.hidden = locked || s.kind !== 'human'
+        if (document.activeElement !== e.input) e.input.value = s.name
       }
       e.kind.classList.toggle('sel', sel(i, C_KIND))
       e.crew.classList.toggle('sel', sel(i, C_CREW))
+      e.color.classList.toggle('sel', sel(i, C_COLOR))
       e.name.classList.toggle('sel', sel(i, C_NAME))
     })
     const mark = (list: HTMLButtonElement[], value: string, row: number) => {
@@ -401,13 +453,21 @@ export class MenuScreen implements MenuView {
       const i = this.curSlot()
       if (this.locked(i)) return this.sync()
       const s = this.slots[i]
-      const c = this.col % 3
+      const c = this.col % PER
       if (c === C_KIND) {
         s.kind = KIND_CYCLE[(KIND_CYCLE.indexOf(s.kind) + 1) % KIND_CYCLE.length]
         this.editing = false
         this.notice = ''
-          } else if (c === C_CREW) this.cycleCrew(i, 1)
-      else if (s.kind !== 'empty') this.editing = !this.editing
+        // al ocuparse, si su color lo usa otro casillero, toma el siguiente libre
+        if (s.kind !== 'empty') this.cycleColor(i, 0)
+      } else if (c === C_CREW) this.cycleCrew(i, 1)
+      else if (c === C_COLOR) this.cycleColor(i, 1)
+      else if (s.kind === 'ai') s.personality = nextPersonality(s.personality)
+      else if (s.kind === 'human') {
+        const input = this.slotEls[i]?.input
+        if (input) input.focus()
+        else this.editing = !this.editing
+      }
       this.clampCol()
     } else if (this.row === ROW_PLAY) {
       if (this.col === 1) this.online()
@@ -420,12 +480,16 @@ export class MenuScreen implements MenuView {
   private cycleCrew(i: number, dir: number): void {
     const s = this.slots[i]
     const taken = new Set(this.slots.filter((o, j) => j !== i && o.kind !== 'empty' && !this.locked(j)).map((o) => o.crew))
-    let idx = CREWS.indexOf(s.crew)
-    for (let k = 0; k < CREWS.length; k++) {
-      idx = (idx + dir + CREWS.length) % CREWS.length
-      if (!taken.has(CREWS[idx])) break
-    }
-    s.crew = CREWS[idx]
+    s.crew = nextCrew(s.crew, taken, dir)
+  }
+
+  // v3: color de tanque, salteando los de los otros casilleros ocupados. dir 0: se queda con el suyo si está
+  // libre (al ocupar un casillero). Después, los vacíos que choquen se corren (al ocuparlos no repiten).
+  private cycleColor(i: number, dir: number): void {
+    const s = this.slots[i]
+    const taken = new Set(this.slots.filter((o, j) => j !== i && o.kind !== 'empty' && !this.locked(j)).map((o) => o.color))
+    if (dir !== 0 || taken.has(s.color)) s.color = nextColor(s.color, taken, dir || 1)
+    uniqueColors(this.slots, (o) => o === s || o.kind !== 'empty')
   }
 
   private nav(nav: Nav): void {
@@ -473,7 +537,9 @@ export class MenuScreen implements MenuView {
     if (e.key === 'Enter' || e.key === 'Escape') {
       this.editing = false
     } else if (e.key === 'Backspace') s.name = s.name.slice(0, -1)
-    else if (e.key.length === 1 && /[a-zA-Z0-9 ]/.test(e.key) && s.name.length < NAME_MAX) s.name += e.key.toUpperCase()
+    else if (e.key === ' ') {
+      if (s.name.length > 0 && s.name.length < NAME_MAX && !s.name.endsWith(' ')) s.name += ' '
+    } else if (e.key.length === 1 && cleanName(e.key) !== '' && s.name.length < NAME_MAX) s.name = cleanName(s.name + e.key)
     else return true
     this.sync()
     return true
