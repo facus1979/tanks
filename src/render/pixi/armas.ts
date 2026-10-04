@@ -41,7 +41,6 @@ export class ArmasFx {
   // QA: peligros falsos de ?fxtest=mine|acid y misil guiado falso de ?fxtest=guided
   private fakeHazards: Hazard[] = []
   private lastProj: { x: number; y: number }[] = []
-  private testDone = false
 
   constructor(
     private fx: Fx,
@@ -102,7 +101,6 @@ export class ArmasFx {
     this.motes.clear()
     this.signs.clear()
     this.fakeHazards = []
-    this.testDone = false
     this.under.clear()
     this.over.clear()
     this.glow.clear()
@@ -158,7 +156,7 @@ export class ArmasFx {
         if ((ev.cause === 'pull' || ev.cause === 'quake') && ev.path.length > 1) this.fx.dust(ev.path[0].x, ev.path[0].y, 8, 28)
         break
       case 'impact':
-        if (FX_TEST && ev.source !== 'barrel' && !this.testDone) this.fxTest(ev, frame)
+        if (FX_TEST && ev.source !== 'barrel') this.fxTest(ev, frame)
         break
     }
   }
@@ -221,7 +219,6 @@ export class ArmasFx {
         }
         break
     }
-    this.testDone = true
   }
 
   // Misil guiado falso para ?fxtest=guided: en la bajada del tiro de prueba.
