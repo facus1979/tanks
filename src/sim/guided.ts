@@ -91,8 +91,9 @@ export function steerGuided(state: GameState, g: GuidedState, dirs: readonly num
 }
 
 // Caída libre desde donde quedó el misil (se acabó el guiado).
-export function fallGuided(state: GameState, g: GuidedState): FlightResult {
-  return fly(baseOpts(state, g))
+// sky: línea de cielo (skylineOf) para acelerar las caídas que simula la IA; el resultado es el mismo.
+export function fallGuided(state: GameState, g: GuidedState, sky?: Int16Array): FlightResult {
+  return fly({ ...baseOpts(state, g), skyline: sky })
 }
 
 // Estado del guiado al llegar al apogeo.
