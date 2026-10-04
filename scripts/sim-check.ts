@@ -3939,8 +3939,8 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
 }
 {
   // balance por tamaño con las armas nuevas en la tienda: cada IA entra a la partida con ARSENAL_MONEY y compra
-  // (aiShop de la normal, que ahora incluye las 8 armas y los 4 ítems nuevos) antes de jugar una ronda. Mismos
-  // topes que el balance de siempre (sección 10). 10 partidas por caso (con --balance, 20).
+  // armas (aiShop de la normal, que ahora incluye las 8 nuevas; los ítems se descartan) antes de jugar una ronda.
+  // Mismos topes que el balance de siempre (sección 10). 10 partidas por caso (con --balance, 20).
   const ARSENAL_MONEY = 1600
   const games = process.argv.includes('--balance') ? 20 : 10
   const t0 = performance.now()
@@ -3955,6 +3955,9 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
         for (const p of s.players) {
           p.money = ARSENAL_MONEY
           aiShop(p, 'normal', s.seed, 1)
+          // solo armas: escudo, reparación y deflector alargan cualquier partida (con o sin armas nuevas) y el
+          // balance de siempre se mide sin ítems
+          for (const id of ITEM_ORDER) p.items[id] = 0
         }
         let n = 0
         while (s.phase === 'aiming' && n < 120) {
