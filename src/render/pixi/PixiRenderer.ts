@@ -19,6 +19,7 @@ import { LavaView } from './lava'
 import { LiquidView, solidCell } from './liquids'
 import { DMG_BIG, DMG_COLOR, DMG_LAVA, DMG_SHIELD, DamageNumbers } from './numbers'
 import { Raster, Rng } from './raster'
+import { installRasterUpload } from './gpu'
 import { CHUNK_W, TerrainPainter } from './terrain'
 import type { Rect } from './terrain'
 
