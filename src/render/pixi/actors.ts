@@ -73,6 +73,7 @@ export class TankView {
   private tilt = 0
   private chute = new Sprite()
   private chuteLines = new Graphics()
+  slip = 0 // v3: px/s que giran de más las orugas (patinando en el hielo, sin tracción)
   dropOff = 0 // px que el tanque está por encima de su lugar final (paracaídas)
   landed = false // aterrizó este frame: el renderer levanta el polvo
   private chuteAge = 0
@@ -172,7 +173,7 @@ export class TankView {
     // andando avanza a lo sumo unos px por frame (más es un salto); deslizándose puede ir más rápido
     this.moved = alive && Math.abs(dx) <= (this.slideLeft > 0 ? 12 : 4) ? dx : 0
     // Los eslabones corren un pixel por pixel recorrido, en el espacio local (espejado) del sprite.
-    this.treadPos -= this.moved * facing
+    this.treadPos -= (this.moved + this.slip * dt) * facing
     const k = this.recoil > 0 ? this.recoil / RECOIL_TIME : 0
     const kick = Math.round(2 * k)
     this.body.texture = alive ? art.bodies[p.id % 4] : art.wreck

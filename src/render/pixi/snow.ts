@@ -490,8 +490,8 @@ export class SnowView {
     return 0
   }
 
-  // Cada frame. camX/camY/z: cámara con sacudón (origen del mundo en pantalla); x0..x1, y0..y1: vista en mundo.
-  update(t: Terrain, players: Player[], changed: boolean, dt: number, wind: number, camX: number, camY: number, z: number, x0: number, x1: number, y0: number, y1: number, crewIn: { x: number; y: number }): void {
+  // Cada frame. camX/camY: cámara con sacudón (origen del mundo en pantalla); x0..x1, y0..y1: vista en mundo.
+  update(t: Terrain, players: Player[], changed: boolean, dt: number, wind: number, camX: number, camY: number, x0: number, x1: number, y0: number, y1: number, crewIn: { x: number; y: number }): void {
     this.terrain = t
     this.time += dt
     if (changed) this.scanDirty = true
