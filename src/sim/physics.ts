@@ -1,7 +1,8 @@
 // Resolución de un impacto: terreno, daño, utilería, barriles en cadena, caída y aplastamiento.
 import { deform, hasLiquid, isPit, isSolid, liquidAt, peekDirty, solidRunUp } from './terrain'
 import { COLLAPSE_FRAME_ITERS, collapseStats, collapseTerrain } from './collapse'
-import { knock, slideDown } from './slide'
+import { knock, slideDown, slopeAt } from './slide'
+import { buildWall, pullTerrain, quakeTerrain } from './terrain-fx'
 import {
   FALL_DAMAGE,
   KNOCKBACK_MAX,
@@ -60,7 +61,23 @@ export interface Blast {
   heading?: -1 | 1
   // v2.4: resolveBlast la marca si el centro quedó sumergido (radio × WATER_BLAST_SCALE); va a Impact.water
   water?: boolean
+  // v3 (de WeaponDef): ácido que rompe piedra y metal, radio del sacudón del terremoto y de la atracción del
+  // agujero negro
+  hard?: boolean
+  quake?: number
+  pull?: number
 }
+
+// v3 terremoto: los tanques de la zona se corren hasta QUAKE_SHOVE px (menos cuanto más lejos del centro) cuesta
+// abajo (o, en llano, alejándose del centro): evento 'slide' cause 'quake'. El terreno se derrumba (quakeTerrain)
+// con un evento 'collapse' que arranca QUAKE_FX_DELAY s después del impacto.
+export const QUAKE_SHOVE = 26
+export const QUAKE_FX_DELAY = 0.05
+// v3 agujero negro: los tanques a menos de pull px se corren hacia el centro hasta PULL_SHOVE px (menos cuanto
+// más lejos; nunca pasan del centro): 'slide' cause 'pull'. El terreno suelto se arrastra (pullTerrain) y el
+// evento 'pull' dura PULL_TIME s.
+export const PULL_SHOVE = 56
+export const PULL_TIME = 0.6
 
 // Distancia del punto a la caja del tanque (0 si está adentro).
 export function tankDistance(p: Player, x: number, y: number): number {
@@ -118,8 +135,9 @@ export function resolveBlast(state: GameState, first: Blast, after?: (events: Ga
       b.radius *= WATER_BLAST_SCALE
       b.water = true
     }
-    // v3 stub: wall y none todavía no tocan el terreno (los implementa el área sim)
-    const debris = b.terrain === 'wall' || b.terrain === 'none' ? {} : deform(state.terrain, b.x, b.y, b.radius, b.terrain, state.lava ?? Infinity)
+    // v3: el muro levanta una pared (buildWall); 'none' (terremoto) no rompe: sacude (más abajo)
+    if (b.terrain === 'wall') buildWall(state.terrain, state.players, b.x, b.y, Math.round(b.radius * 2))
+    const debris = b.terrain === 'wall' || b.terrain === 'none' ? {} : deform(state.terrain, b.x, b.y, b.radius, b.terrain, state.lava ?? Infinity, b.hard)
     events.push({
       type: 'impact',
       x: b.x,
@@ -132,13 +150,41 @@ export function resolveBlast(state: GameState, first: Blast, after?: (events: Ga
       source: b.source ?? 'shot',
       ...(b.water ? { water: true } : {}), // v2.4: también en barriles en cadena
     })
+    // v3: terremoto y agujero negro mueven el terreno (eventos 'quake' / 'pull' y un 'collapse' con los parches)
+    if (b.quake) {
+      events.push({ type: 'quake', x: b.x, y: b.y, radius: b.quake, t: b.t })
+      const fx = quakeTerrain(state.terrain, b.x, b.y, b.quake, true, state.lava ?? Infinity)
+      if (fx.patches.length > 0) events.push({ type: 'collapse', t: b.t + QUAKE_FX_DELAY, dt: COLLAPSE_DT, patches: fx.patches, cells: fx.cells })
+    }
+    if (b.pull) {
+      events.push({ type: 'pull', x: b.x, y: b.y, radius: b.pull, t: b.t, duration: PULL_TIME })
+      const fx = pullTerrain(state.terrain, b.x, b.y, b.pull, true)
+      if (fx.patches.length > 0) events.push({ type: 'collapse', t: b.t, dt: PULL_TIME / Math.max(1, fx.patches.length - 1), patches: fx.patches, cells: fx.cells })
+    }
     const mark = events.length
-    const pushes: { p: Player; dist: number; dir: -1 | 1 }[] = []
+    const pushes: { p: Player; dist: number; dir: -1 | 1; cause?: 'quake' | 'pull' }[] = []
     for (const p of state.players) {
       if (!p.alive) continue
       const amount = p.id === b.directTank ? b.damage : blastDamage(p, b)
       if (amount > 0) hurt(p, amount, events)
-      const dist = b.terrain === 'build' || amount <= 0 ? 0 : Math.round(KNOCKBACK_MAX * Math.min(1, amount / KNOCKBACK_REF))
+      // v3: anclado, nada lo corre (ni empuje, ni sacudón, ni atracción)
+      if (p.anchored) continue
+      if (b.quake || b.pull) {
+        // en vez del empuje de siempre: sacudón cuesta abajo o atracción hacia el centro
+        const d = tankDistance(p, b.x, b.y)
+        if (b.quake && d <= b.quake && p.alive) {
+          const s = slopeAt(state, p.x, p.y)
+          const dir: -1 | 1 = Math.abs(s) > 0.05 ? (s > 0 ? 1 : -1) : p.x >= b.x ? 1 : -1
+          const dist = Math.round(QUAKE_SHOVE * (1 - d / (b.quake + 1)))
+          if (dist > 2) pushes.push({ p, dist, dir, cause: 'quake' })
+        }
+        if (b.pull && d <= b.pull && p.alive && Math.abs(p.x - b.x) >= 3) {
+          const dist = Math.min(Math.round(Math.abs(p.x - b.x)), Math.round(PULL_SHOVE * (1 - d / (b.pull + 1))))
+          if (dist > 2) pushes.push({ p, dist, dir: p.x > b.x ? -1 : 1, cause: 'pull' })
+        }
+        continue
+      }
+      const dist = b.terrain === 'build' || b.terrain === 'wall' || amount <= 0 ? 0 : Math.round(KNOCKBACK_MAX * Math.min(1, amount / KNOCKBACK_REF))
       const dx = p.x - b.x
       // v2.3: el impacto directo empuja en el sentido en que venía el proyectil (antes, desde el punto
       // del impacto sobre la caja: un globo que caía sobre el techo empujaba para cualquier lado y un
@@ -174,9 +220,9 @@ export function resolveBlast(state: GameState, first: Blast, after?: (events: Ga
     }
     // Pulido v2: empuje, después de la deformación y del daño de esta explosión. Si el tanque todavía
     // se está corriendo por una explosión anterior (cadena de barriles), este empuje arranca al terminar.
-    for (const { p, dist, dir } of pushes) {
+    for (const { p, dist, dir, cause } of pushes) {
       if (!p.alive) continue
-      busy.set(p.id, knock(state, p, dir, dist, Math.max(b.t, busy.get(p.id) ?? -Infinity), events, tankFloor))
+      busy.set(p.id, knock(state, p, dir, dist, Math.max(b.t, busy.get(p.id) ?? -Infinity), events, tankFloor, cause))
     }
     last = Math.max(last, b.t)
   }
@@ -508,6 +554,9 @@ export const HEADING_MIN = 4
 export function blastFor(weapon: WeaponId, x: number, y: number, t: number, directTank?: number, vx = 0): Blast {
   const w = WEAPONS[weapon]
   const b: Blast = { x, y, radius: w.radius, damage: w.damage, weapon, blast: w.blast, terrain: w.terrain, t, directTank }
+  if (w.hard) b.hard = true // v3
+  if (w.quake) b.quake = w.quake
+  if (w.pull) b.pull = w.pull
   if (directTank !== undefined && Math.abs(vx) >= HEADING_MIN) b.heading = vx > 0 ? 1 : -1
   return b
 }

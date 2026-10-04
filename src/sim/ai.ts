@@ -712,6 +712,8 @@ function scratchState(state: GameState): GameState {
     props: state.props.map((p) => ({ ...p })),
     players: state.players.map((p) => ({ ...p, ammo: { ...p.ammo }, items: { ...p.items } })),
     earnings: { ...state.earnings },
+    hazards: state.hazards.map((h) => ({ ...h })), // v3: la mina o el ácido del tiro simulado no tocan el estado real
+    guided: null,
   }
 }
 

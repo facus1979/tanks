@@ -49,6 +49,7 @@ export interface FlightResult extends Flight {
   time: number // segundos hasta el impacto
   vel: Vec2 // velocidad al terminar (impacto o apogeo)
   apex?: boolean // terminó en el apogeo (stopAtApex)
+  paused?: boolean // v3: se cortó por untilSteps sin chocar (impact 'out' en la posición donde quedó)
 }
 
 export interface FlyOptions {
@@ -73,6 +74,11 @@ export interface FlyOptions {
   // Pulido v2: el proyectil de Tierra no se derrite: al tocar la lava (banda o grilla) termina con un
   // impacto 'terrain' en el punto de contacto y construye ahí.
   lavaSolid?: boolean
+  // v3 misil teledirigido: velocidad angular (rad/s; positiva = horario en pantalla) que gira la velocidad en
+  // el subpaso n (0 = el primero del tramo). Se aplica antes del viento y la gravedad.
+  turn?: (n: number) => number
+  // v3: corta el vuelo (sin chocar) al completar esta cantidad de subpasos: paused = true.
+  untilSteps?: number
 }
 
 // Por columna, la fila más alta con terreno, un tanque vivo o utilería sólida. Sirve mientras
@@ -141,6 +147,17 @@ export function fly(opts: FlyOptions): FlightResult {
       vx *= drag
       vy *= drag
     }
+    if (opts.turn) {
+      // v3: guiado. Gira la velocidad (sin cambiar su módulo) lo que pide el tramo en este subpaso
+      const a = opts.turn(n) * SUBSTEP
+      if (a !== 0) {
+        const c = Math.cos(a)
+        const s = Math.sin(a)
+        const nvx = vx * c - vy * s
+        vy = vx * s + vy * c
+        vx = nvx
+      }
+    }
     vx += ax * SUBSTEP
     const rising = vy < 0
     vy += gravity * SUBSTEP
@@ -182,6 +199,11 @@ export function fly(opts: FlyOptions): FlightResult {
       return end({ path, impact: { kind: 'out', x, y }, time: elapsed, vel: { x: vx, y: vy }, apex: true })
     }
     if (n % PATH_EVERY === 0) path.push({ x, y })
+    if (opts.untilSteps !== undefined && n >= opts.untilSteps) {
+      // v3: fin del tramo guiado (untilSteps es múltiplo de PATH_EVERY: el último punto ya está en path)
+      if (n % PATH_EVERY !== 0) path.push({ x, y })
+      return end({ path, impact: { kind: 'out', x, y }, time: elapsed, vel: { x: vx, y: vy }, paused: true })
+    }
     // v3: por un abismo el proyectil cae por debajo del mapa (en el resto, debajo es roca madre)
     if (x < -OUT_MARGIN || x > terrain.w + OUT_MARGIN || (y > terrain.h + OUT_MARGIN && x >= 0 && x < terrain.w)) {
       path.push({ x, y })

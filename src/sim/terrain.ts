@@ -182,7 +182,8 @@ export type Debris = Partial<Record<Material, number>>
 // después la reparte; si no hay lugar se pierde). Marca el rectángulo como sucio para el flujo.
 // Pulido v2: stoneFrom (build): desde esa fila hacia abajo la tierra cae sobre la lava de muerte súbita
 // (GameState.lava) y queda piedra, igual que sobre la lava de la grilla.
-export function deform(terrain: Terrain, cx: number, cy: number, radius: number, mode: 'destroy' | 'build' | 'dig', stoneFrom = Infinity): Debris {
+// v3: hard (ácido): destroy rompe todo (piedra y metal incluidos) en el radio entero, salvo la roca madre.
+export function deform(terrain: Terrain, cx: number, cy: number, radius: number, mode: 'destroy' | 'build' | 'dig', stoneFrom = Infinity, hard = false): Debris {
   const debris: Debris = {}
   const { w, h, front, back } = terrain
   const r = Math.ceil(radius) + 2
@@ -216,7 +217,7 @@ export function deform(terrain: Terrain, cx: number, cy: number, radius: number,
       }
       if (m === AIR || LIQUID[m]) continue
       // dig: la excavadora atraviesa todo salvo la roca madre
-      const tough = mode === 'dig' ? (m === BEDROCK ? 0 : 1) : (MATERIALS[m]?.toughness ?? 1)
+      const tough = mode === 'dig' || hard ? (m === BEDROCK ? 0 : 1) : (MATERIALS[m]?.toughness ?? 1)
       if (tough <= 0 || d > radius * tough) continue
       front[i] = AIR
       debris[m] = (debris[m] ?? 0) + 1
