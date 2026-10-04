@@ -89,14 +89,15 @@ function lobbyModel(role: 'host' | 'client'): LobbyModel {
       ...(params.get('size') ? { size: params.get('size') as MapSize } : {}),
       // v5: siempre 8 casilleros; &size= decide cuántos están habilitados (Chico 4, Mediano 6, Grande 8)
       slots: [
-        { kind: 'human', name: 'Facu', crew: 'bandana', owner: 'host', connected: true },
-        { kind: 'human', name: 'Sargento', crew: 'sarge', owner: 'peer1', connected: true },
-        { kind: 'human', name: '', crew: 'rookie', owner: null, connected: false },
-        { kind: 'ai', name: 'IA', crew: 'desert', owner: null, connected: true },
-        { kind: 'human', name: 'Coman2', crew: 'commando', owner: 'peer2', connected: false },
-        { kind: 'ai', name: 'IA', crew: 'goggles', owner: null, connected: true },
-        { kind: 'off', name: '', crew: 'pilot', owner: null, connected: false },
-        { kind: 'ai', name: 'IA', crew: 'colonel', owner: null, connected: true },
+        // v3: colores elegidos (no por índice) y personalidades de las IA
+        { kind: 'human', name: 'Facu', crew: 'bandana', color: 4, owner: 'host', connected: true },
+        { kind: 'human', name: 'Sargento', crew: 'sarge', color: 1, owner: 'peer1', connected: true },
+        { kind: 'human', name: '', crew: 'rookie', color: 2, owner: null, connected: false },
+        { kind: 'ai', name: 'IA', crew: 'desert', color: 3, personality: 'sniper', owner: null, connected: true },
+        { kind: 'human', name: 'Coman2', crew: 'commando', color: 0, owner: 'peer2', connected: false },
+        { kind: 'ai', name: 'IA', crew: 'goggles', color: 5, owner: null, connected: true },
+        { kind: 'off', name: '', crew: 'pilot', color: 6, owner: null, connected: false },
+        { kind: 'ai', name: 'IA', crew: 'colonel', color: 7, personality: 'digger', owner: null, connected: true },
       ],
     },
   }
@@ -110,11 +111,28 @@ export async function mountUiTest(name: string): Promise<boolean> {
   await loadUiAssets()
   refreshLabels()
   if (name === 'title') createTitleView().show(() => console.log('start'))
-  else if (name === 'menu') {
+  else if (name === 'menu' || name === 'profile') {
     // v5: &players=N (2..8) arma una config de N casilleros (P1 humano, el resto IA, P3 con nombre) en el mapa
     // de &size= (por defecto grande); sin &players usa la config guardada o la de fábrica, como el juego.
     const n = Number(params.get('players'))
-    const initial: MatchConfig | null = n
+    // v3 ?uitest=profile: dos humanos con nombre propio y colores elegidos, e IA con personalidades
+    const initial: MatchConfig | null = name === 'profile'
+      ? {
+          slots: [
+            { kind: 'human', name: 'FACU', crew: 'pilot', color: 5 },
+            { kind: 'human', name: 'LA ROJA!', crew: 'commando', color: 1 },
+            { kind: 'ai', crew: 'colonel', color: 0, personality: 'aggressive' },
+            { kind: 'ai', crew: 'goggles', color: 7, personality: 'sniper' },
+            { kind: 'ai', crew: 'desert', color: 3, personality: 'digger' },
+            { kind: 'ai', crew: 'sarge', color: 6, personality: 'opportunist' },
+            { kind: 'ai', crew: 'rookie', color: 2 },
+          ],
+          rounds: 3,
+          difficulty: 'normal',
+          biome: 'rotate',
+          size: 'large',
+        }
+      : n
       ? {
           slots: Array.from({ length: Math.max(2, Math.min(8, n)) }, (_, i) => ({ kind: i === 0 ? ('human' as const) : ('ai' as const), crew: CREWS[i], ...(i === 2 ? { name: 'RULO' } : {}) })),
           rounds: 3,
@@ -264,6 +282,15 @@ export async function mountUiTest(name: string): Promise<boolean> {
       start: () => console.log('start'),
       leave: () => console.log('leave'),
     })
+    // v3: el perfil propio y la personalidad de las IA (lo que haría el anfitrión al recibir 'profile')
+    view.onProfile((p) => push((m) => {
+      console.log('profile', JSON.stringify(p))
+      if (m.mySlot != null) m.lobby.slots[m.mySlot] = { ...m.lobby.slots[m.mySlot], name: p.name, crew: p.crew, color: p.color }
+    }))
+    view.onPersonality((i, pers) => push((m) => {
+      console.log('personality', i, pers)
+      m.lobby.slots[i] = { ...m.lobby.slots[i], personality: pers ?? undefined }
+    }))
     pressKeys()
   } else return false
   return true

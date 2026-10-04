@@ -528,3 +528,8 @@ html.touch .shop-right .px-btn.play { min-height: 40px; }
   .slots8 .slot .cell.name { min-width: calc(var(--px) * 46); }
 }
 html.touch .slots8 .slot .cell.color { min-width: 36px; }
+.lobby-slot .cell.color { flex: none; display: flex; align-items: center; justify-content: center; align-self: stretch; padding: var(--px) calc(var(--px) * 2); }
+.lobby-slot .who.has-input { position: relative; }
+.lobby-slot.editable .who, .lobby-slot.editable .cell.crew, .lobby-slot.editable .cell.color { cursor: pointer; }
+.lobby-slot .who.sel { outline: var(--px) solid var(--gold); outline-offset: var(--px); }
+html.touch .lobby-slot .cell.color { min-width: 32px; }
