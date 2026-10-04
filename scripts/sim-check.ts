@@ -3588,18 +3588,18 @@ for (const id of ITEM_ORDER) check(SHOP.some((e) => e.id === id && e.kind === 'i
 {
   // terremoto: derrumba una ladera, sacude tanques (slide 'quake') y emite 'quake' + 'collapse'
   const s = armed()
-  s.players[1].x = 520
-  // loma empinada al lado de P1
+  s.players[1].x = 540
+  // loma empinada con un barranco al lado de P1
   for (let x = 420; x < 500; x++) fillRect(s.terrain, x, 300 - Math.min(80, (x - 420) * 2), x, 299, DIRT, 'both')
   const before = s.terrain.front.slice()
-  const r = shootAt(s, 'quake', 470, 260, 5, 90)
+  const r = shootAt(s, 'quake', 506, 300, 5, 90)
   check(r.events.some((e) => e.type === 'quake'), 'terremoto: evento quake')
   check(collapsesOf(r.events).length >= 1, 'terremoto: derrumbe animado')
   let moved = 0
   for (let i = 0; i < before.length; i++) if (before[i] !== r.state.terrain.front[i]) moved++
-  check(moved > 200, `terremoto: mueve el terreno (${moved} celdas)`)
+  check(moved > 100, `terremoto: mueve el terreno (${moved} celdas)`)
   check(r.events.some((e) => e.type === 'slide' && e.cause === 'quake'), 'terremoto: sacude tanques')
-  check(netHash(shootAt(s, 'quake', 470, 260, 5, 90).state) === netHash(r.state), 'terremoto: determinista')
+  check(netHash(shootAt(s, 'quake', 506, 300, 5, 90).state) === netHash(r.state), 'terremoto: determinista')
 }
 {
   // agujero negro: atrae al rival hacia el centro; con un abismo al lado, lo tira

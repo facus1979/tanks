@@ -134,14 +134,16 @@ export function buildWall(t: Terrain, players: Player[], x: number, y: number, h
 
 // ---------- terremoto ----------
 
-// Derrumbe granular. En la zona (el círculo de radio r más la franja de columnas por debajo de su centro hasta
-// QUAKE_DEPTH px más abajo del círculo) la tierra y la nieve se comportan como arena durante QUAKE_ITERS
-// iteraciones: caen si tienen aire (o agua) abajo y, si no, resbalan en diagonal si el costado y su diagonal
-// están libres. La piedra solo cae derecho. Así las laderas empinadas se desmoronan, las cornisas y los techos
-// de cueva se caen y los salientes se aplanan. Las estructuras (ladrillo, madera, metal...) no se mueven.
+// Derrumbe granular. En la zona (las columnas a menos de r del centro, desde lo más alto que tengan hasta
+// QUAKE_DEPTH px por debajo del círculo) la tierra y la nieve se comportan como arena durante QUAKE_ITERS
+// iteraciones: caen (hasta QUAKE_FALL px por iteración) si tienen aire o agua abajo y, si no y están en la
+// superficie (aire arriba), resbalan en diagonal si el costado y su diagonal están libres. La piedra solo cae
+// derecho. Así los barrancos y las laderas empinadas se desmoronan, las cornisas y los techos de cueva se caen y
+// los salientes se aplanan. Las estructuras (ladrillo, madera, metal...) no se mueven.
 // Tierra sobre lava → piedra; lo que sale por el fondo de un abismo se pierde.
-export const QUAKE_ITERS = 32
+export const QUAKE_ITERS = 40
 export const QUAKE_DEPTH = 48
+export const QUAKE_FALL = 4
 export const QUAKE_FRAME_ITERS = 2
 export function quakeTerrain(t: Terrain, x: number, y: number, r: number, record: boolean, band = Infinity): TerrainFx {
   const { w, h, front } = t
@@ -150,17 +152,20 @@ export function quakeTerrain(t: Terrain, x: number, y: number, r: number, record
   const cy = Math.round(y)
   const x0 = Math.max(0, cx - r)
   const x1 = Math.min(w - 1, cx + r)
-  const y0 = Math.max(0, cy - r)
+  // filas: desde lo más alto que haya en las columnas de la zona (una montaña que sobresale del círculo
+  // también se sacude) hasta QUAKE_DEPTH px por debajo del círculo
+  let y0 = Math.max(0, cy - r)
+  for (let xx = x0; xx <= x1; xx++) {
+    let yy = 0
+    while (yy < y0 && front[yy * w + xx] === AIR) yy++
+    if (yy < y0) y0 = yy
+  }
   const y1 = Math.min(h - 1, cy + r + QUAKE_DEPTH)
-  const r2 = r * r
   let cells = 0
   for (let iter = 0; iter < QUAKE_ITERS; iter++) {
     let moved = false
     for (let yy = y1; yy >= y0; yy--) {
-      const dy = yy - cy
       for (let xx = x0; xx <= x1; xx++) {
-        const dx = xx - cx
-        if (dy < 0 && dx * dx + dy * dy > r2) continue // arriba del centro, solo el círculo
         const i = yy * w + xx
         const m = front[i]
         if (m !== DIRT && m !== SNOW && m !== STONE) continue
@@ -174,8 +179,20 @@ export function quakeTerrain(t: Terrain, x: number, y: number, r: number, record
         }
         const below = front[i + w]
         if (below === AIR || below === WATER) {
-          rec.set(i, below)
-          rec.set(i + w, m === DIRT && yy + 1 >= band ? STONE : m)
+          // cae hasta QUAKE_FALL px por iteración (en el agua, de a 1)
+          let j = i
+          let jy = yy
+          let mm = m
+          for (let k = 0; k < QUAKE_FALL && jy + 1 < h; k++) {
+            const b = front[j + w]
+            if (b !== AIR && b !== WATER) break
+            if (mm === DIRT && jy + 1 >= band) mm = STONE
+            rec.set(j, b)
+            rec.set(j + w, mm)
+            j += w
+            jy++
+            if (b === WATER) break
+          }
           cells++
           moved = true
           continue
@@ -184,7 +201,9 @@ export function quakeTerrain(t: Terrain, x: number, y: number, r: number, record
           if (m === DIRT) rec.set(i, STONE)
           continue
         }
-        if (m === STONE) continue
+        // solo resbalan los granos de la superficie (con aire arriba): si no, la cara entera de un barranco se
+        // correría junta un pixel por iteración sin desmoronarse
+        if (m === STONE || (yy > 0 && front[i - w] !== AIR)) continue
         // granular: resbala en diagonal si el costado y su diagonal están libres (si puede a los dos lados, el
         // lado sale de un hash de la celda y la iteración: determinista)
         const left = xx > x0 && front[i - 1] === AIR && front[i + w - 1] === AIR
