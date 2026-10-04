@@ -256,7 +256,8 @@ export function quakeTerrain(t: Terrain, x: number, y: number, r: number, record
 
 // Atrae el terreno suelto (tierra y nieve de la superficie: celdas con aire hacia el centro) hacia el centro:
 // PULL_ITERS iteraciones de a 1 px, de las celdas más cercanas al centro a las más lejanas. El paso va por el eje
-// en que más le falta. Lo que no tiene lugar libre hacia el centro se queda.
+// en que más le falta. Lo que no tiene lugar libre hacia el centro se queda; lo del labio de un abismo no pasa
+// por encima de la boca (no le arma un piso al que arrastra).
 export const PULL_ITERS = 14
 const pullOrder = new Map<number, Int32Array>() // radio → offsets (dx, dy) ordenados por distancia
 function orderFor(r: number): Int32Array {
@@ -301,6 +302,8 @@ export function pullTerrain(t: Terrain, x: number, y: number, r: number, record:
       if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue
       const j = ny * w + nx
       if (front[j] !== AIR) continue
+      // no tiende puentes sobre un abismo: lo del labio no pasa a una columna sin fondo (se cae solo al vacío)
+      if (t.pits && t.pits[nx] && !t.pits[xx]) continue
       rec.set(i, AIR)
       rec.set(j, m)
       cells++
