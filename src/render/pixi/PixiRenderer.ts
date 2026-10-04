@@ -679,7 +679,7 @@ export class PixiRenderer implements GameRenderer {
         // pulido v2: la sesión mueve al tanque por el path; acá solo se anima (orugas, terrones, sacudón)
         if (ev.path.length < 2 || this.lost.has(ev.playerId)) break
         const dir = Math.sign(ev.path[ev.path.length - 1].x - ev.path[0].x) || 1
-        this.view(ev.playerId).startSlide(ev.cause, ev.path.length * PATH_DT, dir)
+        this.view(ev.playerId).startSlide(ev.cause === 'blast' ? 'blast' : 'slope', ev.path.length * PATH_DT, dir) // v3 stub: ice/pull/quake como slope
         if (ev.cause === 'blast') this.fx.dust(ev.path[0].x, ev.path[0].y, 6, TANK_W)
         break
       }

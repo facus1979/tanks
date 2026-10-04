@@ -2121,6 +2121,10 @@ const ITEM_NAMES: Record<ItemId, string> = {
   fuel: 'combustible',
   repair: 'reparacion',
   tracer: 'trazador',
+  jetpack: 'jetpack',
+  teleport: 'teletransporte',
+  anchor: 'ancla',
+  deflector: 'deflector',
 }
 
 function ownedOf(p: Player, id: ShopId): number {

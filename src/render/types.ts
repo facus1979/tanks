@@ -1,5 +1,5 @@
 // Contrato entre src/game (sesión) y src/render. Lo arma la sesión en cada frame.
-import type { Biome, GameEvent, Player, Prop, Terrain, Vec2, WeaponId } from '../sim'
+import type { Biome, GameEvent, Hazard, Player, Prop, Terrain, Vec2, WeaponId } from '../sim'
 
 // Pantalla lógica (v2): la cámara muestra VIEW_W × VIEW_H pixels de mundo con zoom 1.
 export const VIEW_W = 800
@@ -52,6 +52,8 @@ export interface RenderFrame {
   lava: number | null // v2: y de la superficie de la lava de muerte súbita (ya animada por la sesión); null = no hay
   alerts?: number[] // v2.3: ids de jugadores que muestran el globo "!" ahora (por ejemplo, frenado en el borde del abismo)
   splashes?: Vec2[] // v2.4: proyectiles que entraron al agua desde el frame anterior (en su momento exacto de playback)
+  hazards?: Hazard[] // v3: minas y charcos de ácido a dibujar
+  guided?: { x: number; y: number; vx: number; vy: number; guide: number } | null // v3: misil teledirigido mientras se dirige
 }
 
 export interface GameRenderer {

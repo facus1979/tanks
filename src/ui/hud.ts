@@ -52,7 +52,7 @@ import type { HudControl, HudExtras, HudNet, MinimapInput } from './types'
 
 // Tecla de cada ítem usable (el paracaídas es pasivo). La lee también el flujo de entrada.
 export const ITEM_KEYS: Partial<Record<ItemId, string>> = { shield: 'Q', fuel: 'F', repair: 'R', tracer: 'T' }
-const ITEM_NAMES: Record<ItemId, string> = { shield: 'ESCUDO', parachute: 'PARACAIDAS', fuel: 'COMBUSTIBLE', repair: 'REPARAR', tracer: 'TRAZADOR' }
+const ITEM_NAMES: Record<ItemId, string> = { shield: 'ESCUDO', parachute: 'PARACAIDAS', fuel: 'COMBUSTIBLE', repair: 'REPARAR', tracer: 'TRAZADOR', jetpack: 'JETPACK', teleport: 'TELEPORT', anchor: 'ANCLA', deflector: 'DEFLECTOR' }
 
 export interface HudSide {
   name: string

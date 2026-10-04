@@ -414,7 +414,8 @@ function tankChecks(s: GameState, tag: string): void {
 
 // ---------- 2. generación válida ----------
 const STRUCTURE = new Set([BRICK, WOOD, SLAT, BEAM, POST, METAL])
-const signature: Record<Biome, number[]> = { forest: [STONE, BRICK, SLAT], jungle: [STONE, SLAT], industrial: [BRICK, METAL] }
+// v3: snow sin firma propia hasta que el área sim arme el bioma (hoy usa el generador del bosque)
+const signature: Record<Biome, number[]> = { forest: [STONE, BRICK, SLAT], jungle: [STONE, SLAT], industrial: [BRICK, METAL], snow: [] }
 // Chico con 20 seeds (los mapas de v1); Mediano y Grande con 10.
 const GEN_SEEDS: Record<MapSize, number> = { small: 20, medium: 10, large: 10 }
 for (const size of MAP_SIZE_ORDER) for (const biome of BIOMES) {

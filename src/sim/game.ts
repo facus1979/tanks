@@ -106,6 +106,8 @@ export function createMatch(config: MatchConfig): GameState {
       items: emptyItems(),
       shield: 0,
       tracer: false,
+      anchored: false,
+      deflector: false,
       roundsWon: 0,
       kills: 0,
       ready: false,
@@ -134,6 +136,9 @@ export function createMatch(config: MatchConfig): GameState {
     earnings: {},
     calm: 0,
     lava: null,
+    hazards: [],
+    guided: null,
+    bonusFirstBlood: false,
     windLeft: 0,
   }
   setupRound(state)
@@ -207,6 +212,9 @@ function setupRound(state: GameState): void {
   state.turn = 1
   state.calm = 0
   state.lava = null
+  state.hazards = []
+  state.guided = null
+  state.bonusFirstBlood = false
   state.earnings = Object.fromEntries(state.players.map((p) => [p.id, 0]))
 }
 
@@ -233,6 +241,8 @@ export function applyCommand(state: GameState, command: Command): StepResult {
   switch (command.type) {
     case 'nextRound':
       return state.phase === 'roundover' ? nextRound(state) : { state, events: [] }
+    case 'steer':
+      return { state, events: [] } // v3 stub: el misil teledirigido lo implementa el área sim
     case 'setKind': {
       const i = state.players.findIndex((p) => p.id === command.playerId)
       if (i < 0 || (command.kind !== 'human' && command.kind !== 'ai') || state.players[i].kind === command.kind) return { state, events: [] }

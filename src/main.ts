@@ -775,7 +775,7 @@ function playSounds(events: GameEvent[]): void {
         const path = e.path
         let dist = 0
         for (let i = 1; i < path.length; i++) dist += Math.hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y)
-        if (path.length > 1) sfx.slide((path.length - 1) * PATH_DT, dist, e.cause)
+        if (path.length > 1) sfx.slide((path.length - 1) * PATH_DT, dist, e.cause === 'blast' ? 'blast' : 'slope') // v3 stub: ice/pull/quake suenan como slope
         break
       }
       case 'death':

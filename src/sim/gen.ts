@@ -40,6 +40,8 @@ export const PROP_SIZE: Record<PropKind, { w: number; h: number }> = {
   lamp: { w: 5, h: 7 },
   flag: { w: 20, h: 36 }, // el mástil está en x; la tela va a la derecha
   windsock: { w: 2, h: 28 }, // solo el mástil; la manga la dibuja el renderer según el viento
+  loot: { w: 14, h: 12 }, // v3 caja de botín
+  target: { w: 32, h: 20 }, // v3 objetivo pago
 }
 
 export interface Generated {
@@ -737,6 +739,7 @@ const SEG_WEIGHT: Record<Biome, Partial<Record<SegKind, number>>> = {
   forest: { valley: 2, hill: 2, mountain: 3, lake: 2.6, hills: 1.2, mesa: 1, plat: 1, abyss: 0.5 },
   jungle: { valley: 1.4, hill: 1.5, mountain: 1.5, lake: 2, hills: 3, mesa: 1, plat: 1, abyss: 2.6 },
   industrial: { valley: 2, hill: 1, mountain: 0.6, lake: 0.3, hills: 1.5, mesa: 1.6, plat: 1.5, abyss: 2, lavapit: 2.6 },
+  snow: { valley: 2, hill: 2, mountain: 3, lake: 2.6, hills: 1.2, mesa: 1, plat: 1, abyss: 0.5 }, // v3 stub: el área sim arma la nieve
 }
 
 // Lo que queda después de un tramo que no es el último: lo justo para que entre un tramo final.

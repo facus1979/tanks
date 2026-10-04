@@ -19,6 +19,7 @@ import {
   type Player,
   type Prop,
   type Terrain,
+  type WeaponDef,
   type WeaponId,
 } from './types'
 
@@ -51,7 +52,7 @@ export interface Blast {
   damage: number
   weapon: WeaponId
   blast: BlastStyle
-  terrain: 'destroy' | 'build' | 'dig'
+  terrain: WeaponDef['terrain'] // v3: también wall y none
   t: number
   directTank?: number
   source?: 'shot' | 'barrel'
@@ -117,7 +118,8 @@ export function resolveBlast(state: GameState, first: Blast, after?: (events: Ga
       b.radius *= WATER_BLAST_SCALE
       b.water = true
     }
-    const debris = deform(state.terrain, b.x, b.y, b.radius, b.terrain, state.lava ?? Infinity)
+    // v3 stub: wall y none todavía no tocan el terreno (los implementa el área sim)
+    const debris = b.terrain === 'wall' || b.terrain === 'none' ? {} : deform(state.terrain, b.x, b.y, b.radius, b.terrain, state.lava ?? Infinity)
     events.push({
       type: 'impact',
       x: b.x,
@@ -259,6 +261,8 @@ export function propSupported(state: GameState, prop: Prop): boolean {
   switch (prop.kind) {
     case 'barrel':
     case 'crate':
+    case 'loot': // v3
+    case 'target': // v3
       return rowSupported(state, prop, prop.y + prop.h)
     case 'lamp':
       for (let x = prop.x; x < prop.x + prop.w; x++) if (isSolid(t, x, prop.y - 1)) return true

@@ -57,6 +57,15 @@ const COST: Record<WeaponId, number> = {
   digger: 400,
   roller: 60,
   nuke: 450,
+  // v3: valores iniciales; el área sim los ajusta
+  guided: 200,
+  bouncer: 120,
+  laser: 150,
+  mine: 1e9,
+  quake: 1e9,
+  blackhole: 1e9,
+  acid: 150,
+  wall: 1e9,
 }
 
 // v2 muerte súbita. Con la lava subiendo la ronda se termina: la munición especial se gasta

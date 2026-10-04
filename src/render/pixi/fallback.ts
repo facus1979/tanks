@@ -208,12 +208,14 @@ export const BIOME_PALETTE: Record<Biome, { grass: number[]; moss: number; rim: 
   forest: { grass: [0x3d4a2c, 0x5d6640, 0x8a8456], moss: 0x4d5a36, rim: 0x46352a, ambient: 0xf0dfc8 },
   jungle: { grass: [0x24421e, 0x3a6a2a, 0x78a03c], moss: 0x3a6a2c, rim: 0x3e3020, ambient: 0xd6e6c0 },
   industrial: { grass: [0x4a3a28, 0x6a5234, 0x9a7a48], moss: 0x5a4a34, rim: 0x4a3626, ambient: 0xf0b888 },
+  snow: { grass: [0xc8d4dc, 0xe4ecf0, 0xffffff], moss: 0xb8c8d0, rim: 0x6a7884, ambient: 0xe8f0f8 }, // v3 respaldo
 }
 
 export const BIOME_SKY: Record<Biome, number[]> = {
   forest: [0xc4ad8e, 0xd9c3a4, 0xebd8bf, 0xf6e9d7],
   jungle: [0x9ab89a, 0xb8d0a8, 0xd4e2c0, 0xe8f0d8],
   industrial: [0x6a4a5a, 0xb86a4a, 0xe8a060, 0xf6d49a],
+  snow: [0x8aa0b8, 0xb0c4d8, 0xd4e0ec, 0xeef4fa], // v3 respaldo
 }
 
 // Colores de escombro por material (índice = Material).

@@ -344,6 +344,53 @@ Rama `v2.4-cierre`. Tres agentes en paralelo (sim, flujo, render); contrato, doc
   - **`Impact.water`** en el vuelo y en el evento `impact` (barriles incluidos) cuando el centro quedó sumergido.
   - `sim-check` 38407/38407 en ~2,6 min (máquina libre; con otros agentes corriendo, 8-15 min y fallan por carga los topes de tiempo de la IA con lava). Balance (tiros por partida, IA normal): Chico 2 / 4: 10,6 / 17,3 (20 partidas); Mediano 11,6 (40) / 26,2 (20); Grande 9,8 (40) / 24,3 (20); Mediano 6: 33,0 (máx. 55, 60 partidas, posiciones 7/7/10/12/8/16); Grande 8: 39,7 (máx. 53). Topes: 2 tanques en Mediano y Grande con 40 partidas (con 20, Grande daba 7,7-11,8 según la tanda y fallaba el piso de 8 por azar); 4 tanques en Mediano y Grande, tope 30 (antes 27: Mediano mide ~26 desde v2.3). Abismo: 26 de 240 muertes (10,8%). IA peor caso 99 ms.
 
+## v3: el mejor vs posible (2026-10-04)
+
+Rama `v3`. Decidido con el usuario el 2026-10-04. Prioridad: el juego versus. Equipos y repeticiones quedan para el final; sin clima, sin desafíos, sin progresión, sin microtransacciones.
+
+### Alcance
+
+1. **Rendimiento en celular**: 60 fps con explosiones en un celular de gama media (`npm run mobile-fps -- --cpu 4 --gpu`, demo de 4 IA). Hoy baja a ~30 fps; el perfil marca `Raster.light` y el dibujo en canvas.
+2. **Relay TURN propio**: el código ya lee `VITE_TURN_*`; falta que el usuario cargue los secrets (ver README).
+3. **Armas nuevas** (8, en la tienda; `WEAPON_ORDER` pasa a 16):
+   - **Teledirigido**: vuelo balístico hasta el apogeo; en la bajada se dirige con ← → (`steer`), con guiado limitado (`GUIDE_TIME`), giro limitado (`STEER_RATE`), temblor determinista (`STEER_WOBBLE`) y viento. Nunca es un tiro seguro.
+   - **Rebotadora**: explota en cada rebote (`bounces` explosiones chicas y una final).
+   - **Láser**: rayo recto sin gravedad ni viento; atraviesa materiales blandos y frena en piedra o metal.
+   - **Mina**: queda clavada (`Hazard`); explota si un tanque pasa cerca o al vencer.
+   - **Terremoto**: sacude y derrumba una zona grande y mueve tanques (usa el derrumbe de v2.4).
+   - **Agujero negro**: atrae tanques y escombros hacia el centro (combo con abismos y lava).
+   - **Ácido**: corroe piedra y metal, hace daño y deja un charco que daña por turno.
+   - **Muro**: pared vertical fina y alta de tierra para cubrirse (la Tierra hace una bola que entierra).
+4. **Ítems nuevos**: jetpack (salto a un destino), teletransporte (a un destino), ancla (inmune al empuje y al hielo hasta su turno), escudo deflector (desvía el próximo proyectil). No gastan el turno.
+5. **Bioma nieve**: nieve blanda que se compacta, hielo resbaloso (el tanque patina, `ICE_SLIDE`), lagos congelados cuya capa se rompe con explosiones, montañas nevadas; fondos periódicos propios.
+6. **IA con personalidades**: agresiva, francotiradora, cavadora, oportunista (`Personality`); el menú elige o sortea.
+7. **Recompensas en la partida** (`BONUS`, evento `bonus`): tiro largo, kill doble, kill por abismo/lava/derrumbe, primera sangre, cajas de botín que caen en paracaídas (`loot`) y objetivos pagos del mapa (`target`).
+8. **Perfil**: nombre editable (hasta `NAME_MAX` letras), tripulante y color de tanque por separado, guardados en el navegador y en el online (`SlotConfig.color`, mensaje `profile`).
+9. Al final: equipos y repeticiones.
+
+### Contratos v3
+
+- `src/sim/types.ts`: `SNOW`, `ICE`, `ICE_SLIDE`, bioma `'snow'`; `WeaponId` con las 8 nuevas y sus campos en `WeaponDef` (`guided`, `bounces`, `beam`, `mine`, `quake`, `pull`, `acid`, `hard`; `terrain` `'wall' | 'none'`), `BlastStyle` nuevos, `WEAPON_ORDER` de 16; `STEER_TICK`, `STEER_RATE`, `GUIDE_TIME`, `STEER_WOBBLE`; `Hazard`, `GuidedState`, `GameState.hazards`, `GameState.guided`, `GameState.bonusFirstBlood`, fase `'guiding'`; comando `steer`, `useItem.target`; ítems `jetpack`, `teleport`, `anchor`, `deflector` (`JETPACK_RANGE`, `TELEPORT_RANGE`, `Player.anchored`, `Player.deflector`); `PropKind` `loot` y `target`; `BonusKind`, `BONUS`, `LONGSHOT_FRAC`; `Personality`, `PERSONALITIES`, `SlotConfig.color`, `SlotConfig.personality`, `Player.personality`, `NAME_MAX`; eventos `beam`, `quake`, `pull`, `hazard`, `deflect`, `jetpack`, `teleport`, `guide`, `bonus`; `slide.cause` con `ice`, `pull`, `quake`.
+- `src/render/types.ts`: `RenderFrame.hazards`, `RenderFrame.guided`.
+- `src/ui/types.ts`: `HudExtras.guide`, `HudExtras.aimItem`.
+- `src/net/types.ts`: `LobbySlot.color`, `LobbySlot.personality`, mensajes `profile` y `steerLive`, reglas del `steer` en el log.
+- `src/render/manifest.ts`: `weaponIcons` de 16 frames, `itemIcons` de 9, `props.loot`, `props.target` por bioma, `props.mine`, `props.missile` (opcionales hasta que estén pintados); el manifiesto de materiales suma `SNOW` e `ICE` y los fondos y la paleta de `snow`.
+- Los valores numéricos de las armas, ítems, bonos y nieve son iniciales: los balancea sim.
+
+### Reparto (9 agentes en paralelo)
+
+| Agente | Qué | Archivos |
+|---|---|---|
+| sim-armas | 8 armas, teledirigido (`fire` → `guiding` → `steer`), 4 ítems, minas y ácido, tienda, IA usando todo (incluido `ShotPlan.steer`) | `src/sim/**` (armas, ítems, IA de tiro), `scripts/sim-check.ts` |
+| sim-mundo | Bioma nieve (generador, hielo, nieve, lagos congelados), recompensas (bonos, botín, objetivos), personalidades de la IA | `src/sim/**` (gen, física del hielo, bonos, `ai-personality`), `scripts/sim-check.ts` |
+| render-armas | Efectos de las 8 armas, misil y su guiado, minas y ácido, ítems, carteles de bonos | `src/render/**` (archivos nuevos + ganchos) |
+| render-nieve | Nieve e hielo en el terreno, nevada, lagos congelados, botín y objetivos | `src/render/**` (archivos nuevos + ganchos) |
+| render-perf | 60 fps con explosiones en celular | `src/render/pixi/raster.ts`, `fx.ts` (internos), `terrain.ts` |
+| arte | Fondos y materiales de nieve, íconos de 16 armas y 9 ítems, botín, objetivos, mina, misil | `scripts/paint-assets.mjs`, `scripts/lookdev/**`, `public/assets/**` |
+| vistas | Barra de 16 armas y 9 ítems, tienda, perfil en menú y sala, barra de guiado, ayuda de destino | `src/ui/**` |
+| flujo | Guiado con ← → y táctil, destino de jetpack y teletransporte, cámara, sonidos, perfil guardado | `src/main.ts`, `src/game/**`, `src/input/**`, `src/audio/**` |
+| red | `steer` en el online con predicción del que dispara, `profile`, `net-test` con teledirigido | `src/net/**`, `scripts/net-test.mjs` |
+
 ## Cómo se agrega algo
 
 - Arma nueva: un registro en `WEAPONS` y, si el efecto es nuevo, un modo de terreno en `sim` y un `BlastStyle` en el renderer.

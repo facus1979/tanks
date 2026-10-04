@@ -179,7 +179,7 @@ export async function mountUiTest(name: string): Promise<boolean> {
       wind: Number(params.get('wind') ?? 4),
       status: params.get('status') ?? (aiTurn ? `${names[turn - 1].toUpperCase()} PIENSA` : ''),
       showAim: !aiTurn,
-      ammoAll: { normal: 99, heavy: 2, dirt: 3, cluster: 0, napalm: 2, digger: 2, roller: 2, nuke: 1 },
+      ammoAll: { normal: 99, heavy: 2, dirt: 3, cluster: 0, napalm: 2, digger: 2, roller: 2, nuke: 1, guided: 1, bouncer: 2, laser: 0, mine: 2, quake: 1, blackhole: 1, acid: 2, wall: 2 },
       fuel: aiTurn ? 1 : 0.7,
       showBar: !aiTurn,
       extras: {
