@@ -18,8 +18,8 @@ import { mix } from './raster'
 const SPARK_RAMP = [0xffffff, 0xfffbe2, 0xfff1a8, 0xffd24a, 0xf7a028, 0x8a3a14]
 const ACID_RAMP = [0xf6ffd0, 0xdcff6a, 0xa8e82c, 0x6cbc1e, 0x3c8418, 0x1e4a10]
 const ACID_OUT = 0x0e2008
-const TOXIC = [0xb4c488, 0x8e9e62, 0x6a7a48, 0x4a5634, 0x2e3622]
-const TOXIC_OUT = 0x1a2010
+const TOXIC = [0xe4f0a0, 0xc4d878, 0x9cb456, 0x76883e, 0x4e5a2a]
+const TOXIC_OUT = 0x2a3414
 const ACID_DROPS = [0xc8f040, 0x8cd422, 0x5aa01a, 0xe8ff90]
 const VOID_RAMP = [0xffffff, 0xeedcff, 0xc8a0ff, 0x9060e8, 0x5a30b0, 0x2a1460]
 const VOID_OUT = 0x0a0418
@@ -98,6 +98,7 @@ interface Rise {
   age: number
   life: number
   acc: number
+  ghost: boolean // no se encontró la pared en el terreno (?fxtest): se dibuja una de mentira mientras sube
 }
 
 interface ShotTrack {
@@ -301,7 +302,7 @@ export class WeaponsFx {
     const len = Math.hypot(dx, dy) || 1
     const ux = dx / len
     const uy = dy / len
-    for (let s = 0; s <= len && out.length < 600; s += 1) {
+    for (let s = 0; s <= len && out.length < 400; s += 1) {
       const x = b.x0 + ux * s
       const y = b.y0 + uy * s
       for (const side of [-1, 1]) {
@@ -341,7 +342,7 @@ export class WeaponsFx {
         let px = cols[j]
         let py = cols[j + 1] + 1
         const pts: number[] = []
-        const len = rr(10, 22) * Math.min(1.6, R / 60)
+        const len = rr(16, 30) * Math.min(1.6, R / 60)
         let dir = rr(-0.6, 0.6)
         for (let s = 0; s < len; s++) {
           if (!solidAt(t, px, py)) break
@@ -438,9 +439,9 @@ export class WeaponsFx {
       k.blob({ layer: 1, ox: x, oy: y - 3, dx: Math.cos(a) * d, dy: Math.sin(a) * d * 0.8, vy: 10, ay: 60, r0: r1 * 0.4, r1, grow: 0.06, hold: rr(0.2, 0.35), life: rr(0.4, 0.6), ramp: ACID_RAMP, outline: ACID_OUT, heat0: rr(0, 0.25), heatV: 1.6, cool: 0.12 })
     }
     // columna de humo tóxico
-    for (let i = 0; i < 9; i++) {
-      const t = i / 8
-      const r1 = (6 + rr(0, 5) + t * 4) * s
+    for (let i = 0; i < 7; i++) {
+      const t = i / 6
+      const r1 = (4 + rr(0, 4) + t * 3) * s
       k.blob({ layer: 0, ox: x, oy: y - 6, dx: rr(-10, 10) * s, dy: -(10 + t * 34) * s, vx: this.c.fx.wind * 1.2, vy: -(4 + rr(0, 5)) * s, ax: this.c.fx.wind * 0.6, r0: r1 * 0.4, r1, grow: 0.25 + t * 0.2, hold: 0.9 + rr(0, 0.5), life: 2.2 + rr(0, 0.8), delay: t * 0.05, heat0: 0.1 + rr(0, 0.3), heatV: 0.05, ramp: TOXIC, outline: TOXIC_OUT, fade: true })
     }
     // gotas de ácido (escombro verde que rebota) y algún pedazo de lo que corroyó
@@ -474,6 +475,7 @@ export class WeaponsFx {
     let x1 = Math.round(x) + 2
     let top = Math.round(y - radius * 1.6)
     let base = Math.round(y)
+    let ghost = true
     if (t) {
       // columnas cuyo piso quedó bastante más arriba que el de los costados
       const tops: number[] = []
@@ -483,6 +485,7 @@ export class WeaponsFx {
         const ground = Math.max(...valid)
         const hi = Math.min(...valid)
         if (ground - hi > 8) {
+          ghost = false
           let a = -1
           let b = -1
           tops.forEach((v, i) => {
@@ -498,7 +501,7 @@ export class WeaponsFx {
         }
       }
     }
-    this.rises.push({ x0, x1, top, base, age: 0, life: 0.4, acc: 0 })
+    this.rises.push({ x0, x1, top, base, age: 0, life: 0.4, acc: 0, ghost })
     const k = this.k
     const cx = (x0 + x1) / 2
     for (let i = 0; i < 14; i++) {
@@ -702,11 +705,11 @@ export class WeaponsFx {
     for (const q of this.quakes) {
       q.age += dt
       if (q.age < 1.2 && q.cols.length) {
-        q.acc += dt * 45 * (1 - q.age / 1.2)
+        q.acc += dt * 90 * (1 - q.age / 1.2)
         for (; q.acc >= 1; q.acc--) {
           const j = Math.floor(rr(0, q.cols.length / 2)) * 2
-          const r = rr(1.5, 3)
-          k.soft({ x0: q.cols[j] + rr(-2, 2), y0: q.cols[j + 1] - 1, vx: this.c.fx.wind + rr(-6, 6), vy: -rr(18, 40), drag: 1.4, r0: r * 0.6, r1: r * 2.4, life: rr(0.9, 1.6), inner: 0xc8b89a, edge: 0x8a7a64, a0: 0.75, keep: 0.25 })
+          const r = rr(2, 4)
+          k.soft({ x0: q.cols[j] + rr(-2, 2), y0: q.cols[j + 1] - 1, vx: this.c.fx.wind + rr(-6, 6), vy: -rr(24, 55), drag: 1.2, r0: r * 0.6, r1: r * 2.8, life: rr(0.9, 1.6), inner: 0xc8b89a, edge: 0x8a7a64, a0: 0.75, keep: 0.25 })
           if (rr(0, 1) < 0.3) {
             const m = t ? materialAt(t, q.cols[j], q.cols[j + 1] + 1) : 1
             const pal = DEBRIS_COLORS[m === AIR ? 1 : m] ?? DEBRIS_COLORS[1]
@@ -771,9 +774,9 @@ export class WeaponsFx {
       for (const pts of q.cracks) {
         const n = Math.floor((pts.length / 2) * grow) * 2
         for (let i = 0; i + 1 < n; i += 2) {
-          under.px(pts[i], pts[i + 1], OUT, a)
+          under.rect(pts[i], pts[i + 1], i < n / 3 ? 2 : 1, 1, OUT, a)
           // borde levantado más claro a la derecha de la grieta
-          if (i % 4 === 0) under.px(pts[i] + 1, pts[i + 1], 0x7a6650, a * 0.6)
+          if (i % 4 === 0) under.px(pts[i] + 2, pts[i + 1], 0x9a8468, a * 0.7)
         }
       }
     }
@@ -790,9 +793,9 @@ export class WeaponsFx {
       const u = b.age / b.life
       const w = u < 0.15 ? 7 : u < 0.6 ? 5 : 3
       const flick = Math.sin(b.age * 90) > 0 ? 1 : 0.8
-      over.line(b.x0, b.y0, b.x1, b.y1, b.color, 0.45 * (1 - u) * flick, w + 2)
-      over.line(b.x0, b.y0, b.x1, b.y1, mix(b.color, 0xffffff, 0.35), 0.9 * (1 - u * 0.6), Math.max(1, w - 2))
-      over.line(b.x0, b.y0, b.x1, b.y1, 0xffffff, 1 - u * 0.5, u < 0.6 ? 2 : 1)
+      over.bar(b.x0, b.y0, b.x1, b.y1, w + 4, b.color, 0.35 * (1 - u) * flick)
+      over.bar(b.x0, b.y0, b.x1, b.y1, w, mix(b.color, 0xffffff, 0.25), 0.9 * (1 - u * 0.6))
+      over.bar(b.x0, b.y0, b.x1, b.y1, u < 0.6 ? 2 : 1, 0xffffff, 1 - u * 0.4)
       const len = Math.hypot(b.x1 - b.x0, b.y1 - b.y0)
       for (let s = 0; s <= len; s += 36) {
         const x = b.x0 + ((b.x1 - b.x0) * s) / (len || 1)
@@ -815,6 +818,10 @@ export class WeaponsFx {
       const u = Math.min(1, r.age / r.life)
       const fy = r.base - (r.base - r.top) * u
       const a = r.age > r.life ? 1 - (r.age - r.life) / 0.15 : 1
+      if (r.ghost) {
+        over.rect(r.x0 - 1, fy, r.x1 - r.x0 + 3, r.base - fy, OUT, a)
+        over.rect(r.x0, fy + 1, r.x1 - r.x0 + 1, r.base - fy - 1, 0x76604a, a)
+      }
       over.rect(r.x0, fy, r.x1 - r.x0 + 1, 2, 0xd8c4a0, 0.9 * a)
       over.rect(r.x0 - 1, fy + 2, r.x1 - r.x0 + 3, 1, 0x8a6a48, 0.7 * a)
     }
@@ -839,7 +846,7 @@ export class WeaponsFx {
     // al final se cierra (VORTEX_END) antes de implotar
     const close = t > v.dur ? Math.max(0, 1 - (t - v.dur) / VORTEX_END) : 1
     const k = grow * close
-    const rc = Math.max(1, 6 * k + Math.sin(t * 9) * 0.6)
+    const rc = Math.max(1, 8 * k + Math.sin(t * 9) * 0.6)
     const x = v.x
     const y = v.y
     glow.sprite(glowTexture(Math.round(10 + v.R * 0.45 * k)), x, y, { tint: 0x6a30ff, alpha: 0.55 * k })
@@ -852,7 +859,7 @@ export class WeaponsFx {
         const u = i / 26
         const r = rc + 3 + u * reach
         const ang = spin + (arm * Math.PI * 2) / 3 + v.spin * u * 3.2
-        g.px(x + Math.cos(ang) * r, y + Math.sin(ang) * r * 0.85, u < 0.3 ? VIOLET_HI : VIOLET, (1 - u) * 0.85 * k)
+        g.rect(x + Math.cos(ang) * r, y + Math.sin(ang) * r * 0.85, u < 0.4 ? 2 : 1, 1, u < 0.3 ? VIOLET_HI : VIOLET, Math.min(1, (1 - u) * 1.1) * k)
       }
     }
     // anillo de acreción: pixels claros girando rápido, con dos tonos alternados

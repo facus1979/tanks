@@ -88,6 +88,23 @@ export class PixelLayer {
     }
   }
 
+  // Barra recta de (x0, y0) a (x1, y1) de ancho w: un solo sprite estirado y girado (rayos largos: no
+  // cuesta un sprite por pixel como line()).
+  bar(x0: number, y0: number, x1: number, y1: number, w: number, color: number, alpha = 1): void {
+    if (alpha <= 0.01) return
+    const len = Math.hypot(x1 - x0, y1 - y0)
+    if (len < 0.5) return
+    const s = this.next(Texture.WHITE)
+    if (!s) return
+    s.anchor.set(0, 0.5)
+    s.rotation = Math.atan2(y1 - y0, x1 - x0)
+    s.position.set(x0, y0)
+    s.scale.set((len + 1) / Texture.WHITE.width, Math.max(1, w) / Texture.WHITE.height)
+    s.tint = color
+    s.alpha = Math.min(1, alpha)
+    s.visible = true
+  }
+
   // Sprite con textura (brillos, mina y misil pintados).
   sprite(tex: Texture, x: number, y: number, o: { tint?: number; alpha?: number; ax?: number; ay?: number; sx?: number; sy?: number; rot?: number } = {}): void {
     const a = o.alpha ?? 1
