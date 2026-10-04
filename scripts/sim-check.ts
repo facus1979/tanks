@@ -3451,6 +3451,7 @@ function armed(): GameState {
     for (const id of WEAPON_ORDER) p.ammo[id] = Math.max(p.ammo[id], 5)
     for (const id of ITEM_ORDER) p.items[id] = 3
   }
+  s.wind = 0 // aimAt apunta sin viento
   return s
 }
 // pasa el turno del que tiene el turno con un tiro inofensivo (para volver a P0 o hacer correr los turnos)
@@ -3470,8 +3471,12 @@ for (const id of WEAPON_ORDER) if (id !== 'normal') check(SHOP.some((e) => e.id 
 for (const id of ITEM_ORDER) check(SHOP.some((e) => e.id === id && e.kind === 'item'), `v3 tienda: falta el ítem ${id}`)
 {
   // rebotadora: una explosión 'spark' por rebote y una final 'fire'; cada tramo arranca después del anterior
-  const s = armed()
-  s.players[1].x = 760
+  const bounceMap = () => {
+    const b = armed()
+    b.players[1].x = 760
+    return b
+  }
+  const s = bounceMap()
   const r = shoot(s, 'bouncer', 60, 45)
   const imps = impactsOf(r)
   const n = WEAPONS.bouncer.bounces ?? 0
@@ -3480,7 +3485,7 @@ for (const id of ITEM_ORDER) check(SHOP.some((e) => e.id === id && e.kind === 'i
   const st = r.flights!.map((f) => f.startT ?? 0)
   check(r.flights!.length === imps.length && st.every((t, i) => i === 0 || t > st[i - 1]), 'rebotadora: un tramo por rebote, en orden')
   check(imps.every((e, i) => i === 0 || e.t > imps[i - 1].t), 'rebotadora: explosiones en orden')
-  check(netHash(shoot(armed(), 'bouncer', 60, 45).state) === netHash(r.state), 'rebotadora: determinista')
+  check(netHash(shoot(bounceMap(), 'bouncer', 60, 45).state) === netHash(r.state), 'rebotadora: determinista')
 }
 {
   // láser: recto, sin gravedad; atraviesa una pared fina de tierra; frena en piedra
@@ -3494,7 +3499,7 @@ for (const id of ITEM_ORDER) check(SHOP.some((e) => e.id === id && e.kind === 'i
   const beam = r.events.find((e): e is Extract<GameEvent, { type: 'beam' }> => e.type === 'beam')
   check(!!beam && beam.t === 0, 'láser: evento beam')
   check(r.events.some((e) => e.type === 'damage' && e.playerId === 1 && e.amount === WEAPONS.laser.damage), `láser: pega directo a través de la pared de tierra (${JSON.stringify(r.events.filter((e) => e.type === 'damage'))})`)
-  check(!isSolid(r.state.terrain, 305, Math.round(m.y + (305 - m.x) * Math.tan((-a * Math.PI) / 180))), 'láser: abre un agujero en la tierra')
+  check(countIn(r.state.terrain, DIRT, 300, 240, 309, 299) < countIn(s.terrain, DIRT, 300, 240, 309, 299) - 20, 'láser: abre un agujero en la tierra')
   const s2 = armed()
   s2.players[1].x = 420
   fillRect(s2.terrain, 300, 240, 309, 299, STONE, 'both')
