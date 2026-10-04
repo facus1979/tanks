@@ -127,12 +127,12 @@ export class HazardsView {
           p = { h, cols: this.surface(t, h), version, fade: 0, gone: false, acc: 0 }
           this.puddles.set(h.id, p)
         }
-        p.h = h
-        if (p.version !== version) {
-          // el piso cambió (explosión, derrumbe): el charco vuelve a apoyarse
+        if (p.version !== version || p.h.x !== h.x || p.h.y !== h.y) {
+          // el piso cambió (explosión, derrumbe) o el charco se movió: vuelve a apoyarse
           p.cols = this.surface(t, h)
           p.version = version
         }
+        p.h = h
       }
     }
     // lo que salió de la lista sin evento expire también se va, desvaneciéndose

@@ -40,6 +40,7 @@ export class ArmasFx {
   private time = 0
   // QA: peligros falsos de ?fxtest=mine|acid y misil guiado falso de ?fxtest=guided
   private fakeHazards: Hazard[] = []
+  private fakeId = 100000
   private lastProj: { x: number; y: number }[] = []
 
   constructor(
@@ -166,8 +167,7 @@ export class ArmasFx {
   private fxTest(ev: Extract<GameEvent, { type: 'impact' }>, frame: RenderFrame): void {
     const shooter = frame.players.find((p) => p.id === frame.shooterId) ?? frame.players[frame.current]
     const w = FX_TEST && FX_TEST in WEAPONS ? WEAPONS[FX_TEST as WeaponId] : null
-    let id = 1000
-    const hz = (kind: Hazard['kind'], radius: number): Hazard => ({ id: id++, kind, ownerId: shooter?.id ?? 0, x: ev.x, y: ev.y, radius, turns: 2 })
+    const hz = (kind: Hazard['kind'], radius: number): Hazard => ({ id: this.fakeId++, kind, ownerId: shooter?.id ?? 0, x: ev.x, y: ev.y, radius, turns: 2 })
     switch (FX_TEST) {
       case 'laser':
         if (shooter) {
