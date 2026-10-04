@@ -4,7 +4,7 @@
 // v4: el agua y la lava no frenan partículas (no son sólidas); lo que cae en ellas se apaga o se hunde, y el
 // agua tiene sus propias partículas: gotas (salpicaduras, géiser, espuma) y burbujas.
 import type { BlastStyle, Terrain } from '../../sim/types'
-import { AIR, WATER, WEAPONS } from '../../sim/types'
+import { AIR, STONE, WATER, WEAPONS } from '../../sim/types'
 import { DEBRIS_COLORS, OUT } from './fallback'
 import { LIQ, solidCell } from './liquids'
 import { Raster, Rng, bayer, mix } from './raster'
@@ -656,6 +656,118 @@ export class Fx {
       const r1 = 3 + this.r() * 2
       this.blob({ layer: 0, ox: x, oy: y - 4, vy: -16, vx: this.wind * 1.5, ax: this.wind * 0.5, r0: 1.5, r1, grow: 0.6, hold: 0.6, life: 1.4, heat0: 0.3 + this.r() * 0.3, heatV: 0.05, ramp: BLACK_SMOKE, outline: BLACK_OUT, fade: true })
     }
+  }
+
+  // ---------- derrumbe (v2.4) ----------
+
+  // Colores del polvo según el material que cae: la tierra en marrón claro, la piedra en gris.
+  private collapseDustCols(mat: number): [number, number] {
+    return mat === STONE ? [0xa49e92, 0x6a665e] : [0xa8927a, 0x6e5c48]
+  }
+
+  // Polvo que se desprende de un borde de lo que cae (x, y = celda del borde). down: borde de abajo (frente
+  // de la caída, el polvo sale hacia los costados); si no, borde de arriba (queda flotando detrás).
+  collapseDust(x: number, y: number, mat: number, down: boolean): void {
+    const [inner, edge] = this.collapseDustCols(mat)
+    const r = 1.2 + this.r() * 1.8
+    const side = this.r() < 0.5 ? -1 : 1
+    this.soft({
+      x0: x + (this.r() - 0.5) * 3,
+      y0: y,
+      vx: side * (down ? 14 + this.r() * 22 : 3 + this.r() * 8) + this.wind,
+      vy: down ? -4 - this.r() * 8 : -3 - this.r() * 5,
+      drag: 3,
+      r0: r * 0.6,
+      r1: r * (down ? 2 : 1.6),
+      life: 0.6 + this.r() * 0.5,
+      inner,
+      edge,
+      a0: 0.75,
+    })
+  }
+
+  // Piedrita o terrón suelto que se cae del bloque y rebota en el piso (la física de los escombros).
+  collapsePebble(x: number, y: number, mat: number, vx: number, vy: number): void {
+    const cols = DEBRIS_COLORS[mat] ?? DEBRIS_COLORS[1]
+    this.debris.push({ x, y, vx, vy, color: cols[Math.floor(this.r() * cols.length)], shape: Math.floor(this.r() * (mat === STONE ? 4 : 3)), life: 1 + this.r() * 0.8, age: 0, rest: false })
+  }
+
+  // Nube de polvo al asentarse el derrumbe: bocanadas apoyadas en el piso a lo ancho de lo que cayó
+  // (x0..x1, y = fila de abajo de lo que llegó), más grande cuantas más celdas se movieron, terrones que
+  // rebotan y, si fue grande, polvo que sube y un sacudón chico.
+  settleCloud(x0: number, x1: number, y: number, cells: number, mat: number): void {
+    const [inner, edge] = this.collapseDustCols(mat)
+    const k = Math.min(2.2, 0.7 + Math.sqrt(cells) / 30)
+    const n = Math.max(3, Math.min(20, Math.round(3 + Math.sqrt(cells) * 0.5)))
+    const cx = (x0 + x1) / 2
+    const half = Math.max(4, (x1 - x0) / 2)
+    const puffHi = mat === STONE ? 0xb8b6ae : PUFF_MID
+    const puffEdge = mat === STONE ? 0x908c84 : PUFF_EDGE
+    for (let i = 0; i < n; i++) {
+      const side = i % 2 === 0 ? -1 : 1
+      const x = cx + side * this.r() * (half + 6)
+      // la bocanada se apoya en lo que haya debajo (el montón recién asentado o el piso de al lado)
+      const gy = this.groundY(x, y - 24)
+      const fy = gy >= 0 && gy < y + 12 ? gy : y
+      const rr = (2.5 + this.r() * 3) * k
+      this.soft({
+        x0: x,
+        y0: fy,
+        vx: side * (16 + this.r() * 34) * Math.sqrt(k),
+        vy: -(1 + this.r() * 3),
+        drag: 2.6,
+        r0: rr * 0.8,
+        r1: rr * 1.8,
+        life: 0.9 + this.r() * 0.7 + k * 0.3,
+        inner: puffHi,
+        edge: puffEdge,
+        a0: 0.85,
+        keep: 0.3,
+        puff: 0.55 + this.r() * 0.15,
+      })
+    }
+    // polvo suelto que se levanta un poco más
+    for (let i = 0; i < Math.round(n * 0.6); i++) {
+      const r = (1.5 + this.r() * 2) * k
+      this.soft({ x0: cx + (this.r() - 0.5) * 2 * half, y0: y - 2 - this.r() * 4, vx: (this.r() - 0.5) * 30 + this.wind, vy: -8 - this.r() * 14, drag: 2, r0: r * 0.6, r1: r * 2, life: 1 + this.r() * 0.8, inner, edge, a0: 0.7, keep: 0.2 })
+    }
+    // derrumbe grande: algunas nubecitas con contorno que suben despacio, repartidas a lo ancho
+    if (cells >= 400) {
+      const nb = Math.min(6, Math.round(cells / 400))
+      for (let i = 0; i < nb; i++) {
+        const r1 = 3 + this.r() * 2.5
+        const bx = cx + ((i + 0.5) / nb - 0.5) * 2 * half + (this.r() - 0.5) * 8
+        this.blob({ layer: 0, ox: bx, oy: y - 4, vy: -7 - this.r() * 5, vx: this.wind * 1.5, ax: this.wind * 0.5, r0: 1.5, r1, grow: 0.6, hold: 0.6, life: 1.5 + this.r() * 0.5, delay: 0.05 + i * 0.04, heat0: 0.35 + this.r() * 0.3, heatV: 0.05, ramp: DUST, outline: 0x3c2e22, fade: true })
+      }
+    }
+    const pebbles = Math.min(18, 3 + Math.round(cells / 50))
+    for (let i = 0; i < pebbles; i++) {
+      const side = i % 2 === 0 ? -1 : 1
+      this.collapsePebble(cx + side * this.r() * half, y - 2, mat, side * (20 + this.r() * 60), -(40 + this.r() * 80))
+    }
+    if (cells >= 300) this.shake = Math.max(this.shake, Math.min(4.5, 1.5 + cells / 500))
+    this.capParticles()
+  }
+
+  // Tanque aplastado por un derrumbe (damage con cause 'collapse'): polvo del material sobre el casco y chispas
+  // del metal golpeado.
+  crushed(x: number, y: number, mat: number): void {
+    const [inner, edge] = this.collapseDustCols(mat)
+    const cy = y - 10
+    for (let i = 0; i < 10; i++) {
+      const side = i % 2 === 0 ? -1 : 1
+      const r = 2 + this.r() * 2.5
+      this.soft({ x0: x + side * this.r() * 14, y0: cy + (this.r() - 0.5) * 8, vx: side * (14 + this.r() * 34), vy: -6 - this.r() * 14, drag: 3, r0: r * 0.6, r1: r * 2, life: 0.8 + this.r() * 0.6, inner, edge, a0: 0.85, keep: 0.2 })
+    }
+    for (let i = 0; i < 10; i++) {
+      this.sparks.push({ x: x + (this.r() - 0.5) * 22, y: cy + (this.r() - 0.5) * 6, vx: (this.r() - 0.5) * 120, vy: -40 - this.r() * 70, life: 0.25 + this.r() * 0.35, age: 0 })
+    }
+    // terrones que saltan del casco y otros que siguen cayendo encima
+    for (let i = 0; i < 6; i++) this.collapsePebble(x + (this.r() - 0.5) * 20, cy - 4, mat, (this.r() - 0.5) * 80, -(30 + this.r() * 60))
+    for (let i = 0; i < 4; i++) this.collapsePebble(x + (this.r() - 0.5) * 24, cy - 14 - this.r() * 10, mat, (this.r() - 0.5) * 20, 20 + this.r() * 30)
+    this.lights.push({ x, y: cy, R: 20, tint: 0xffd080, k: 0.25, life: 0.12, age: 0 })
+    this.shake = Math.max(this.shake, 3)
+    this.capParticles()
   }
 
   // ---------- abismo (v3) ----------
