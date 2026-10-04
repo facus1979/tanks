@@ -16,6 +16,7 @@ import path from 'node:path'
 
 const pageErrors = []
 // NET_TEST_TRANSPORT=peer prueba por internet con PeerJS (señalización pública + WebRTC); por defecto 'local'.
+// NET_TEST_RELAY=1 (con peer) obliga a las dos pestañas a pasar por el relay TURN (?relay=1), como entre redes distintas.
 const TRANSPORT = process.env.NET_TEST_TRANSPORT === 'peer' ? 'peer' : 'local'
 import { fileURLToPath } from 'node:url'
 
@@ -119,7 +120,8 @@ try {
 // ---------- partida real ----------
 
 async function gameTest() {
-  const extra = PLAYERS ? `&players=${PLAYERS}` : ''
+  const relay = process.env.NET_TEST_RELAY === '1' ? '&relay=1' : ''
+  const extra = (PLAYERS ? `&players=${PLAYERS}` : '') + relay
   if (PLAYERS) log(`modo ${PLAYERS} casilleros: 2 humanos + ${PLAYERS - 2} IA`)
   const a = await openTab(`${base}/?net=${TRANSPORT}&host=1&autotest=1${extra}`, 'A')
   const hostState = await waitFor(
@@ -131,7 +133,7 @@ async function gameTest() {
     () => 'La pestaña A no publicó window.__tanksNet.code (¿el flujo implementa ?host=1&autotest=1?)',
   )
   log('sala abierta:', hostState.code)
-  const b = await openTab(`${base}/?net=${TRANSPORT}&join=${encodeURIComponent(hostState.code)}&autotest=1`, 'B')
+  const b = await openTab(`${base}/?net=${TRANSPORT}&join=${encodeURIComponent(hostState.code)}&autotest=1${relay}`, 'B')
   // En esta máquina la primera carga de B a veces tarda tanto (las dos pestañas comparten proceso)
   // que el join local vence a los 5 s y B queda en el menú sin __tanksNet: se recarga hasta 2 veces.
   for (let tries = 0; ; tries++) {
