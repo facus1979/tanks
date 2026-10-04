@@ -1,6 +1,6 @@
 // Página de prueba de las vistas: ?uitest=online|lobby|title|menu|banner|score|final|shop|hud con modelos falsos.
 // index.html la carga solo si la query trae uitest; main.ts puede llamar mountUiTest(name) si prefiere.
-import { BEDROCK, BRICK, CREWS, DIRT, GUIDE_TIME, ITEM_ORDER, MAP_SIZES, MAX_PLAYERS_BY_SIZE, SHOP, STONE, TANK_COLORS, WOOD, type MapSize, type MatchConfig, type ShopId, type Terrain, type WeaponId } from '../sim/types'
+import { BEDROCK, BRICK, CREWS, DIRT, GUIDE_TIME, ITEM_ORDER, WEAPONS, WEAPON_ORDER, type ItemId, type ShopEntry, MAP_SIZES, MAX_PLAYERS_BY_SIZE, SHOP, STONE, TANK_COLORS, WOOD, type MapSize, type MatchConfig, type ShopId, type Terrain, type WeaponId } from '../sim/types'
 import { loadUiAssets } from './assets'
 import { Hud } from './hud'
 import { refreshLabels } from './kit'
@@ -32,6 +32,24 @@ function who(): (typeof ALL_ROWS)[number] {
   return ALL_ROWS[Math.max(1, Math.min(8, p)) - 1]
 }
 
+// v3: la tienda completa. Si SHOP todavía no trae las armas e ítems nuevos (los agrega sim-armas en paralelo),
+// se completan acá con precios de prueba, para ver las tres columnas llenas.
+const TEST_PRICES: Partial<Record<ShopId, [number, number, number]>> = {
+  guided: [450, 1, 3], bouncer: [260, 2, 9], laser: [380, 1, 5], mine: [200, 2, 6], quake: [500, 1, 3], blackhole: [650, 1, 2], acid: [320, 2, 6], wall: [140, 2, 9],
+  jetpack: [200, 1, 3], teleport: [400, 1, 2], anchor: [150, 1, 3], deflector: [300, 1, 3],
+}
+const FULL_SHOP: ShopEntry[] = [
+  ...SHOP,
+  ...[...WEAPON_ORDER.filter((id) => id !== 'normal'), ...ITEM_ORDER]
+    .filter((id) => !SHOP.some((s) => s.id === id) && TEST_PRICES[id])
+    .map((id): ShopEntry => {
+      const [price, qty, max] = TEST_PRICES[id] ?? [100, 1, 3]
+      const item = (ITEM_ORDER as string[]).includes(id)
+      return { id, kind: item ? 'item' : 'weapon', name: item ? ITEM_TEST_NAMES[id as ItemId] : WEAPONS[id as WeaponId].name, price, qty, max }
+    }),
+]
+const ITEM_TEST_NAMES: Record<ItemId, string> = { shield: 'Escudo', parachute: 'Paracaídas', fuel: 'Combustible', repair: 'Reparación', tracer: 'Trazador', jetpack: 'Jetpack', teleport: 'Teletransporte', anchor: 'Ancla', deflector: 'Deflector' }
+
 function shopModel(money: number, owned: Record<string, number>): ShopModel {
   const w = who()
   return {
@@ -42,7 +60,7 @@ function shopModel(money: number, owned: Record<string, number>): ShopModel {
     money,
     round: 2,
     rounds: 3,
-    rows: SHOP.map((s) => ({
+    rows: FULL_SHOP.map((s) => ({
       ...s,
       owned: owned[s.id] ?? 0,
       canBuy: money >= s.price && (owned[s.id] ?? 0) + s.qty <= s.max,
@@ -126,7 +144,7 @@ export async function mountUiTest(name: string): Promise<boolean> {
     const owned: Record<string, number> = { heavy: 2, shield: 1 }
     const view = createShopView()
     const change = (id: ShopId, dir: number) => {
-      const s = SHOP.find((e) => e.id === id)
+      const s = FULL_SHOP.find((e) => e.id === id)
       if (!s) return
       money -= s.price * dir
       owned[id] = (owned[id] ?? 0) + s.qty * dir
