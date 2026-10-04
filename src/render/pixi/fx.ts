@@ -731,10 +731,13 @@ export class Fx {
       const r = (1.5 + this.r() * 2) * k
       this.soft({ x0: cx + (this.r() - 0.5) * 2 * half, y0: y - 2 - this.r() * 4, vx: (this.r() - 0.5) * 30 + this.wind, vy: -8 - this.r() * 14, drag: 2, r0: r * 0.6, r1: r * 2, life: 1 + this.r() * 0.8, inner, edge, a0: 0.7, keep: 0.2 })
     }
-    if (cells >= 250) {
-      for (let i = 0; i < Math.min(6, Math.round(cells / 200)); i++) {
-        const r1 = (5 + this.r() * 4) * Math.min(1.6, k)
-        this.blob({ layer: 0, ox: cx + (this.r() - 0.5) * 2 * half, oy: y - 6, vy: -10 - this.r() * 6, vx: this.wind * 1.5, ax: this.wind * 0.5, r0: 2, r1, grow: 0.7, hold: 0.8, life: 1.8 + this.r() * 0.6, delay: i * 0.05, heat0: 0.15 + this.r() * 0.3, heatV: 0.05, ramp: DUST, outline: 0x3c2e22, fade: true })
+    // derrumbe grande: algunas nubecitas con contorno que suben despacio, repartidas a lo ancho
+    if (cells >= 400) {
+      const nb = Math.min(6, Math.round(cells / 400))
+      for (let i = 0; i < nb; i++) {
+        const r1 = 3 + this.r() * 2.5
+        const bx = cx + ((i + 0.5) / nb - 0.5) * 2 * half + (this.r() - 0.5) * 8
+        this.blob({ layer: 0, ox: bx, oy: y - 4, vy: -7 - this.r() * 5, vx: this.wind * 1.5, ax: this.wind * 0.5, r0: 1.5, r1, grow: 0.6, hold: 0.6, life: 1.5 + this.r() * 0.5, delay: 0.05 + i * 0.04, heat0: 0.35 + this.r() * 0.3, heatV: 0.05, ramp: DUST, outline: 0x3c2e22, fade: true })
       }
     }
     const pebbles = Math.min(18, 3 + Math.round(cells / 50))
@@ -759,7 +762,9 @@ export class Fx {
     for (let i = 0; i < 10; i++) {
       this.sparks.push({ x: x + (this.r() - 0.5) * 22, y: cy + (this.r() - 0.5) * 6, vx: (this.r() - 0.5) * 120, vy: -40 - this.r() * 70, life: 0.25 + this.r() * 0.35, age: 0 })
     }
+    // terrones que saltan del casco y otros que siguen cayendo encima
     for (let i = 0; i < 6; i++) this.collapsePebble(x + (this.r() - 0.5) * 20, cy - 4, mat, (this.r() - 0.5) * 80, -(30 + this.r() * 60))
+    for (let i = 0; i < 4; i++) this.collapsePebble(x + (this.r() - 0.5) * 24, cy - 14 - this.r() * 10, mat, (this.r() - 0.5) * 20, 20 + this.r() * 30)
     this.lights.push({ x, y: cy, R: 20, tint: 0xffd080, k: 0.25, life: 0.12, age: 0 })
     this.shake = Math.max(this.shake, 3)
     this.capParticles()

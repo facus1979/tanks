@@ -111,7 +111,9 @@ export class CollapseView {
     for (const j of this.jobs) {
       j.age += dt
       if (changed) this.diff(fx, t, j, splash)
-      if (j.age < j.limit && !(changed && this.done(t, j))) {
+      // el último parche no puede haber llegado mucho antes de su momento: recién ahí se compara la zona entera
+      const late = j.age >= (j.ev.patches.length - 1) * j.ev.dt * 0.5
+      if (j.age < j.limit && !(changed && late && this.done(t, j))) {
         live.push(j)
         continue
       }
