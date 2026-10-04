@@ -245,6 +245,16 @@
       "file": "materials/bedrock.png",
       "w": 256,
       "h": 128
+    },
+    "12": {
+      "file": "materials/snow.png",
+      "w": 128,
+      "h": 64
+    },
+    "13": {
+      "file": "materials/ice.png",
+      "w": 128,
+      "h": 64
     }
   },
   "backgrounds": {
@@ -301,6 +311,24 @@
         "wrap",
         "wrap"
       ]
+    },
+    "snow": {
+      "layers": [
+        "bg/snow-0.png",
+        "bg/snow-1.png",
+        "bg/snow-2.png",
+        "bg/snow-3.png",
+        "bg/snow-4.png"
+      ],
+      "fog": 14607604,
+      "tint": 15659775,
+      "repeat": [
+        "mirror",
+        "wrap",
+        "wrap",
+        "wrap",
+        "wrap"
+      ]
     }
   },
   "biomePalette": {
@@ -333,6 +361,16 @@
       "moss": 5917226,
       "rim": 5125670,
       "ambient": 16770764
+    },
+    "snow": {
+      "grass": [
+        10269912,
+        13293806,
+        16186111
+      ],
+      "moss": 12899562,
+      "rim": 5924480,
+      "ambient": 15133951
     }
   },
   "props": {

@@ -779,19 +779,294 @@ export function industrial() {
   return T.layers
 }
 
-export const BIOME_PAINTERS = { forest, jungle, industrial }
+// ---------- v3: nieve (atardecer azul y rosado) ----------
+//
+// Misma receta que los otros: cielo opaco en 'mirror' y cuatro capas periódicas en 'wrap' pintadas sobre
+// WrapCanvas. El sol queda bajo, a la izquierda: los faldeos que miran a la izquierda y el lado izquierdo de
+// los pinos van con luz rosada; los otros, en sombra azul.
+
+// distancia con signo de x a x0 en la capa periódica (−400 .. 400): las montañas se evalúan con esto, así un
+// pico cerca del borde sigue del otro lado
+const wdx = (x, x0) => ((((x - x0) % BG_W) + BG_W * 1.5) % BG_W) - BG_W / 2
+
+// Cordillera nevada. peaks: [{ x, h, k }] (k = pendiente). Cada columna toma el pico que la tapa más alto;
+// arriba de la línea de nieve (snow px bajo la cumbre, con borde mordido) va nieve, abajo roca, y del lado de
+// la sombra unas canaletas diagonales de nieve bajan por la roca.
+function range(cv, base, peaks, pal, s, snow = 40) {
+  for (let x = 0; x < BG_W; x++) {
+    let top = 1e9
+    let best = null
+    let bdx = 0
+    for (const p of peaks) {
+      const dx = wdx(x, p.x)
+      const t = base - p.h + Math.abs(dx) * p.k
+      if (t < top) {
+        top = t
+        best = p
+        bdx = dx
+      }
+    }
+    // cresta mordida: detalle periódico chico encima de la recta
+    top = Math.round(top + (pnoise(x, 14, s) - 0.5) * 6 + (pnoise(x, 5, s + 1) - 0.5) * 2)
+    const lit = bdx < 0
+    const peakY = base - best.h
+    for (let y = top; y < cv.h; y++) {
+      const below = y - peakY
+      const edge = snow + (pnoise(x, 9, s + 2) - 0.5) * 22 + Math.abs(bdx) * 0.15
+      let c
+      if (below < edge) c = lit ? pal.snow : pal.snowShade
+      else {
+        c = lit ? pal.rock : pal.rockShade
+        // canaletas de nieve que bajan por la roca siguiendo la pendiente: solo algunas (una de cada tres, de
+        // largo distinto) y más en la cara en sombra, para que no quede un rayado parejo
+        const g = y - peakY + Math.abs(bdx) * 0.8 + pnoise(x, 20, s + 3) * 10
+        const gi = Math.floor(g / 13)
+        const gh = hash(gi, best.x, s)
+        const len = 12 + (gh >> 4) % 50
+        if (gh % (lit ? 4 : 2) === 0 && g - gi * 13 < (lit ? 1.5 : 2.5) && below < edge + len && rnd(x, y, s) > 0.25) c = lit ? pal.snow : pal.snowShade
+      }
+      // canto de luz en la cresta del lado del sol
+      if (lit && y - top < 1) c = pal.rim ?? c
+      cv.put(x, y, c)
+    }
+  }
+}
+
+// Pino cargado de nieve: la silueta de pine() (pisos que se ensanchan hacia abajo) con nieve sobre cada piso
+// (la parte de arriba del piso y el canto de afuera), copo en la punta y terrones colgando de las puntas.
+function snowPine(cv, cx, base, h, pal, s) {
+  const top = base - h
+  const cb = base - Math.round(h * 0.08)
+  const ch = cb - top
+  const tiers = Math.max(3, Math.round(ch / 13))
+  const maxW = h * 0.24
+  const tw = h > 110 ? 2 : 1
+  for (let y = top + 3; y < base; y++) for (let x = -tw + 1; x <= 0; x++) cv.put(cx + x, y, pal.trunk ?? pal.dark)
+  for (let y = top; y < cb; y++) {
+    const u = (y - top) / ch
+    const tv = (u * tiers) % 1
+    const grow = 1 + u * maxW
+    const hwL = grow * (0.3 + 0.7 * tv) + (rnd(y, 1, s) - 0.5) * 1.6
+    const hwR = grow * (0.3 + 0.7 * tv) + (rnd(y, 2, s) - 0.5) * 1.6
+    const l = Math.round(cx - hwL)
+    const r = Math.round(cx + hwR)
+    for (let x = l; x <= r; x++) {
+      const rel = (x - l) / Math.max(1, r - l)
+      const n = rnd(x, y, s)
+      let c = pal.dark
+      if (pal.light && rel < 0.25 && tv > 0.4 && n > 0.45) c = pal.light
+      else if (pal.shade && rel > 0.72 && n > 0.35) c = pal.shade
+      // nieve en terrones sobre cada piso (no una franja pareja: cada tramo de 3 px del piso tiene su propia
+      // altura de nieve, y alguno queda sin nieve), copo en la punta y cantos de afuera nevados
+      const tier = Math.floor(u * tiers)
+      const clump = rnd(Math.floor((x - cx + 64) / 3), tier, s + 7)
+      const depth = clump < 0.2 ? 0 : 0.12 + clump * 0.26
+      const cap = tv < depth + (n - 0.5) * 0.08 || u < 0.05
+      const rimL = x - l < 2 && tv < 0.6 && clump > 0.3
+      const rimR = r - x < 1 && tv < 0.4 && clump > 0.5
+      if (cap || rimL || rimR) c = rel < 0.6 ? pal.snow : pal.snowShade
+      cv.put(x, y, c)
+    }
+    // terrones de nieve colgando de las puntas de cada piso
+    if (tv > 0.86) {
+      cv.put(l - 1, y + 1, pal.snow)
+      cv.put(r + 1, y + 1, pal.snowShade)
+      if (rnd(y, 3, s) > 0.5) cv.put(l - 1, y + 2, pal.snowShade)
+    }
+  }
+}
+
+// Observatorio en la loma: tambor con cúpula de ranura abierta, puerta con luz y una antena de celosía con
+// plato y luz roja de balizamiento.
+function observatory(cv, cx, base, pal) {
+  // tambor
+  for (let y = base - 26; y < base; y++) {
+    for (let x = cx - 18; x <= cx + 18; x++) {
+      let c = x < cx - 10 ? pal.light : x > cx + 12 ? pal.shade : pal.dark
+      if ((y - base) % 7 === 0) c = pal.shade
+      cv.put(x, y, c)
+    }
+  }
+  // cornisa con nieve
+  for (let x = cx - 20; x <= cx + 20; x++) cv.put(x, base - 27, pal.snow), cv.put(x, base - 26, x > cx + 10 ? pal.snowShade : pal.snow)
+  // cúpula
+  const R = 17
+  const dy0 = base - 27
+  for (let y = dy0 - R; y <= dy0; y++) {
+    for (let x = cx - R; x <= cx + R; x++) {
+      const d = Math.hypot(x - cx, (y - dy0) * 1.05)
+      if (d > R) continue
+      let c = x - cx < -4 ? pal.snow : x - cx > 6 ? pal.snowShade : mix(pal.snow, pal.snowShade, 0.5)
+      // ranura abierta con el telescopio asomando
+      if (x >= cx - 2 && x <= cx + 2 && y < dy0 - 3) c = pal.slot
+      cv.put(x, y, c)
+    }
+  }
+  cv.line(cx, dy0 - 8, cx + 9, dy0 - 22, pal.dark, 2)
+  // ventanitas iluminadas y puerta
+  for (const wx of [cx - 13, cx - 3, cx + 7]) cv.rect(wx, base - 19, 3, 4, pal.win)
+  cv.rect(cx - 2, base - 9, 5, 9, pal.win)
+  cv.rect(cx - 2, base - 9, 5, 1, pal.dark)
+}
+
+function mast(cv, x, base, h, pal) {
+  const top = base - h
+  for (let y = top; y < base; y++) {
+    const hw = Math.round(2 + ((y - top) / h) * 6)
+    cv.put(x - hw, y, pal.dark)
+    cv.put(x + hw, y, pal.dark)
+    if ((y - top) % 8 === 0) {
+      const hw2 = Math.round(2 + ((y + 8 - top) / h) * 6)
+      cv.line(x - hw, y, x + hw2, y + 8, pal.dark)
+      cv.line(x + hw, y, x - hw2, y + 8, pal.dark)
+      for (let dx = -hw; dx <= hw; dx++) cv.put(x + dx, y, pal.dark)
+      // nieve sobre cada travesaño
+      for (let dx = -hw; dx <= hw - 1; dx++) cv.put(x + dx, y - 1, pal.snow)
+    }
+  }
+  // plato parabólico mirando arriba a la izquierda
+  const py = top + 22
+  for (let k = -7; k <= 7; k++) {
+    const d = Math.round((k * k) / 12)
+    cv.put(x - 6 - d, py + k, pal.dark)
+    cv.put(x - 5 - d, py + k, k < 0 ? pal.snow : pal.dark)
+  }
+  cv.line(x - 4, py, x, py, pal.dark)
+  // luz de baliza
+  cv.put(x, top - 2, pal.beacon)
+  cv.put(x, top - 1, pal.dark)
+  cv.put(x - 1, top - 2, mix(pal.beacon, pal.dark, 0.5))
+  cv.put(x + 1, top - 2, mix(pal.beacon, pal.dark, 0.5))
+}
+
+// loma nevada: cresta periódica con lado de luz claro
+function snowBank(cv, y0, amp, scale, pal, s) {
+  for (let x = 0; x < BG_W; x++) {
+    const top = Math.round(y0 - pnoise(x, scale, s) * amp - pnoise(x, scale / 4, s + 1) * amp * 0.25)
+    const slope = pnoise(x + 3, scale, s) - pnoise(x - 3, scale, s)
+    for (let y = top; y < cv.h; y++) {
+      let c = y - top < 2 ? pal.snow : slope > 0 ? mix(pal.snow, pal.snowShade, 0.35) : pal.snowShade
+      if (y - top > 10 && bayer(x, y) < Math.min(0.9, (y - top - 10) / 40)) c = pal.deep ?? pal.snowShade
+      cv.put(x, y, c)
+    }
+  }
+}
+
+export function snow() {
+  const T = layeredTarget(5)
+  const R = makeRand(1912)
+  const rand = R.next
+  const sky = T.layer(0)
+  skyGradient(sky, [
+    // el rosado arranca alto: de y ≈ 130 para abajo lo tapa la cordillera
+    [0, 0x32448a],
+    [0.14, 0x5464a8],
+    [0.28, 0x948ec6],
+    [0.38, 0xd6a8cc],
+    [0.5, 0xf4c0c4],
+    [1, 0xfde0cc],
+  ])
+  // sol bajo a la izquierda, apoyado en un valle de la cordillera (la de atrás le tapa la parte de abajo)
+  const SX = 215
+  const SY = 176
+  glow(sky, SX, SY, 360, 0xffe8d4, 0.6)
+  sky.disc(SX, SY, 19, (d) => (d < 13 ? 0xfffaee : 0xffecd8))
+  // estrellas solo arriba de todo (las primeras de la noche)
+  for (let y = 0; y < 80; y++) {
+    for (let x = 0; x < BG_W; x++) {
+      // cada vez menos hacia abajo, y más tenues
+      if (rnd(x, y, 1913) > 0.9975 + (y / 80) * 0.002) sky.put(x, y, mix(sky.get(x, y), 0xf4f0ff, 0.7 - y / 160))
+    }
+  }
+  // nubes largas, lavanda arriba y rosadas con el canto de abajo encendido cerca del horizonte
+  for (let i = 0; i < 9; i++) {
+    const y = Math.round(70 + i * 22 + rand() * 10)
+    const w = Math.round(70 + rand() * 180)
+    const x = Math.max(4, Math.min(BG_W - 4 - w, Math.round(rand() * 800)))
+    // más claras que el cielo que tienen atrás: el sol bajo las ilumina desde abajo
+    const c = y < 130 ? 0x8288c4 : y < 190 ? 0xc0a2cc : 0xf2b8c4
+    for (let k = 0; k < w; k++) {
+      const hh = Math.round(Math.sin((k / w) * Math.PI) * 3)
+      for (let j = 0; j < hh; j++) sky.put(x + k, y + j, j === hh - 1 ? mix(c, 0xffe4d8, 0.6) : j === 0 ? mul(c, 0.94) : c)
+    }
+  }
+
+  // capa 1: dos cordilleras nevadas; la de atrás más pálida
+  let L = T.layer(1)
+  const backPeaks = Array.from({ length: 7 }, (_, i) => ({ x: Math.round(spread(i, 7) + 40 + rand() * 50), h: 110 + rand() * 60, k: 0.75 + rand() * 0.35 }))
+  range(L, 300, backPeaks, { snow: 0xd8cce4, snowShade: 0xa4a8d0, rock: 0x9a9ccc, rockShade: 0x8a90c0, rim: 0xf4dce4 }, 31, 46)
+  const mainPeaks = Array.from({ length: 5 }, (_, i) => ({ x: Math.round(spread(i, 5) + rand() * 60), h: 120 + rand() * 80, k: 0.95 + rand() * 0.4 }))
+  // el pico alto (el hito lejano) a x = 470
+  mainPeaks.push({ x: 470, h: 214, k: 1.05 })
+  range(L, 318, mainPeaks, { snow: 0xf2e2ec, snowShade: 0x9aa2d0, rock: 0x7a7eb4, rockShade: 0x5e66a0, rim: 0xffeef0 }, 37, 52)
+  T.fog(horizonFog(160, 330, 0.35), 0xd6dcf0)
+
+  // capa 2: loma con el observatorio y la antena, pinos medios
+  L = T.layer(2)
+  const midPal = { dark: 0x4e5a8a, light: 0x62709e, shade: 0x444e7c, trunk: 0x40486e, snow: 0xc4cce8, snowShade: 0x96a2cc }
+  snowBank(L, 336, 22, 160, { snow: 0xc8d0ea, snowShade: 0xa4aed4, deep: 0x96a0c8 }, 41)
+  // lomita bajo el observatorio
+  for (let x = 490; x < 650; x++) {
+    const top = Math.round(312 + ((x - 570) / 80) ** 2 * 30)
+    for (let y = top; y < 360; y++) L.put(x, y, y - top < 2 ? 0xd4dcf2 : x > 576 ? 0xa4aed4 : 0xbcc6e6)
+  }
+  observatory(L, 556, 314, { dark: 0x5a6492, light: 0x7480aa, shade: 0x48527e, snow: 0xd4dcf2, snowShade: 0xa0aad2, slot: 0x2a3054, win: 0xffd890 })
+  mast(L, 612, 318, 118, { dark: 0x4a5482, snow: 0xc8d0ec, beacon: 0xff4a4a })
+  for (let i = 0; i < 12; i++) {
+    const x = Math.round(spread(i, 12) + rand() * 30)
+    // la loma del observatorio queda despejada
+    if (Math.abs(wdx(x, 580)) < 70) continue
+    const h = 70 + rand() * 70
+    snowPine(L, x, 352 + Math.round(rand() * 10), h, midPal, 200 + i)
+  }
+  T.fog(horizonFog(180, 380, 0.4), 0xd6dcf0)
+  T.fog(groundFog(310, 110, 0.5, 10), 0xdee4f4)
+
+  // capa 3: pinos cercanos cargados de nieve sobre un banco de nieve
+  L = T.layer(3)
+  const nearPal = { dark: 0x2e3a62, light: 0x3e4c76, shade: 0x262f54, trunk: 0x2a2c48, snow: 0xdce4f6, snowShade: 0xa6b4dc }
+  for (let i = 0; i < 9; i++) {
+    const x = Math.round(spread(i, 9) + rand() * 40)
+    const h = 110 + rand() * 90
+    // en Chico el observatorio (capa 2, x ≈ 556) queda a la vista
+    if (Math.abs(wdx(x, 570)) < 50) continue
+    snowPine(L, x, 404, h, nearPal, 300 + i)
+  }
+  snowBank(L, 402, 14, 100, { snow: 0xe2e8f8, snowShade: 0xb4c0e2, deep: 0xa0acd6 }, 43)
+  T.fog(horizonFog(220, 420, 0.2), 0xd6dcf0)
+  T.fog(groundFog(360, 80, 0.36, 8), 0xdee4f4)
+
+  // capa 4: marco de pinos oscuros con mucha nieve, como el bosque (el gigante a 750, entero en pantalla)
+  L = T.layer(4)
+  const fg = { dark: 0x182238, light: 0x26344e, shade: 0x111a2c, trunk: 0x1e1c2a, snow: 0xeef3fc, snowShade: 0xa8b6d6 }
+  for (const [x, h] of [
+    [30, 210],
+    [212, 246],
+    [262, 150],
+    [496, 270],
+    [540, 160],
+    [592, 120],
+    [750, 430],
+  ])
+    snowPine(L, x, 440, h, fg, 400 + x)
+  T.fog(groundFog(390, 60, 0.3, 8), 0xdee4f4)
+  return T.layers
+}
+
+export const BIOME_PAINTERS = { forest, jungle, industrial, snow }
 
 // v2.3: repeat por capa para el manifiesto (contrato en src/render/manifest.ts). El cielo queda en 'mirror'
 // (degradé, resplandor y sol no son periódicos y con parallax 0,04 casi no se ve la copia); las capas 1 a 4,
 // periódicas, en 'wrap'.
 const REPEAT_5 = ['mirror', 'wrap', 'wrap', 'wrap', 'wrap']
-export const BIOME_REPEAT = { forest: REPEAT_5, jungle: REPEAT_5, industrial: REPEAT_5 }
+export const BIOME_REPEAT = { forest: REPEAT_5, jungle: REPEAT_5, industrial: REPEAT_5, snow: REPEAT_5 }
 
 // fog: color de la niebla/polvo del bioma; tint: luz que el renderer puede usar para teñir humo y partículas.
 export const BIOME_BG = {
   forest: { fog: FOG, tint: 0xfff2e2 },
   jungle: { fog: 0xcfe6e6, tint: 0xeaf6ff },
   industrial: { fog: 0xf0a868, tint: 0xffcc98 },
+  snow: { fog: 0xdee4f4, tint: 0xeef2ff },
 }
 
 // grass: [base, medio, punta] de los pastitos; moss: piedra con musgo; rim: canto de tierra al aire; ambient: luz sobre el terreno.
@@ -799,4 +1074,7 @@ export const BIOME_PALETTE = {
   forest: { grass: [0x3d4a2c, 0x5d6640, 0x8a8456], moss: 0x4d5a36, rim: 0x46352a, ambient: 0xffffff },
   jungle: { grass: [0x24502a, 0x3a7434, 0x6aa84a], moss: 0x3a6a2e, rim: 0x40302a, ambient: 0xe8f4f4 },
   industrial: { grass: [0x4a3a24, 0x6a5430, 0x9a7a44], moss: 0x5a4a2a, rim: 0x4e3626, ambient: 0xffe6cc },
+  // v3 nieve: el "pasto" es el borde de nieve (celeste en la base, blanco en la punta), la piedra con escarcha y
+  // un canto azulado; luz fría
+  snow: { grass: [0x9cb4d8, 0xcad8ee, 0xf6faff], moss: 0xc4d4ea, rim: 0x5a6680, ambient: 0xe6ecff },
 }

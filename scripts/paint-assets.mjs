@@ -39,8 +39,8 @@ const SIM = { TANK_W: 28, TANK_H: 20, PIVOT_X: 5, PIVOT_Y: 17, BARREL_LEN: 14 }
 const CREWS = ['bandana', 'sarge', 'rookie', 'desert', 'commando', 'goggles', 'pilot', 'colonel']
 const TANK_COLORS = [0x3d8cf0, 0xe23d3d, 0xe2c13d, 0x3dbe5a, 0xa65ae0, 0xf0903a, 0x3ad0c8, 0xe85aa0]
 const COLORS = TANK_COLORS.length
-const BIOMES = ['forest', 'jungle', 'industrial']
-const MATERIAL_IDS = { AIR: 0, DIRT: 1, STONE: 2, BRICK: 3, WOOD: 4, SLAT: 5, BEAM: 6, POST: 7, METAL: 8, BEDROCK: 9 }
+const BIOMES = ['forest', 'jungle', 'industrial', 'snow'] // v3: nieve
+const MATERIAL_IDS = { AIR: 0, DIRT: 1, STONE: 2, BRICK: 3, WOOD: 4, SLAT: 5, BEAM: 6, POST: 7, METAL: 8, BEDROCK: 9, SNOW: 12, ICE: 13 } // 10 y 11 son líquidos: sin textura
 
 if (STRIPES.length !== COLORS || HULLS.length !== COLORS) throw new Error('hacen falta un casco y una franja por color de TANK_COLORS')
 STRIPES.forEach(([, c], i) => {
@@ -101,6 +101,8 @@ const TEXTURES = {
   POST: TX.postTexture,
   METAL: TX.metalTexture,
   BEDROCK: TX.bedrockTexture,
+  SNOW: TX.snowTexture,
+  ICE: TX.iceTexture,
 }
 const materials = {}
 const textureCanvases = {}
@@ -305,13 +307,20 @@ function sheetMaterials() {
 function sheetBiome(biome) {
   const cv = composite(bgLayers[biome])
   const pal = BIOME_PALETTE[biome]
+  // v3: en la nieve el suelo es nieve (con tierra debajo) y un lago congelado entre x = 640 y 760
+  const snowy = biome === 'snow'
   const dirt = textureCanvases.DIRT
   const stone = textureCanvases.STONE
-  const surf = (x) => Math.round(372 + Math.sin(x / 70) * 10 + Math.sin(x / 23) * 3 - 40 * Math.exp(-(((x - 420) / 60) ** 2)))
+  const snowTx = textureCanvases.SNOW
+  const ice = textureCanvases.ICE
+  const lake = (x) => snowy && x >= 640 && x < 760
+  const surf = (x) => (lake(x) ? 386 : Math.round(372 + Math.sin(x / 70) * 10 + Math.sin(x / 23) * 3 - 40 * Math.exp(-(((x - 420) / 60) ** 2))))
   for (let x = 0; x < BG_W; x++) {
     const s = x < 180 ? 350 : surf(x)
     for (let y = s; y < BG_H; y++) {
       let c = x < 180 && y < 364 ? stone.get(x % stone.w, y % stone.h) : dirt.get(x % dirt.w, y % dirt.h)
+      if (snowy && x >= 180 && y < s + 26) c = snowTx.get(x % snowTx.w, y % snowTx.h)
+      if (lake(x)) c = y < s + 8 ? ice.get(x % ice.w, y % ice.h) : mix(0x2a5a8a, 0x123058, Math.min(1, (y - s) / 60))
       if (y === s) c = x < 180 ? mix(c, 0xa89e84, 0.3) : pal.rim
       cv.put(x, y, c)
     }
