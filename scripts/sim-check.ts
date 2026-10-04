@@ -3950,7 +3950,9 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
       const used: Record<string, number> = {}
       let unfinished = 0
       let walked = 0
-      for (let g = 1; g <= games; g++) {
+      // 2 tanques en Mediano y Grande: el doble (de 2 a 28 tiros por partida: con 10 el piso de 8 falla por azar)
+      const n2 = bots === 1 && size !== 'small' ? games * 2 : games
+      for (let g = 1; g <= n2; g++) {
         let s = createMatch(mk(bots, 'normal', BIOMES[g % 3], 900 + g, 1, 0, size))
         for (const p of s.players) {
           p.money = ARSENAL_MONEY
@@ -3974,7 +3976,7 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
         shots.push(n)
       }
       const avg = shots.reduce((a, b) => a + b, 0) / shots.length
-      console.log(`v3 balance con arsenal ${size} ${bots + 1} tanques: ${avg.toFixed(1)} tiros/partida (min ${Math.min(...shots)}, max ${Math.max(...shots)}, ${games} partidas), uso ${JSON.stringify(used)}`)
+      console.log(`v3 balance con arsenal ${size} ${bots + 1} tanques: ${avg.toFixed(1)} tiros/partida (min ${Math.min(...shots)}, max ${Math.max(...shots)}, ${shots.length} partidas), uso ${JSON.stringify(used)}`)
       check(unfinished === 0 && walked === 0, `v3 balance con arsenal ${size}: ${unfinished} sin terminar, ${walked} caminó al abismo`)
       if (bots === 1) check(avg >= 8 && avg <= (size === 'small' ? 15 : 16), `v3 balance con arsenal ${size} 2 tanques fuera de rango (${avg.toFixed(1)})`)
       else check(avg <= (size === 'small' ? 27 : 30), `v3 balance con arsenal ${size} 4 tanques: ${avg.toFixed(1)} tiros/partida`)
