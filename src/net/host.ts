@@ -33,7 +33,7 @@
 import { CREW_NAMES, CREWS, MAX_PLAYERS, MAX_PLAYERS_BY_SIZE, PERSONALITIES, STEER_TICK } from '../sim'
 import type { Command, CrewId, MapSize, MatchConfig, Personality, PlayerKind } from '../sim'
 import type { NetTransport } from './base'
-import { assignColor, cleanName, isColor, isCrew } from './profile'
+import { assignColor, assignCrew, cleanName, isColor, isCrew } from './profile'
 import { GUIDE_SLACK, STEER_REJECT, validDirs } from './steer'
 import { NET_VERSION } from './types'
 import type { LobbySlot, LobbyState, NetMessage } from './types'
@@ -569,7 +569,7 @@ export class HostRoom {
     if (!s || s.owner !== owner || s.kind !== 'human') return null
     const name = p.name === undefined ? '' : cleanName(p.name)
     if (name) s.name = name
-    if (isCrew(p.crew)) s.crew = p.crew
+    if (isCrew(p.crew)) assignCrew(this.state.slots, slot, p.crew) // v3: único, como el color
     if (isColor(p.color)) assignColor(this.state.slots, slot, p.color)
     return s.color ?? slot
   }

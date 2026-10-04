@@ -29,7 +29,7 @@ export { HostRoom } from './host'
 export type { GuidedInfo, HostHooks, ProfileInput, RoomPeerEvent, RoomPeerInfo } from './host'
 export { ClientRoom } from './client'
 export type { ClientHooks, SteerStats } from './client'
-export { assignColor, cleanName, isColor, isCrew } from './profile'
+export { assignColor, assignCrew, cleanName, isColor, isCrew } from './profile'
 export { GUIDE_SLACK, STEER_BATCH, STEER_FLUSH_MS, STEER_LIVE_MS, STEER_REJECT, sameSteer } from './steer'
 export type { SteerCommand, SteerDir } from './steer'
 export {

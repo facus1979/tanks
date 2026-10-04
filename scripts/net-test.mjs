@@ -433,6 +433,13 @@ async function profileTest(a, b) {
   await waitFor(async () => (await colors())[1] === offColor || null, 20000, async () => 'B no tomó el color libre: ' + (await colors()))
   cs = await colors()
   if (!perm(cs) || cs[5] !== oldB) throw new Error('intercambio con el off: ' + cs)
+  // tripulante único: B pide el del anfitrión → le queda otro; después vuelve a 'rookie'
+  const crews = () => evaluate(a, 'window.__room.lobby.slots.map((s) => s.crew)')
+  const hostCrew = (await crews())[0]
+  await evaluate(b, `window.__room.profile('Beto Pérez', '${hostCrew}', ${offColor})`)
+  await waitFor(async () => { const c = await crews(); return (c[1] !== 'rookie' && c[1] !== hostCrew && new Set(c).size === 8) || null }, 20000, async () => 'tripulante tomado: ' + (await crews()))
+  await evaluate(b, `window.__room.profile('Beto Pérez', 'rookie', ${offColor})`)
+  await waitFor(async () => ((await crews())[1] === 'rookie') || null, 20000, async () => 'B no volvió a rookie: ' + (await crews()))
   // el anfitrión pide el color de B: le queda el siguiente libre
   const got = await evaluate(a, `window.__room.setProfile({ name: 'Ana Ñandú', crew: 'sarge', color: ${offColor} })`)
   cs = await colors()
@@ -587,7 +594,7 @@ async function guidedSimTest() {
       window.__room3 = room
       const code = await room.open()
       room.setOption('size', 'small')
-      room.setProfile({ name: 'Ana Ñandú', crew: 'sarge', color: 5 })
+      room.setProfile({ name: 'Ana Ñandú', crew: 'colonel', color: 5 })
       return code
     })()`,
   )
@@ -606,7 +613,7 @@ async function guidedSimTest() {
         onSteerCorrect: (r) => S.corrections.push(r),
       }, { name: 'Beto' })
       window.__room3 = room
-      room.profile('Beto Pérez', 'rookie', 5) // el 5 es del anfitrión: le toca el siguiente libre
+      room.profile('Beto Pérez', 'colonel', 5) // color y tripulante del anfitrión: le tocan los siguientes libres
       await room.join(${JSON.stringify(code3)})
     })()`,
   )
@@ -621,9 +628,9 @@ async function guidedSimTest() {
   const [pa, pb] = [await evaluate(a, prof), await evaluate(b, prof)]
   const cfgB = await evaluate(b, 'JSON.parse(JSON.stringify(window.__G.cfg.slots))')
   if (JSON.stringify(pa) !== JSON.stringify(pb)) throw new Error('Perfiles distintos en las dos réplicas: ' + JSON.stringify([pa, pb]))
-  if (pa.names.join() !== 'Ana Nandu,Beto Perez' || pa.crews.join() !== 'sarge,rookie') throw new Error('Perfiles mal: ' + JSON.stringify(pa))
+  if (pa.names.join() !== 'Ana Nandu,Beto Perez' || pa.crews.join() !== 'colonel,bandana') throw new Error('Perfiles mal: ' + JSON.stringify(pa))
   if (cfgB[0].color !== 5 || cfgB[1].color !== 6) throw new Error('Colores del start: ' + JSON.stringify(cfgB))
-  if (pa.colors[0] === pa.tc[5] && pa.colors[1] === pa.tc[6]) log('perfiles con la sim real OK en las dos pestañas: Ana Nandu (color 5), Beto Perez (pidió 5 → 6)')
+  if (pa.colors[0] === pa.tc[5] && pa.colors[1] === pa.tc[6]) log('perfiles con la sim real OK en las dos pestañas: Ana Nandu (colonel, color 5), Beto Perez (pidió colonel y 5 → bandana y 6)')
   else log('perfiles con la sim real: nombres y tripulantes OK en las dos pestañas; AVISO: la sim todavía no usa SlotConfig.color (colores ' + pa.colors.map((c) => c.toString(16)).join(',') + ')')
 
   const state = (tab) => evaluate(tab, `(async () => { const sim = await import('/src/sim/index.ts'); const st = window.__G.st; return { seq: window.__room3.seq, hash: sim.hashState(st), phase: st.phase, current: st.players[st.current].id, guided: !!st.guided } })()`)
