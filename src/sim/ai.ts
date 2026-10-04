@@ -293,6 +293,8 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
 
 // v3: la IA no se acerca a menos de esto (en pasos de 1 px) de quedar colgando sobre un abismo.
 export const AI_ABYSS_MARGIN = 24
+// v3: caída más larga que la IA acepta al caminar en la nieve (las grietas de Chico tienen fondo)
+export const AI_FALL_STOP = 40
 
 // Aplica 'move' hasta |dx| pixels. null si no pudo avanzar al menos 4. Nunca camina hacia un abismo:
 // frena AI_ABYSS_MARGIN px antes del primer paso que la tiraría (Pulido v2: incluido el que la deja en
@@ -319,6 +321,11 @@ function walk(state: GameState, dx: number): { state: GameState; dx: number } | 
       // este paso la mata: si es el abismo, guarda el margen
       const abyss = r.events.some((e) => e.type === 'death' && e.playerId === id && e.cause === 'abyss')
       limit = Math.min(limit, abyss ? n - AI_ABYSS_MARGIN : n)
+      break
+    }
+    // v3 nieve: no se tira caminando (o patinando) a una grieta: una caída de más de AI_FALL_STOP px corta
+    if (state.biome === 'snow' && r.events.some((e) => e.type === 'fall' && e.playerId === id && !e.water && e.to - e.from > AI_FALL_STOP)) {
+      limit = Math.min(limit, n)
       break
     }
     // v4: no se mete caminando en la lava (si ya estaba adentro, puede seguir para salir)
