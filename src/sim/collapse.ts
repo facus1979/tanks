@@ -26,7 +26,7 @@
 // Determinista: orden fijo (fila de abajo hacia arriba, dentro de la fila de izquierda a derecha), sin rng.
 // Parches para animar como el flujo: patches[0] es el rectángulo total como estaba antes del derrumbe, luego
 // uno cada COLLAPSE_FRAME_ITERS iteraciones con lo que cambió; aplicarlos en orden deja la grilla final.
-import { markDirty, SOLID, type Rect } from './terrain'
+import { LIQUID, markDirty, SOLID, type Rect } from './terrain'
 import { patchOf } from './flow'
 import { AIR, DIRT, LAVA, STONE, WATER, type Terrain, type TerrainPatch } from './types'
 
@@ -139,7 +139,10 @@ export function collapseTerrain(t: Terrain, opts: CollapseOptions): CollapseRepo
       cells.push(i)
       const x = i % w
       const y = (i - x) / w
-      if (old || ANCHOR[front[i]] || (y === h - 1 && !(pits && pits[x])) || cells.length > COLLAPSE_BUDGET) {
+      // piedra apoyada sobre un líquido: flota (la costra del napalm sobre el agua, la tierra que ya cayó a la
+      // lava y se hizo piedra); lo que cae de arriba sí se hunde en el agua (ver la caída)
+      const floats = front[i] === STONE && y < h - 1 && LIQUID[front[i + w]] === 1
+      if (old || floats || ANCHOR[front[i]] || (y === h - 1 && !(pits && pits[x])) || cells.length > COLLAPSE_BUDGET) {
         ok = true
         break
       }

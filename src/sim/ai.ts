@@ -491,63 +491,50 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
     const score = simulate(state, c, prio)
     if (score > verified.score) verified = { ...c, score }
   }
-  if (fine && verified.score > 0) verified = center(state, actor, verified, sky)
+  if (fine && verified.score > 0) {
+    // el tiro centrado tiene que valer lo mismo con la simulación completa: un tiro que pega en el borde de la
+    // caja puede servir por otra cosa (romperle el puente, empujarlo al vacío) que el del centro no hace
+    const c = center(state, actor, verified, sky)
+    if (c !== verified) {
+      const score = simulate(state, c, prio)
+      if (score >= verified.score - 1) verified = { ...c, score }
+    }
+  }
   return { best: verified, blocked: total > 0 ? blocked / total : 0 }
 }
 
 // v2.4: centrado del impacto directo. Todos los impactos directos valen lo mismo, así que la búsqueda se
 // quedaba con uno cualquiera de la ventana de tiros que pegan (por el desempate, el más plano: el borde). Por
 // encima de una montaña esa ventana mide ~2 puntos de potencia, y desde el borde el error de puntería (aun el
-// de la difícil) la saca afuera la mitad de las veces. Acá, si el tiro elegido pega directo, se corre hacia
-// donde más tiros vecinos (ángulo ± CENTER_DA, potencia ± CENTER_DP) también pegan en ese tanque, por pasos de
-// medio grado y un cuarto de potencia, hasta CENTER_STEPS pasos. Los pasos van en términos de elevación (hacia
-// arriba o hacia abajo del horizonte del lado del tiro) para que dos situaciones espejadas den tiros espejados.
-const CENTER_DA = 0.5
-const CENTER_DP = 0.6
-const CENTER_STEPS = 10
+// de la difícil) la saca afuera la mitad de las veces. Acá, si el tiro elegido pega directo, se lo lleva al
+// medio de la ventana: primero la potencia (el medio entre la menor y la mayor que siguen pegando en ese tanque
+// con ese ángulo, de a CENTER_STEP), después el ángulo con esa potencia y otra vez la potencia. Cada ventana se
+// recorre hasta CENTER_SPAN para cada lado. Es simétrico: en la situación espejada da el tiro espejado.
+// Después search confirma con la simulación completa que el tiro centrado vale lo mismo.
+const CENTER_STEP = 0.2
+const CENTER_SPAN = 4
 function center(state: GameState, actor: Player, c: Candidate, sky: Int16Array): Candidate {
   const shot = (angle: number, power: number) =>
     fly({ skyline: sky, terrain: state.terrain, players: state.players, props: state.props, ownerId: actor.id, angle, power, wind: state.wind, lava: state.lava ?? undefined }).impact
   const first = shot(c.angle, c.power)
   if (first.kind !== 'tank' || first.tankId === undefined || first.tankId === actor.id) return c
   const id = first.tankId
-  const side = c.angle <= 90 ? 1 : -1 // elevación: + sube el cañón hacia la vertical del lado del tiro
-  const cache = new Map<string, boolean>()
   const hit = (angle: number, power: number) => {
-    const key = `${angle},${power}`
-    let h = cache.get(key)
-    if (h === undefined) {
-      const imp = shot(angle, power)
-      h = imp.kind === 'tank' && imp.tankId === id
-      cache.set(key, h)
-    }
-    return h
+    const imp = shot(angle, power)
+    return imp.kind === 'tank' && imp.tankId === id
   }
-  const robust = (angle: number, power: number) => {
-    let n = 0
-    for (const da of [-CENTER_DA, 0, CENTER_DA]) for (const dp of [-CENTER_DP, 0, CENTER_DP]) if (hit(clamp(angle + da, 0, 180), clamp(power + dp, 10, 100))) n++
-    return n
+  // medio de la ventana de v alrededor de v0 (f(v) dice si pega), recorriendo de a CENTER_STEP
+  const mid = (v0: number, lo: number, hi: number, f: (v: number) => boolean) => {
+    let a = v0
+    let b = v0
+    while (a - CENTER_STEP >= lo && v0 - a < CENTER_SPAN && f(a - CENTER_STEP)) a -= CENTER_STEP
+    while (b + CENTER_STEP <= hi && b - v0 < CENTER_SPAN && f(b + CENTER_STEP)) b += CENTER_STEP
+    return Math.round(((a + b) / 2) * 100) / 100
   }
-  let a = c.angle
-  let p = c.power
-  let r = robust(a, p)
-  for (let step = 0; step < CENTER_STEPS && r < 9; step++) {
-    let best: { a: number; p: number; r: number } | null = null
-    for (const de of [0, 0.5, -0.5]) {
-      for (const dp of [0, 0.25, -0.25]) {
-        if (de === 0 && dp === 0) continue
-        const na = clamp(a + side * de, 0, 180)
-        const np = clamp(p + dp, 10, 100)
-        if (!hit(na, np)) continue
-        const nr = robust(na, np)
-        if (nr > (best?.r ?? r)) best = { a: na, p: np, r: nr }
-      }
-    }
-    if (!best) break
-    a = best.a
-    p = best.p
-    r = best.r
-  }
+  let p = mid(c.power, 10, 100, (v) => hit(c.angle, v))
+  const a = mid(c.angle, 0, 180, (v) => hit(v, p))
+  if (hit(a, p)) p = mid(p, 10, 100, (v) => hit(a, v))
+  if (!hit(a, p)) return c
   return a === c.angle && p === c.power ? c : { ...c, angle: a, power: p }
 }
 
