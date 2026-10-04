@@ -9,6 +9,7 @@ import { ITEM_CURSOR_SPEED, Session, abyssLostAt, isAbyssFall } from './game/ses
 import { TargetOverlay } from './input/target'
 import type { NetSeat } from './game/session'
 import { Online } from './game/online'
+import { rememberProfile, withProfile } from './game/profile'
 import { normalizeCode, readNetParams } from './net'
 import { createOnlineMenuView } from './ui/online'
 import { createLobbyView } from './ui/lobby'
@@ -413,10 +414,12 @@ function toMenu(): void {
   hud.hide()
   stage.hidden = true
   keys.capture = false
-  menu.show(lastConfig, (config) => {
+  // v3: el primer casillero humano arranca con el perfil guardado (nombre, tripulante y color)
+  menu.show(withProfile(lastConfig), (config) => {
     if (screen !== 'menu') return
     sfx.click()
     menu.hide()
+    rememberProfile(config)
     begin(config)
   })
 }

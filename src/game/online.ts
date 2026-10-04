@@ -6,6 +6,19 @@ import { ClientRoom, HostRoom, createTransport, roomLink } from '../net'
 import type { LinkStatus, LobbyState, Role, TransportKind } from '../net'
 import type { HudNet, LobbyModel } from '../ui/types'
 import type { NetSeat, Session } from './session'
+import { loadProfile, type Profile } from './profile'
+
+// v3: lo que flujo espera de las salas de src/net (los implementa red). Se llaman solo si existen, así
+// esto compila y anda igual con una sala que todavía no los tiene.
+// - profile(p): manda el nombre, tripulante y color del casillero que ocupa este dispositivo (mensaje
+//   'profile'); el anfitrión lo aplica a su propio casillero.
+// - steerLive(playerId, x, y): manda la posición en vivo del misil que dirige este dispositivo (mensaje
+//   'steerLive'; el anfitrión la reparte a los demás).
+// - hooks.onSteerLive(playerId, x, y): llegó la posición en vivo del misil de otro.
+interface RoomV3 {
+  profile?: (p: Profile) => void
+  steerLive?: (playerId: number, x: number, y: number) => void
+}
 
 export interface OnlineEvents {
   lobby(): void // cambió el lobby o el estado de la conexión
@@ -15,6 +28,7 @@ export interface OnlineEvents {
 }
 
 const AIM_EVERY = 1 / 15
+const STEER_EVERY = 1 / 15 // v3: steerLive
 
 export class Online {
   readonly role: Role
@@ -31,6 +45,8 @@ export class Online {
   private connected = new Set<string>()
   private closed = false
   private debugSeq = -1
+  private steerT = 0
+  private profileSent = '' // v3: casillero y perfil ya mandados (no repetir)
 
   constructor(
     role: Role,
@@ -56,8 +72,9 @@ export class Online {
           },
           onAimLive: (id, angle, power) => session.remoteAim(id, angle, power),
           onTimer: (playerId, left) => (this.turn = { playerId, left }),
+          ...steerHook(session),
         },
-        { name: '' },
+        { name: profileName() },
       )
     } else {
       this.client = new ClientRoom(
@@ -96,8 +113,9 @@ export class Online {
           },
           onDesync: (seq) => console.warn('online: desincronizado en', seq),
           onEnd: (reason) => this.finish(reason),
+          ...steerHook(session),
         },
-        { name: '' },
+        { name: profileName() },
       )
     }
   }
@@ -232,7 +250,34 @@ export class Online {
         else this.client?.aimLive(live.playerId, live.angle, live.power)
       }
     }
+    // v3: misil teledirigido en vivo (vista previa para los demás; las tandas van por el log)
+    this.steerT -= dt
+    const ls = s.liveSteer()
+    if (ls && this.steerT <= 0) {
+      this.steerT = STEER_EVERY
+      this.room()?.steerLive?.(ls.playerId, ls.x, ls.y)
+    }
     this.debug()
+  }
+
+  // v3: manda el perfil del jugador de este dispositivo para su casillero (al ocuparlo o al cambiarlo).
+  sendProfile(p: Profile | null = loadProfile(), force = false): void {
+    const slot = this.host ? this.host.mySlot : this.client?.mySlot ?? null
+    if (!p || slot == null || this.started) return
+    const key = `${slot}:${p.name}:${p.crew}:${p.color}`
+    if (!force && key === this.profileSent) return
+    const room = this.room()
+    if (!room?.profile) return
+    this.profileSent = key
+    try {
+      room.profile(p)
+    } catch (err) {
+      console.warn('online: no se pudo mandar el perfil', err)
+    }
+  }
+
+  private room(): RoomV3 | null {
+    return ((this.host ?? this.client) as unknown as RoomV3 | null) ?? null
   }
 
   hudNet(): HudNet {
@@ -274,6 +319,8 @@ export class Online {
       this.connected = now
     }
     if (this.host && !this.started) this.status = this.host.canStart() ? 'LISTO PARA EMPEZAR' : 'ESPERANDO JUGADORES'
+    // v3: con casillero propio, el perfil guardado viaja a la sala
+    this.sendProfile()
     this.debug()
     this.events.lobby()
   }
@@ -302,6 +349,16 @@ export class Online {
       size: state?.size,
     }
   }
+}
+
+// v3: nombre del perfil guardado para el hello de la sala ('' = el de siempre).
+function profileName(): string {
+  return loadProfile()?.name ?? ''
+}
+
+// v3: hook de steerLive para las salas (si la sala no lo conoce, lo ignora).
+function steerHook(session: Session): object {
+  return { onSteerLive: (playerId: number, x: number, y: number) => session.remoteSteer(playerId, x, y) }
 }
 
 function must<T>(v: T | null): T {
