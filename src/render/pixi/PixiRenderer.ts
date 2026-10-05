@@ -22,6 +22,8 @@ import { LootKit, LootProp, isLootKind } from './loot'
 import { SnowView } from './snow'
 import { DMG_BIG, DMG_COLOR, DMG_LAVA, DMG_SHIELD, DamageNumbers } from './numbers'
 import { Raster, Rng } from './raster'
+import { installRasterUpload } from './gpu'
+import { QualityGovernor } from './quality'
 import { CHUNK_W, TerrainPainter } from './terrain'
 import type { Rect } from './terrain'
 
@@ -143,11 +145,7 @@ export class PixiRenderer implements GameRenderer {
   // v3 (render-armas): armas e ítems nuevos, minas y charcos, carteles de bonos (ver armas.ts)
   private armas = new ArmasFx(this.fx, (x, y, r) => this.painter?.addCrater(x, y, r))
   private fxSprite = new Sprite()
-  private lightSprite = new Sprite()
-  private fxTex: Texture | null = null
-  private lightTex: Texture | null = null
-  private fxShown = false
-  private lightShown = false
+  private quality = new QualityGovernor()
 
   private lampLayer = new Container()
   private lampTex = new Map<string, Texture>()
@@ -208,13 +206,10 @@ export class PixiRenderer implements GameRenderer {
       this.fx.dust(x, y, n, w)
     }
 
-    this.fxTex = canvasTexture(this.fx.fx.canvas)
-    this.lightTex = canvasTexture(this.fx.light.canvas)
-    this.fxSprite.texture = this.fxTex
-    this.lightSprite.texture = this.lightTex
-    this.lightSprite.blendMode = 'add'
+    installRasterUpload(this.app.renderer)
+    // v3: fx se sube directo desde sus bytes y las luces son sprites aditivos (fx.light.root)
+    this.fxSprite.texture = this.fx.fxTexture
     this.fxSprite.visible = false
-    this.lightSprite.visible = false
 
     this.flashG.rect(0, 0, VIEW_W, VIEW_H).fill(0xffffff)
     this.flashG.alpha = 0
@@ -239,7 +234,7 @@ export class PixiRenderer implements GameRenderer {
       this.liquids.glowLayer,
       this.lava.glowLayer,
       this.lava.layer,
-      this.lightSprite,
+      this.fx.light.root,
       this.fxSprite,
       this.armas.glow.root,
       this.armas.over.root,
@@ -355,6 +350,8 @@ export class PixiRenderer implements GameRenderer {
 
     this.trackShot(frame, anim)
 
+    // v3: calidad automática de efectos (quality.ts; ?quality=low|high la fija)
+    this.fx.quality = this.quality.sample()
     const stopped = this.fx.hitStop > 0
     const t0 = this.stats ? performance.now() : 0
     this.fx.update(anim, frame.wind)
@@ -386,7 +383,7 @@ export class PixiRenderer implements GameRenderer {
     }
 
     this.fx.draw(this.shotViews(frame))
-    this.stats?.sample(this.fx.count, dt, performance.now() - t0, this.fx.trails)
+    this.stats?.sample(this.fx.count, dt, performance.now() - t0, `${this.fx.trails} · calidad ${this.quality.level}`)
 
     this.abyss.update(frame.terrain, step)
     this.syncTanks(art, frame, step)
@@ -522,8 +519,8 @@ export class PixiRenderer implements GameRenderer {
     const p = new TerrainPainter(t.w, t.h)
     if (old) p.craters = old.craters
     p.snowy = this.biome === 'snow'
-    const make = (c: { x0: number; canvas: HTMLCanvasElement }): Sprite => {
-      const s = new Sprite(canvasTexture(c.canvas))
+    const make = (c: { x0: number; texture: Texture }): Sprite => {
+      const s = new Sprite(c.texture)
       s.x = c.x0
       return s
     }
@@ -566,7 +563,7 @@ export class PixiRenderer implements GameRenderer {
       oy = Math.floor(oy / 4) * 4
     }
     this.fx.setView(ox, oy, z)
-    for (const s of [this.fxSprite, this.lightSprite]) {
+    for (const s of [this.fxSprite, this.fx.light.root]) {
       s.position.set(ox, oy)
       s.scale.set(1 / z)
     }
@@ -1116,20 +1113,7 @@ export class PixiRenderer implements GameRenderer {
   }
 
   private upload(): void {
-    const fx = this.fx.fx
-    if (fx.dirty || this.fxShown) {
-      fx.flush()
-      this.fxTex?.source.update()
-    }
-    this.fxShown = fx.dirty
-    this.fxSprite.visible = fx.dirty
-    const light = this.fx.light
-    if (light.dirty || this.lightShown) {
-      light.flush()
-      this.lightTex?.source.update()
-    }
-    this.lightShown = light.dirty
-    this.lightSprite.visible = light.dirty
+    this.fxSprite.visible = this.fx.present()
   }
 
   // Flecha en el borde de arriba de la pantalla por cada proyectil que sale por arriba de la vista.
