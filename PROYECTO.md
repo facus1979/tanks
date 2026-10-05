@@ -433,12 +433,13 @@ Publicada: `v3` mergeada a `main` (`f1d98d2`) y desplegada en GitHub Pages el 20
 Pendientes de v3 (en orden de prioridad):
 1. Rendimiento en celular: no se llega a 18 ms (Chico 27–33 ms, Grande 52–55 ms en el celular emulado). Lo que más cuesta ahora es el HUD (`src/ui/hud.ts`: redibuja el canvas entero casi cada frame, la clave se arma con `JSON.stringify` y el minimapa recorre la grilla en cada paso del flujo) y el `fire` de la sim en el hilo principal (tirones de 200–500 ms con los líquidos). Siguiente paso: HUD en capas, minimapa incremental y mover la resolución del tiro al worker. Medir con `npm run mobile-fps`.
 2. Prueba a mano de la v3 por el usuario (`?play`) y ajustes según lo que surja.
-3. `net-test --guided`: la prueba con la sim real se saltea porque las armas nuevas arrancan sin munición; falta darle munición en el test. Además el flujo no publica `names`/`colors`/`guided` en `window.__tanksNet` ni acepta `&weapon=guided`, así que los perfiles no se comparan en la partida real.
-4. Relay TURN propio: falta que el usuario cree la cuenta y cargue los secrets `TURN_URLS`, `TURN_USER` y `TURN_PASS` (ver README; el TURN público de Open Relay ya no conecta). Se prueba con `?relay=1` o `NET_TEST_RELAY=1`.
-5. El ícono de la rebotadora es el menos claro a escala 1 (engrosar el trazo).
-6. CI: `actions/deploy-pages@v4` apunta a Node 20 (deprecado; GitHub ya lo corre con Node 24) y `ubuntu-latest` pasa a Ubuntu 26 desde el 2026-10-19. Actualizar las acciones cuando haya versión nueva y mirar el primer deploy después del cambio.
-7. Limpieza local: la carpeta huérfana `.claude/worktrees/agent-af2e8d370ae7fc657` queda bloqueada por un proceso; borrarla después de reiniciar (antes de borrar un worktree, revisar que no tenga un junction a `node_modules`).
-8. Equipos y repeticiones (al final, por decisión del usuario).
+3. Arsenal inicial: cada tanque arranca con 5 armas: el misil base y 4 armas al azar, con 2 tiros de cada una. Hoy `initialAmmo()` (`src/sim/game.ts`) le da a todos las armas de `WEAPON_ORDER` con su munición de tabla, y las nuevas de v3 empiezan en 0. El sorteo tiene que salir de la seed para que la partida siga siendo determinista y el online no se desincronice. También hay que revisar el balance en `sim-check`, porque el deploy se frena si los números se salen de los umbrales.
+4. `net-test --guided`: la prueba con la sim real se saltea porque las armas nuevas arrancan sin munición; falta darle munición en el test. Además el flujo no publica `names`/`colors`/`guided` en `window.__tanksNet` ni acepta `&weapon=guided`, así que los perfiles no se comparan en la partida real.
+5. Relay TURN propio: falta que el usuario cree la cuenta y cargue los secrets `TURN_URLS`, `TURN_USER` y `TURN_PASS` (ver README; el TURN público de Open Relay ya no conecta). Se prueba con `?relay=1` o `NET_TEST_RELAY=1`.
+6. El ícono de la rebotadora es el menos claro a escala 1 (engrosar el trazo).
+7. CI: `actions/deploy-pages@v4` apunta a Node 20 (deprecado; GitHub ya lo corre con Node 24) y `ubuntu-latest` pasa a Ubuntu 26 desde el 2026-10-19. Actualizar las acciones cuando haya versión nueva y mirar el primer deploy después del cambio.
+8. Limpieza local: la carpeta huérfana `.claude/worktrees/agent-af2e8d370ae7fc657` queda bloqueada por un proceso; borrarla después de reiniciar (antes de borrar un worktree, revisar que no tenga un junction a `node_modules`).
+9. Equipos y repeticiones (al final, por decisión del usuario).
 
 Descartado por decisión del usuario: Racimo II, doble tiro, radar, clima, microtransacciones, desafíos y progresión.
 
