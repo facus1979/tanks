@@ -143,12 +143,13 @@ export function knock(
   t: number,
   events: GameEvent[],
   tankFloorFn: (t: GameState['terrain'], x: number, y: number) => number,
+  cause: 'blast' | 'quake' | 'pull' = 'blast', // v3: sacudón del terremoto, atracción del agujero negro
 ): number {
   // sin piso a menos de MAX_CLIMB (le volaron el apoyo): no hay de dónde empujarlo, cae
   if (p.y >= state.terrain.h || tankFloorFn(state.terrain, p.x, p.y - MAX_CLIMB) > p.y + MAX_CLIMB) return t
   const path = travel(state, p, dir, dist, BLAST_STEP, tankFloorFn, false)
   if (!path) return t
-  events.push({ type: 'slide', playerId: p.id, cause: 'blast', path, t })
+  events.push({ type: 'slide', playerId: p.id, cause, path, t })
   return t + (path.length - 1) * PATH_DT
 }
 
@@ -162,7 +163,7 @@ export function slideDown(
   events: GameEvent[],
   tankFloorFn: (t: GameState['terrain'], x: number, y: number) => number,
 ): number | null {
-  if (!p.alive || p.y >= state.terrain.h) return null
+  if (!p.alive || p.y >= state.terrain.h || p.anchored) return null // v3: anclado no resbala
   const s = slopeAt(state, p.x, p.y)
   // v2.3: vuelco al abismo (ver tipDir): el tanque se va hacia el vacío hasta quedar sin piso
   const tip = tipDir(state, p)

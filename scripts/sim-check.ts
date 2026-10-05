@@ -54,6 +54,7 @@ import {
   biomeFor,
   owned,
   roundSeed,
+  aiShop,
   abyssAhead,
   materialAt,
   ABYSS_DROP,
@@ -63,6 +64,9 @@ import {
   PARACHUTE_MIN_DAMAGE,
   PATH_DT,
   fuelFor,
+  JETPACK_RANGE,
+  STEER_RATE,
+  STEER_TICK,
   type Biome,
   type Command,
   type Difficulty,
@@ -80,6 +84,7 @@ import {
 import { tankTilt } from '../src/sim/tilt'
 import { propSupported, resolveBlast, blastFor, collapseAfterShot } from '../src/sim/physics'
 import { aiStats, lavaRisk } from '../src/sim/ai'
+import { noisySteer, planSteer } from '../src/sim/ai-arsenal'
 import { LAVA_DELAY } from '../src/sim/game'
 import { skylineOf } from '../src/sim/ballistics'
 import { resolveShot } from '../src/sim/weapons'
@@ -137,7 +142,9 @@ function aiTurn(state: GameState, difficulty: Difficulty): StepResult & { ms: nu
   const ms = performance.now() - t0
   const pre: GameEvent[] = []
   for (const item of plan.items ?? []) {
-    const r = applyCommand(state, { type: 'useItem', playerId: p.id, item })
+    // v3: jetpack y teletransporte con su destino
+    const target = item === 'jetpack' || item === 'teleport' ? plan.itemTarget : undefined
+    const r = applyCommand(state, { type: 'useItem', playerId: p.id, item, target })
     pre.push(...r.events)
     state = r.state
   }
@@ -150,7 +157,34 @@ function aiTurn(state: GameState, difficulty: Difficulty): StepResult & { ms: nu
   state = applyCommand(state, { type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }).state
   state = applyCommand(state, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }).state
   const r = applyCommand(state, { type: 'fire', playerId: p.id })
+  // v3: teledirigido: las correcciones del plan (en tandas de 2 ticks, como la red), ceros si se acaban
+  if (r.state.phase === 'guiding') {
+    const ev = [...pre, ...r.events]
+    const flights = [...(r.flights ?? [])]
+    let st = r.state
+    const steer = plan.steer ?? []
+    for (let i = 0; i < 60 && st.phase === 'guiding'; i += 2) {
+      const dirs = [steer[i] ?? 0, steer[i + 1] ?? 0]
+      const rr = applyCommand(st, { type: 'steer', playerId: p.id, dirs })
+      ev.push(...rr.events)
+      flights.push(...(rr.flights ?? []))
+      st = rr.state
+    }
+    return { state: st, events: ev, flights, ms, plan }
+  }
   return { ...r, events: [...pre, ...r.events], ms, plan }
+}
+
+// v3: las correcciones del teledirigido de un plan, en tandas de 2 ticks (como las manda la red); vacío si no es
+// teledirigido. Las tandas que sobran después de que el misil cayó no hacen nada.
+function steerChunks(plan: ShotPlan): (-1 | 0 | 1)[][] {
+  if (plan.weapon !== 'guided') return []
+  const out: (-1 | 0 | 1)[][] = []
+  for (let i = 0; i < 30; i += 2) out.push([plan.steer?.[i] ?? 0, plan.steer?.[i + 1] ?? 0])
+  return out
+}
+function targetOf2(plan: ShotPlan, item: ItemId) {
+  return item === 'jetpack' || item === 'teleport' ? plan.itemTarget : undefined
 }
 
 function playTurns(s: GameState, turns: number, difficulty: Difficulty = 'normal'): { state: GameState; events: GameEvent[] } {
@@ -752,7 +786,6 @@ function shoot(s: GameState, weapon: WeaponId, angle: number, power: number): St
   return applyCommand(s, { type: 'fire', playerId: s.players[s.current].id })
 }
 const impactsOf = (r: StepResult) => r.events.filter((e): e is Extract<GameEvent, { type: 'impact' }> => e.type === 'impact')
-check(WEAPON_ORDER.length === 8, 'WEAPON_ORDER tiene las 8 armas')
 {
   const r = shoot(flat(), 'cluster', 60, 70)
   const n = WEAPONS.cluster.split ?? 0
@@ -1291,12 +1324,14 @@ function toRoundover(): GameState {
       if (a.phase === 'aiming') {
         const p = a.players[a.current]
         const plan = chooseShot(a, config.difficulty)
-        for (const item of plan.items ?? []) send({ type: 'useItem', playerId: p.id, item })
+        for (const item of plan.items ?? []) send({ type: 'useItem', playerId: p.id, item, target: targetOf2(plan, item) })
         for (let i = 0; i < Math.abs(plan.move ?? 0); i++) send({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
         if (a.current !== p.id || a.phase !== 'aiming') continue
         send({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon })
         send({ type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power })
         send({ type: 'fire', playerId: p.id })
+      for (const dirs of steerChunks(plan)) send({ type: 'steer', playerId: p.id, dirs })
+        for (const dirs of steerChunks(plan)) send({ type: 'steer', playerId: p.id, dirs })
       } else if (a.phase === 'roundover') send({ type: 'nextRound' })
       else if (a.phase === 'shop') {
         for (const p of a.players) {
@@ -1865,9 +1900,9 @@ type DeathEv = Extract<GameEvent, { type: 'death' }>
       const p = a.players[a.current]
       const plan = chooseShot(a, 'normal')
       const cmds: Command[] = []
-      for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item })
+      for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item, target: targetOf2(plan, item) })
       for (let i = 0; i < Math.abs(plan.move ?? 0); i++) cmds.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
-      cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+      cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id }, ...steerChunks(plan).map((dirs): Command => ({ type: 'steer', playerId: p.id, dirs })))
       for (const cmd of cmds) {
         a = applyCommand(a, cmd).state
         b = applyCommand(b, cmd).state
@@ -2275,7 +2310,7 @@ function breakWall(m: number): { before: GameState; r: StepResult } {
       const plan = chooseShot(a, 'normal')
       const cmds: Command[] = []
       for (let i = 0; i < Math.abs(plan.move ?? 0); i++) cmds.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
-      cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+      cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id }, ...steerChunks(plan).map((dirs): Command => ({ type: 'steer', playerId: p.id, dirs })))
       for (const cmd of cmds) {
         a = applyCommand(a, cmd).state
         b = applyCommand(b, cmd).state
@@ -2812,12 +2847,13 @@ function targetOf(s: GameState, ammo?: Partial<Record<WeaponId, number>>): numbe
       if (a.round === 2 && opener < 0) opener = a.current
       const p = a.players[a.current]
       const plan = chooseShot(a, 'normal')
-      for (const item of plan.items ?? []) send({ type: 'useItem', playerId: p.id, item })
+      for (const item of plan.items ?? []) send({ type: 'useItem', playerId: p.id, item, target: targetOf2(plan, item) })
       for (let i = 0; i < Math.abs(plan.move ?? 0); i++) send({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
       if (a.current !== p.id || a.phase !== 'aiming') continue
       send({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon })
       send({ type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power })
       send({ type: 'fire', playerId: p.id })
+      for (const dirs of steerChunks(plan)) send({ type: 'steer', playerId: p.id, dirs })
       if (!snap && steps > 60) {
         snap = true
         b = decodeState(encodeState(b))
@@ -3376,9 +3412,9 @@ const countIn = (t: { w: number; front: Uint8Array }, m: number, x0: number, y0:
     const p = a.players[a.current]
     const plan = chooseShot(a, 'normal')
     const cmds: Command[] = []
-    for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item })
+    for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item, target: targetOf2(plan, item) })
     for (let i = 0; i < Math.abs(plan.move ?? 0); i++) cmds.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
-    cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+    cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id }, ...steerChunks(plan).map((dirs): Command => ({ type: 'steer', playerId: p.id, dirs })))
     for (const cmd of cmds) {
       const ra = applyCommand(a, cmd)
       const rb = applyCommand(b, cmd)
@@ -3397,9 +3433,9 @@ const countIn = (t: { w: number; front: Uint8Array }, m: number, x0: number, y0:
     const p = c.players[c.current]
     const plan = chooseShot(c, 'normal')
     const cmds: Command[] = []
-    for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item })
+    for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item, target: targetOf2(plan, item) })
     for (let i = 0; i < Math.abs(plan.move ?? 0); i++) cmds.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
-    cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+    cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id }, ...steerChunks(plan).map((dirs): Command => ({ type: 'steer', playerId: p.id, dirs })))
     for (const cmd of cmds) {
       const rc = applyCommand(c, cmd)
       log2 += JSON.stringify(rc.events.map((e) => (e.type === 'collapse' ? { ...e, patches: e.patches.length } : e.type === 'flow' ? { ...e, patches: e.patches.length } : e)))
@@ -3419,6 +3455,534 @@ const countIn = (t: { w: number; front: Uint8Array }, m: number, x0: number, y0:
   check(r.flights![0].impact.water === true && imp?.water === true && imp.radius === WEAPONS.normal.radius * WATER_BLAST_SCALE, `v2.4 Impact.water: explosión sumergida sin la marca (${JSON.stringify(r.flights![0].impact)})`)
   const dry = shoot(flat(), 'normal', 60, 60)
   check(dry.flights![0].impact.water === undefined && impactsOf(dry).every((e) => e.water === undefined), 'v2.4 Impact.water: explosión seca con la marca')
+}
+// ---------- 20. v3 sim-armas: armas nuevas, teledirigido, ítems, minas y ácido ----------
+type HazardEv = Extract<GameEvent, { type: 'hazard' }>
+type SlideEv = Extract<GameEvent, { type: 'slide' }>
+const hazardsOf = (ev: GameEvent[]) => ev.filter((e): e is HazardEv => e.type === 'hazard')
+// flat() con munición de todo y los ítems nuevos
+function armed(): GameState {
+  const s = flat()
+  for (const p of s.players) {
+    for (const id of WEAPON_ORDER) p.ammo[id] = Math.max(p.ammo[id], 5)
+    for (const id of ITEM_ORDER) p.items[id] = 3
+  }
+  s.wind = 0 // aimAt apunta sin viento
+  return s
+}
+// pasa el turno del que tiene el turno con un tiro inofensivo (para volver a P0 o hacer correr los turnos)
+function pass(s: GameState): StepResult {
+  const id = s.players[s.current].id
+  const x = s.players[s.current].x
+  // tiro al costado de afuera del mapa
+  return shoot(s, 'normal', x < s.width / 2 ? 175 : 5, 100)
+}
+// tiro que cae cerca de (x, y) con el arma (vuelo normal), desde P0
+function shootAt(s: GameState, weapon: WeaponId, x: number, y: number, lo = 5, hi = 175): StepResult & { d: number } {
+  const a = aimAt(s, x, y, lo, hi)
+  return { ...shoot(s, weapon, a.angle, a.power), d: a.d }
+}
+check(WEAPON_ORDER.length === 16 && new Set(WEAPON_ORDER).size === 16, 'v3: WEAPON_ORDER tiene las 16 armas')
+for (const id of WEAPON_ORDER) if (id !== 'normal') check(SHOP.some((e) => e.id === id && e.kind === 'weapon'), `v3 tienda: falta ${id}`)
+for (const id of ITEM_ORDER) check(SHOP.some((e) => e.id === id && e.kind === 'item'), `v3 tienda: falta el ítem ${id}`)
+{
+  // rebotadora: una explosión 'spark' por rebote y una final 'fire'; cada tramo arranca después del anterior
+  const bounceMap = () => {
+    const b = armed()
+    b.players[1].x = 760
+    return b
+  }
+  const s = bounceMap()
+  const r = shoot(s, 'bouncer', 60, 45)
+  const imps = impactsOf(r)
+  const n = WEAPONS.bouncer.bounces ?? 0
+  check(imps.length >= 2 && imps.length <= n + 1, `rebotadora: ${imps.length} explosiones (esperaba 2..${n + 1})`)
+  check(imps.slice(0, -1).every((e) => e.blast === 'spark') && imps[imps.length - 1]?.blast === 'fire', 'rebotadora: rebotes spark y final fire')
+  const st = r.flights!.map((f) => f.startT ?? 0)
+  check(r.flights!.length === imps.length && st.every((t, i) => i === 0 || t > st[i - 1]), 'rebotadora: un tramo por rebote, en orden')
+  check(imps.every((e, i) => i === 0 || e.t > imps[i - 1].t), 'rebotadora: explosiones en orden')
+  check(netHash(shoot(bounceMap(), 'bouncer', 60, 45).state) === netHash(r.state), 'rebotadora: determinista')
+}
+{
+  // láser: recto, sin gravedad; atraviesa una pared fina de tierra; frena en piedra
+  const s = armed()
+  s.players[1].x = 420
+  fillRect(s.terrain, 300, 240, 309, 299, DIRT, 'both')
+  // ángulo hacia el centro de P1
+  const m = muzzle(200, 300, 0)
+  const a = (Math.atan2(-(290 - m.y), 420 - m.x) * 180) / Math.PI
+  const r = shoot(s, 'laser', a, 50)
+  const beam = r.events.find((e): e is Extract<GameEvent, { type: 'beam' }> => e.type === 'beam')
+  check(!!beam && beam.t === 0, 'láser: evento beam')
+  check(r.events.some((e) => e.type === 'damage' && e.playerId === 1 && e.amount === WEAPONS.laser.damage), `láser: pega directo a través de la pared de tierra (${JSON.stringify(r.events.filter((e) => e.type === 'damage'))})`)
+  check(countIn(r.state.terrain, DIRT, 300, 240, 309, 299) < countIn(s.terrain, DIRT, 300, 240, 309, 299) - 20, 'láser: abre un agujero en la tierra')
+  const s2 = armed()
+  s2.players[1].x = 420
+  fillRect(s2.terrain, 300, 240, 309, 299, STONE, 'both')
+  const r2 = shoot(s2, 'laser', a, 50)
+  check(!r2.events.some((e) => e.type === 'damage' && e.playerId === 1), 'láser: la piedra lo frena')
+  const i2 = impactsOf(r2)[0]
+  check(!!i2 && i2.x >= 298 && i2.x <= 302, `láser: impacto en la piedra (${i2?.x.toFixed(1)})`)
+  // tierra gruesa (más de LASER_SOFT): también lo frena
+  const s3 = armed()
+  s3.players[1].x = 420
+  fillRect(s3.terrain, 300, 240, 369, 299, DIRT, 'both')
+  check(!shoot(s3, 'laser', a, 50).events.some((e) => e.type === 'damage' && e.playerId === 1), 'láser: no perfora una montaña')
+  // sin gravedad: tirado a 0° sigue a la altura de la boca
+  const s4 = armed()
+  s4.players[1].x = 700
+  const r4 = shoot(s4, 'laser', 0, 50)
+  const b4 = r4.events.find((e): e is Extract<GameEvent, { type: 'beam' }> => e.type === 'beam')
+  check(!!b4 && Math.abs(b4.y1 - b4.y0) < 0.01 && b4.x1 - b4.x0 > 300, 'láser: recto y largo')
+}
+{
+  // mina: queda clavada; un tanque que se mueve a su radio la dispara; al vencer explota
+  const s = armed()
+  s.players[1].x = 480
+  const r = shootAt(s, 'mine', 440, 300)
+  const placed = hazardsOf(r.events).filter((e) => e.action === 'place')
+  check(placed.length === 1 && r.state.hazards.length === 1 && r.state.hazards[0].kind === 'mine', `mina: queda en el mapa (d ${r.d.toFixed(1)})`)
+  check(!r.events.some((e) => e.type === 'damage'), 'mina: plantarla no hace daño')
+  const mine = r.state.hazards[0]
+  check(!!mine && Math.abs(mine.y - 300) <= 2, `mina: sobre el piso (y ${mine?.y})`)
+  // P1 camina hacia la mina
+  let c = r.state
+  const ev: GameEvent[] = []
+  for (let i = 0; i < 30 && c.current === 1 && c.hazards.length > 0; i++) {
+    const rr = applyCommand(c, { type: 'move', playerId: 1, dir: -1 })
+    ev.push(...rr.events)
+    c = rr.state
+  }
+  check(hazardsOf(ev).some((e) => e.action === 'trigger') && c.hazards.length === 0, 'mina: la pisa al moverse y explota')
+  check(ev.some((e) => e.type === 'damage' && e.playerId === 1), 'mina: daña al que la pisa')
+  check(c.earnings[0] > 0, `mina: la plata es del dueño (${c.earnings[0]})`)
+  // una mina pegada a un tanque que lo empujan: explota
+  const s2 = armed()
+  s2.players[1].x = 480
+  s2.hazards = [{ id: 0, kind: 'mine', ownerId: 1, x: 460, y: 300, radius: 14, turns: 9 }]
+  const r2 = shootAt(s2, 'normal', 500, 300, 5, 90)
+  check(hazardsOf(r2.events).some((e) => e.action === 'trigger'), `mina: el empujón la dispara (${r2.state.players[1].x})`)
+  // vence: con turns 1 explota al cambiar el turno
+  const s3 = armed()
+  s3.hazards = [{ id: 3, kind: 'mine', ownerId: 1, x: 400, y: 300, radius: 14, turns: 1 }]
+  const r3 = pass(s3)
+  check(hazardsOf(r3.events).some((e) => e.action === 'trigger' && e.hazard.id === 3) && r3.state.hazards.length === 0, 'mina: explota al vencer')
+  // un tanque que estaba adentro cuando cayó no la dispara hasta moverse
+  const s4 = armed()
+  s4.players[1].x = 480
+  const r4 = shootAt(s4, 'mine', 480, 280)
+  check(r4.state.hazards.length === 1 && !hazardsOf(r4.events).some((e) => e.action === 'trigger'), 'mina: pegarle a un tanque la planta a sus pies')
+}
+{
+  // ácido: rompe piedra y metal; deja un charco que daña al empezar el turno del que está adentro
+  const s = armed()
+  s.players[1].x = 600
+  fillRect(s.terrain, 380, 280, 420, 299, METAL, 'both')
+  const metal0 = count(s, METAL)
+  const r = shootAt(s, 'acid', 400, 280)
+  check(count(r.state, METAL) < metal0 - 300, `ácido: rompe el metal (${metal0} → ${count(r.state, METAL)})`)
+  const n = shootAt(s, 'normal', 400, 280)
+  check(count(n.state, METAL) > count(r.state, METAL) + 200, 'ácido: rompe más que la normal')
+  check(r.state.hazards.some((h) => h.kind === 'acid'), 'ácido: deja un charco')
+  // charco bajo P1: al empezar su turno pierde ACID_DAMAGE
+  const s2 = armed()
+  s2.hazards = [{ id: 0, kind: 'acid', ownerId: 0, x: 600, y: 300, radius: 18, turns: 4 }]
+  const r2 = pass(s2)
+  check(r2.events.some((e) => e.type === 'damage' && e.playerId === 1 && e.amount === 10) && hazardsOf(r2.events).some((e) => e.action === 'trigger'), 'ácido: daña al que empieza el turno adentro')
+  check(r2.state.earnings[0] > 0, 'ácido: el daño es plata del dueño')
+  let c = r2.state
+  for (let i = 0; i < 6; i++) c = pass(c).state
+  check(c.hazards.length === 0, 'ácido: se seca')
+  // bajo el agua no deja charco
+  const sw = poolMap(WATER)
+  sw.players[0].x = 500
+  for (const p of sw.players) p.ammo.acid = 2
+  const aw = aimAt(sw, 650, 330, 20, 85)
+  const rw = shoot(sw, 'acid', aw.angle, aw.power)
+  check(rw.state.hazards.length === 0, 'ácido: en el agua se diluye')
+}
+{
+  // terremoto: derrumba una ladera, sacude tanques (slide 'quake') y emite 'quake' + 'collapse'
+  const s = armed()
+  s.players[1].x = 540
+  // loma empinada con un barranco al lado de P1
+  for (let x = 420; x < 500; x++) fillRect(s.terrain, x, 300 - Math.min(80, (x - 420) * 2), x, 299, DIRT, 'both')
+  const before = s.terrain.front.slice()
+  const r = shootAt(s, 'quake', 506, 300, 5, 90)
+  check(r.events.some((e) => e.type === 'quake'), 'terremoto: evento quake')
+  check(collapsesOf(r.events).length >= 1, 'terremoto: derrumbe animado')
+  let moved = 0
+  for (let i = 0; i < before.length; i++) if (before[i] !== r.state.terrain.front[i]) moved++
+  check(moved > 100, `terremoto: mueve el terreno (${moved} celdas)`)
+  check(r.events.some((e) => e.type === 'slide' && e.cause === 'quake'), 'terremoto: sacude tanques')
+  check(netHash(shootAt(s, 'quake', 506, 300, 5, 90).state) === netHash(r.state), 'terremoto: determinista')
+}
+// un agujero negro que se va por el abismo cerca del labio derecho (cruza la boca a ~20 px del labio)
+function intoPit(s: GameState): StepResult & { d: number } {
+  let best = { angle: 50, power: 50, d: Infinity }
+  for (let angle = 8; angle <= 70; angle += 2) {
+    for (let power = 20; power <= 100; power += 0.5) {
+      const f = fly({ terrain: s.terrain, players: s.players, props: s.props, ownerId: s.players[s.current].id, angle, power, wind: 0 })
+      if (f.impact.kind !== 'out') continue
+      const at = f.path.find((q) => q.x >= PIT0 && q.x <= PIT1 && q.y >= 306)
+      if (!at) continue
+      const d = Math.abs(at.x - (PIT1 - 20))
+      if (d < best.d) best = { angle, power, d }
+    }
+  }
+  return { ...shoot(s, 'blackhole', best.angle, best.power), d: best.d }
+}
+{
+  // agujero negro: atrae al rival hacia el centro; con un abismo al lado, lo tira
+  const s = armed()
+  s.players[1].x = 560
+  const r = shootAt(s, 'blackhole', 500, 300, 5, 90)
+  const sl = r.events.find((e): e is SlideEv => e.type === 'slide' && e.cause === 'pull' && e.playerId === 1)
+  check(r.events.some((e) => e.type === 'pull'), 'agujero negro: evento pull')
+  check(!!sl && r.state.players[1].x < 560, `agujero negro: atrae al rival (${r.state.players[1].x})`)
+  check(r.state.players[1].x >= impactsOf(r)[0].x - 1, 'agujero negro: no lo pasa del centro')
+  // con un abismo al lado: el agujero negro se abre en la boca y lo arrastra adentro
+  const p = pitMap()
+  fillRect(p.terrain, PIT0, 290, PIT1, 307, AIR) // la boca abierta
+  for (const q of p.players) q.ammo.blackhole = 2
+  p.players[1].x = PIT1 + 1 + TANK_HALF_W + 2
+  p.wind = 0
+  const rp = intoPit(p)
+  check(rp.events.some((e) => e.type === 'death' && e.playerId === 1 && e.cause === 'abyss'), `agujero negro: lo arrastra al abismo (x ${rp.state.players[1].x}, d ${rp.d.toFixed(1)})`)
+  // anclado no se mueve
+  const pa = pitMap()
+  for (const q of pa.players) q.ammo.blackhole = 2
+  fillRect(pa.terrain, PIT0, 290, PIT1, 307, AIR)
+  pa.players[1].x = PIT1 + 1 + TANK_HALF_W + 2
+  pa.players[1].anchored = true
+  pa.wind = 0
+  const ra = intoPit(pa)
+  check(ra.state.players[1].alive && ra.state.players[1].x === PIT1 + 1 + TANK_HALF_W + 2, 'ancla: el agujero negro no lo mueve')
+}
+{
+  // muro: pared fina y alta de tierra donde cae; frena un tiro bajo
+  const s = armed()
+  const r = shootAt(s, 'wall', 400, 300, 5, 90)
+  const t = r.state.terrain
+  let tall = 0
+  for (let y = 300 - 2 * WEAPONS.wall.radius; y < 300; y++) if (isSolid(t, Math.round(impactsOf(r)[0].x), y)) tall++
+  check(tall >= 2 * WEAPONS.wall.radius - 6, `muro: alto (${tall})`)
+  check(!isSolid(t, Math.round(impactsOf(r)[0].x) + 12, 280), 'muro: fino')
+  check(!r.events.some((e) => e.type === 'damage'), 'muro: no hace daño')
+  // P1 le tira plano a P0 y el muro lo frena
+  let c = r.state
+  const hit = shoot(c, 'normal', 175, 70)
+  c = hit.state
+  check(!hit.events.some((e) => e.type === 'damage' && e.playerId === 0), 'muro: frena un tiro bajo')
+}
+{
+  // deflector: el impacto directo se desvía hacia arriba y se gasta
+  const s = armed()
+  s.players[1].x = 480
+  s.players[1].deflector = true
+  const a = aimAt(s, 480, 290, 20, 80)
+  const r = shoot(s, 'heavy', a.angle, a.power)
+  check(r.events.some((e) => e.type === 'deflect' && e.playerId === 1), 'deflector: evento deflect')
+  check(!r.state.players[1].deflector, 'deflector: se gasta')
+  const dmg = r.events.filter((e) => e.type === 'damage' && e.playerId === 1).reduce((n, e) => n + (e.type === 'damage' ? e.amount : 0), 0)
+  check(dmg < WEAPONS.heavy.damage, `deflector: no recibe el impacto directo (${dmg})`)
+  check(r.flights!.length >= 2, 'deflector: el proyectil sigue en otro tramo')
+  // láser reflejado
+  const s2 = armed()
+  s2.players[1].x = 420
+  s2.players[1].deflector = true
+  const m = muzzle(200, 300, 0)
+  const la = (Math.atan2(-(290 - m.y), 420 - m.x) * 180) / Math.PI
+  const r2 = shoot(s2, 'laser', la, 50)
+  check(r2.events.filter((e) => e.type === 'beam').length === 2 && !r2.events.some((e) => e.type === 'damage' && e.playerId === 1), 'deflector: refleja el láser')
+}
+{
+  // ancla: sin empuje hasta su próximo turno; anclado no camina
+  const s = armed()
+  s.players[1].x = 480
+  s.current = 1
+  const an = applyCommand(s, { type: 'useItem', playerId: 1, item: 'anchor' })
+  check(an.state.players[1].anchored && an.state.current === 1 && an.events.some((e) => e.type === 'item'), 'ancla: se activa sin gastar el turno')
+  check(applyCommand(an.state, { type: 'move', playerId: 1, dir: 1 }).state === an.state, 'ancla: anclado no camina')
+  const t1 = pass(an.state).state
+  check(t1.current === 0 && t1.players[1].anchored, 'ancla: dura hasta su turno')
+  const a = aimAt(t1, 480, 290, 20, 80)
+  const r = shoot(t1, 'heavy', a.angle, a.power)
+  check(!r.events.some((e) => e.type === 'slide' && e.playerId === 1) && r.state.players[1].x === 480, 'ancla: el impacto no lo empuja')
+  check(r.state.current === 1 && !r.state.players[1].anchored, 'ancla: se suelta al empezar su turno')
+}
+{
+  // jetpack: salta a un destino dentro del rango (arco), sin gastar el turno; fuera de rango o adentro del
+  // terreno no hace nada; sin piso, cae
+  const s = armed()
+  fillRect(s.terrain, 120, 240, 160, 299, DIRT, 'both') // meseta a la izquierda
+  const r = applyCommand(s, { type: 'useItem', playerId: 0, item: 'jetpack', target: { x: 140, y: 240 } })
+  const jp = r.events.find((e): e is Extract<GameEvent, { type: 'jetpack' }> => e.type === 'jetpack')
+  check(!!jp && r.state.players[0].x === 140 && r.state.players[0].y === 240 && r.state.current === 0, `jetpack: salta a la meseta (${r.state.players[0].x}, ${r.state.players[0].y})`)
+  check(!!jp && Math.min(...jp.path.map((p) => p.y)) < 240 - 20, 'jetpack: en arco')
+  check(r.state.players[0].items.jetpack === 2, 'jetpack: se gasta')
+  check(applyCommand(s, { type: 'useItem', playerId: 0, item: 'jetpack', target: { x: 200 + JETPACK_RANGE + 30, y: 300 } }).state === s, 'jetpack: fuera de rango no')
+  check(applyCommand(s, { type: 'useItem', playerId: 0, item: 'jetpack', target: { x: 140, y: 280 } }).state.players[0].y === 240, 'jetpack: un destino dentro del terreno se apoya arriba')
+  check(applyCommand(s, { type: 'useItem', playerId: 0, item: 'jetpack', target: { x: 260, y: 360 } }).state === s, 'jetpack: adentro del terreno no')
+  const air = applyCommand(s, { type: 'useItem', playerId: 0, item: 'jetpack', target: { x: 260, y: 220 } })
+  check(air.state.players[0].y === 300 && air.events.some((e) => e.type === 'fall'), 'jetpack: sin piso, cae')
+  // teletransporte: lejos, evento teleport; al lado de una mina, la dispara
+  const tp = applyCommand(s, { type: 'useItem', playerId: 0, item: 'teleport', target: { x: 520, y: 300 } })
+  check(tp.events.some((e) => e.type === 'teleport') && tp.state.players[0].x === 520 && tp.state.current === 0, 'teleport: aparece en el destino')
+  check(applyCommand(s, { type: 'useItem', playerId: 0, item: 'teleport', target: { x: 600, y: 300 } }).state === s, 'teleport: no se mete en otro tanque')
+  const sm = armed()
+  sm.hazards = [{ id: 0, kind: 'mine', ownerId: 1, x: 400, y: 300, radius: 14, turns: 9 }]
+  const tm = applyCommand(sm, { type: 'useItem', playerId: 0, item: 'teleport', target: { x: 410, y: 300 } })
+  check(hazardsOf(tm.events).some((e) => e.action === 'trigger') && tm.events.some((e) => e.type === 'damage' && e.playerId === 0), 'teleport: cae al lado de una mina y explota')
+  const anc = applyCommand(applyCommand(s, { type: 'useItem', playerId: 0, item: 'anchor' }).state, { type: 'useItem', playerId: 0, item: 'jetpack', target: { x: 140, y: 240 } })
+  check(anc.state.players[0].x === 200, 'jetpack: anclado no salta')
+}
+// teledirigido
+function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
+  return shoot(s, 'guided', angle, power)
+}
+{
+  const s = armed()
+  const r = guidedShot(s)
+  check(r.state.phase === 'guiding' && !!r.state.guided && r.events.some((e) => e.type === 'guide'), 'teledirigido: al apogeo queda en guiding')
+  check(r.state.guided!.guide > 1.4 && r.flights!.length === 1, 'teledirigido: vuelo hasta el apogeo')
+  check(applyCommand(r.state, { type: 'aim', playerId: 0, angle: 10, power: 10 }).state === r.state, 'teledirigido: en guiding no se apunta')
+  check(applyCommand(r.state, { type: 'steer', playerId: 1, dirs: [1] }).state === r.state, 'teledirigido: solo el dueño dirige')
+  // determinismo por tandas: de a 1, de a 2 y todo junto dan lo mismo
+  const dirs: (-1 | 0 | 1)[] = []
+  for (let i = 0; i < 30; i++) dirs.push(i < 10 ? 1 : i < 18 ? 0 : -1)
+  const runIn = (chunk: number) => {
+    let c = r.state
+    const ev: GameEvent[] = []
+    let i = 0
+    let n = 0
+    while (c.phase === 'guiding' && n++ < 100) {
+      const rr = applyCommand(c, { type: 'steer', playerId: 0, dirs: dirs.slice(i, i + chunk).length ? dirs.slice(i, i + chunk) : [0] })
+      ev.push(...rr.events)
+      c = rr.state
+      i += chunk
+    }
+    return { c, ev }
+  }
+  const a1 = runIn(1)
+  const a2 = runIn(2)
+  const a30 = runIn(30)
+  check(a1.c.phase === 'aiming' && a1.c.current === 1 && a1.c.guided === null, 'teledirigido: termina el turno')
+  check(netHash(a1.c) === netHash(a2.c) && netHash(a1.c) === netHash(a30.c), 'teledirigido: mismo resultado en tandas de 1, 2 y 30')
+  // partir una tanda en cualquier punto da el mismo estado (la red predice con tandas parciales)
+  let splitBad = 0
+  for (let k = 1; k < 12; k++) {
+    const whole = applyCommand(r.state, { type: 'steer', playerId: 0, dirs: dirs.slice(0, 12) }).state
+    const half = applyCommand(r.state, { type: 'steer', playerId: 0, dirs: dirs.slice(0, k) }).state
+    const both = applyCommand(half, { type: 'steer', playerId: 0, dirs: dirs.slice(k, 12) }).state
+    if (netHash(whole) !== netHash(both)) splitBad++
+  }
+  check(splitBad === 0, `teledirigido: [a] y después [b] = [a, b] (${splitBad} cortes distintos)`)
+  check(a1.ev.some((e) => e.type === 'impact') && a1.ev.some((e) => e.type === 'turn'), 'teledirigido: explota y pasa el turno')
+  const imp = a1.ev.find((e): e is Extract<GameEvent, { type: 'impact' }> => e.type === 'impact')
+  check(!!imp && imp.t > r.state.guided!.t, 'teledirigido: tiempos desde el disparo')
+  // réplica: snapshot en guiding
+  const mid = applyCommand(r.state, { type: 'steer', playerId: 0, dirs: dirs.slice(0, 5) }).state
+  const copy = decodeState(encodeState(mid))
+  check(netHash(copy) === netHash(mid) && copy.phase === 'guiding', 'teledirigido: el snapshot en guiding es idéntico')
+  const end1 = applyCommand(mid, { type: 'steer', playerId: 0, dirs: dirs.slice(5) }).state
+  const end2 = applyCommand(copy, { type: 'steer', playerId: 0, dirs: dirs.slice(5) }).state
+  check(netHash(end1) === netHash(end2), 'teledirigido: la réplica desde el snapshot termina igual')
+  // giro limitado: con todo a un lado la dirección cambia a lo sumo STEER_RATE · tiempo (+ temblor y gravedad)
+  const g0 = r.state.guided!
+  const turnOf = (d: -1 | 0 | 1, n: number) => {
+    const c = applyCommand(r.state, { type: 'steer', playerId: 0, dirs: new Array(n).fill(d) }).state
+    return c.guided ? Math.atan2(c.guided.vy, c.guided.vx) : NaN
+  }
+  const h0 = turnOf(0, 6)
+  const hR = turnOf(1, 6)
+  const hL = turnOf(-1, 6)
+  const lim = STEER_RATE * 6 * STEER_TICK
+  check(Math.abs(hR - h0 - lim) < 0.08 && Math.abs(h0 - hL - lim) < 0.08, `teledirigido: giro limitado (${(hR - h0).toFixed(3)} / ${(h0 - hL).toFixed(3)}, esperaba ${lim.toFixed(3)})`)
+  check(g0.seed !== 0, 'teledirigido: temblor con seed')
+  // el temblor existe: sin correcciones, dos seeds distintas caen en lugares distintos
+  const ws = r.state
+  const alt = { ...ws, guided: { ...ws.guided!, seed: ws.guided!.seed ^ 0x5bd1e995 } }
+  const ia = impactsOf(applyCommand(ws, { type: 'steer', playerId: 0, dirs: new Array(30).fill(0) }))[0]
+  const ib = impactsOf(applyCommand(alt, { type: 'steer', playerId: 0, dirs: new Array(30).fill(0) }))[0]
+  check(!!ia && !!ib && Math.abs(ia.x - ib.x) > 2, `teledirigido: el temblor cambia el impacto (${ia?.x.toFixed(1)} / ${ib?.x.toFixed(1)})`)
+  // chocar en el ascenso: explota como un tiro normal sin guiado
+  const sw = armed()
+  fillRect(sw.terrain, 230, 200, 240, 299, STONE, 'both')
+  const rw = guidedShot(sw, 30, 60)
+  check(rw.state.phase === 'aiming' && impactsOf(rw).length === 1, 'teledirigido: si choca antes del apogeo, explota')
+}
+{
+  // precisión: ni la IA difícil ni un guiado "perfecto" (corrige cada tick viendo dónde está, sin saber el
+  // temblor que viene) pegan siempre. Blanco a 300-460 px, tiro inicial con el error de la normal.
+  let aiHit = 0
+  let perfect = 0
+  let none = 0
+  const N = 24
+  for (let k = 0; k < N; k++) {
+    const s = armed()
+    s.wind = (k % 7) - 3
+    s.players[1].x = 500 + (k % 5) * 40
+    // tiro base que pega, con error de ±7° / ±8
+    const a = aimAt(s, s.players[1].x, 290, 20, 85)
+    const rng = new Rng(1000 + k)
+    const angle = a.angle + (rng.next() * 2 - 1) * 7
+    const power = a.power + (rng.next() * 2 - 1) * 8
+    const r = guidedShot(s, angle, power)
+    if (r.state.phase !== 'guiding') continue
+    const hitP1 = (ev: GameEvent[]) => ev.some((e) => e.type === 'damage' && e.playerId === 1 && e.amount >= WEAPONS.guided.damage * 0.95)
+    // sin guiar
+    if (hitP1(applyCommand(r.state, { type: 'steer', playerId: 0, dirs: new Array(30).fill(0) }).events)) none++
+    // IA difícil: plan de una (sin temblor) con su error de dirección
+    const g = r.state.guided!
+    const plan = noisySteer(planSteer(r.state, g, r.state.players[1]), 'hard', () => rng.next())
+    if (hitP1(applyCommand(r.state, { type: 'steer', playerId: 0, dirs: plan }).events)) aiHit++
+    // perfecto: replanifica cada tick con la posición real
+    let c = r.state
+    const ev: GameEvent[] = []
+    for (let i = 0; i < 40 && c.phase === 'guiding'; i++) {
+      const d = planSteer(c, c.guided!, c.players[1])[0] ?? 0
+      const rr = applyCommand(c, { type: 'steer', playerId: 0, dirs: [d] })
+      ev.push(...rr.events)
+      c = rr.state
+    }
+    if (hitP1(ev)) perfect++
+  }
+  console.log(`v3 teledirigido: impactos directos sin guiar ${none}/${N}, IA difícil ${aiHit}/${N}, guiado perfecto ${perfect}/${N}`)
+  check(perfect < N && aiHit < N, 'teledirigido: nunca es un tiro seguro')
+  check(aiHit > none && perfect >= aiHit, 'teledirigido: guiar sirve (más impactos que sin guiar)')
+}
+{
+  // IA: usa el teledirigido con correcciones, el láser a quemarropa, el ácido contra un búnker, la mina y el
+  // muro sin tiro, el ancla al borde y el jetpack para salir de la lava
+  const only = (s: GameState, id: WeaponId) => {
+    for (const w of WEAPON_ORDER) s.players[0].ammo[w] = 0
+    s.players[0].ammo.normal = 99
+    s.players[0].ammo[id] = 3
+    s.players[0].weapon = 'normal'
+  }
+  const sg = armed()
+  only(sg, 'guided')
+  sg.players[1].x = 700
+  const pg = chooseShot(sg, 'hard')
+  check(pg.weapon === 'guided' && (pg.steer?.length ?? 0) === 30, `IA: usa el teledirigido lejos con plan (${pg.weapon}, ${pg.steer?.length})`)
+  const sl = armed()
+  only(sl, 'laser')
+  sl.players[1].x = 300
+  fillRect(sl.terrain, 240, 247, 247, 299, DIRT, 'both') // pared fina de tierra
+  fillRect(sl.terrain, 236, 240, 380, 246, BEDROCK, 'both') // techo: ningún globo llega
+  const pl = chooseShot(sl, 'hard')
+  check(pl.weapon === 'laser', `IA: láser a través de una pared fina (${pl.weapon})`)
+  const sa = armed()
+  only(sa, 'acid')
+  sa.players[1].x = 600
+  // búnker de metal sobre P1
+  // paredes y techo de 15 px: más que el radio de la normal (el escudo de metal la frena entera)
+  fillRect(sa.terrain, 571, 250, 629, 264, METAL, 'both')
+  fillRect(sa.terrain, 571, 250, 585, 299, METAL, 'both')
+  fillRect(sa.terrain, 615, 250, 629, 299, METAL, 'both')
+  const pa = chooseShot(sa, 'hard')
+  check(pa.weapon === 'acid', `IA: ácido contra el búnker (${pa.weapon})`)
+  const sx = pitMap()
+  sx.players[0].items.anchor = 1
+  fillRect(sx.terrain, PIT0, 290, PIT1, 307, AIR) // la boca abierta a la altura del tanque
+  sx.players[0].x = PIT0 - 20
+  const px = chooseShot(sx, 'normal')
+  check((px.items ?? []).includes('anchor') || (px.move ?? 0) !== 0, `IA: ancla al borde del abismo (${JSON.stringify(px.items)}, move ${px.move})`)
+}
+{
+  // IA con todo el arsenal: partidas de 3 rondas (normal y difícil) con todo comprable; cuántas veces usa cada
+  // arma e ítem, que nunca se trabe en 'guiding' y peor tiempo
+  const used: Record<string, number> = {}
+  let worst = 0
+  let stuck = 0
+  let games = 0
+  let baseMs = 0
+  let fullMs = 0
+  for (const [difficulty, size, n] of [['normal', 'small', 3], ['hard', 'small', 2], ['normal', 'medium', 4], ['hard', 'large', 4]] as [Difficulty, MapSize, number][]) {
+    for (let seed = 1; seed <= 3; seed++) {
+      let s = createMatch(mk(n - 1, difficulty, 'forest', 700 + seed, 1, 0, size))
+      for (const p of s.players) {
+        for (const id of WEAPON_ORDER) if (id !== 'normal') p.ammo[id] = 2
+        for (const id of ITEM_ORDER) p.items[id] = 1
+      }
+      games++
+      for (let turn = 0; turn < 60 && s.phase === 'aiming'; turn++) {
+        // el mismo turno con el kit de siempre (para comparar tiempos sin depender de la carga de la máquina)
+        if (turn % 3 === 0) {
+          const k = { ...s, players: s.players.map((p) => ({ ...p, ammo: { ...p.ammo }, items: { ...p.items } })) }
+          const me = k.players[k.current]
+          for (const id of WEAPON_ORDER) me.ammo[id] = Math.min(me.ammo[id], WEAPONS[id].ammo)
+          for (const id of ITEM_ORDER) me.items[id] = 0
+          const t0 = performance.now()
+          chooseShot(k, difficulty)
+          baseMs += performance.now() - t0
+          const t1 = performance.now()
+          chooseShot(s, difficulty)
+          fullMs += performance.now() - t1
+        }
+        const r = aiTurn(s, difficulty)
+        worst = Math.max(worst, r.ms)
+        worstMs = Math.max(worstMs, r.ms)
+        used[r.plan.weapon] = (used[r.plan.weapon] ?? 0) + 1
+        for (const it of r.plan.items ?? []) used[it] = (used[it] ?? 0) + 1
+        if (r.state.phase === 'guiding') stuck++
+        s = r.state
+      }
+    }
+  }
+  console.log(`v3 IA con arsenal (${games} partidas): ${Object.entries(used).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(', ')}; peor ${worst.toFixed(0)} ms; tiempo medio con el arsenal / con el kit de siempre: ${(fullMs / Math.max(1, baseMs)).toFixed(2)}`)
+  check(stuck === 0, 'IA: nunca se queda en guiding')
+  const newOnes = ['guided', 'bouncer', 'laser', 'acid', 'quake', 'blackhole', 'mine', 'wall'].filter((id) => (used[id] ?? 0) > 0)
+  check(newOnes.length >= 5, `IA: usa las armas nuevas (${newOnes.join(', ')})`)
+  check(fullMs < 3 * baseMs, `IA: el arsenal cuesta ${(fullMs / Math.max(1, baseMs)).toFixed(2)} veces el turno de siempre (tope 3)`)
+}
+{
+  // balance por tamaño con las armas nuevas en la tienda: cada IA entra a la partida con ARSENAL_MONEY y compra
+  // armas (aiShop de la normal, que ahora incluye las 8 nuevas; los ítems se descartan) antes de jugar una ronda.
+  // Mismos topes que el balance de siempre (sección 10). 10 partidas por caso (con --balance, 20).
+  const ARSENAL_MONEY = 1600
+  const games = process.argv.includes('--balance') ? 20 : 10
+  const t0 = performance.now()
+  for (const size of MAP_SIZE_ORDER) {
+    for (const bots of [1, 3]) {
+      const shots: number[] = []
+      const used: Record<string, number> = {}
+      let unfinished = 0
+      let walked = 0
+      // 2 tanques en Mediano y Grande: el doble (de 2 a 28 tiros por partida: con 10 el piso de 8 falla por azar)
+      const n2 = bots === 1 && size !== 'small' ? games * 2 : games
+      for (let g = 1; g <= n2; g++) {
+        let s = createMatch(mk(bots, 'normal', BIOMES[g % 3], 900 + g, 1, 0, size))
+        for (const p of s.players) {
+          p.money = ARSENAL_MONEY
+          aiShop(p, 'normal', s.seed, 1)
+          // solo armas: escudo, reparación y deflector alargan cualquier partida (con o sin armas nuevas) y el
+          // balance de siempre se mide sin ítems
+          for (const id of ITEM_ORDER) p.items[id] = 0
+        }
+        let n = 0
+        while (s.phase === 'aiming' && n < 120) {
+          const r = aiTurn(s, 'normal')
+          if (r.events.some((e) => e.type === 'death' && e.cause === 'abyss') && !r.flights) walked++
+          if (r.flights) {
+            n++
+            used[r.plan.weapon] = (used[r.plan.weapon] ?? 0) + 1
+          }
+          for (const it of r.plan.items ?? []) used[it] = (used[it] ?? 0) + 1
+          s = r.state
+        }
+        if (s.phase === 'aiming') unfinished++
+        shots.push(n)
+      }
+      const avg = shots.reduce((a, b) => a + b, 0) / shots.length
+      console.log(`v3 balance con arsenal ${size} ${bots + 1} tanques: ${avg.toFixed(1)} tiros/partida (min ${Math.min(...shots)}, max ${Math.max(...shots)}, ${shots.length} partidas), uso ${JSON.stringify(used)}`)
+      check(unfinished === 0 && walked === 0, `v3 balance con arsenal ${size}: ${unfinished} sin terminar, ${walked} caminó al abismo`)
+      if (bots === 1) check(avg >= 8 && avg <= (size === 'small' ? 15 : 16), `v3 balance con arsenal ${size} 2 tanques fuera de rango (${avg.toFixed(1)})`)
+      else check(avg <= (size === 'small' ? 27 : 30), `v3 balance con arsenal ${size} 4 tanques: ${avg.toFixed(1)} tiros/partida`)
+    }
+  }
+  console.log(`v3 balance con arsenal: ${((performance.now() - t0) / 1000).toFixed(1)} s`)
 }
 console.log(`IA peor caso: ${worstMs.toFixed(0)} ms`)
 console.log(`${checks - failures}/${checks} chequeos OK`)
