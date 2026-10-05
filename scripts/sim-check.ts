@@ -4128,7 +4128,7 @@ const missShot = (s: GameState) => shoot(s, 'normal', s.players[s.current].x < s
   check(ice.state.players.every((p) => p.y === 300), 'v3 nieve: se hunde en el hielo')
 }
 {
-  // hielo: el que se mueve patina ICE_SLIDE px de más; con el ancla o sobre nieve, no
+  // hielo: el que se mueve patina ICE_SLIDE px de más; sobre nieve, no; con el ancla no se mueve
   const step = (s: GameState) => {
     const r = applyCommand(s, { type: 'move', playerId: 0, dir: 1 })
     return { dx: r.state.players[0].x - s.players[0].x, ice: r.events.some((e) => e.type === 'slide' && e.cause === 'ice'), fuel: s.players[0].fuel - r.state.players[0].fuel }
@@ -4138,7 +4138,8 @@ const missShot = (s: GameState) => shoot(s, 'normal', s.players[s.current].x < s
   const anchored = snowFlat(ICE)
   anchored.players[0].anchored = true
   const b = step(anchored)
-  check(!b.ice && b.dx === 1, `v3 hielo: con el ancla patina (${b.dx} px)`)
+  // el ancla fija el tanque hasta su próximo turno: no camina ni patina (regla de sim-armas)
+  check(!b.ice && b.dx === 0, `v3 hielo: con el ancla se mueve o patina (${b.dx} px)`)
   const c = step(snowFlat(SNOW))
   check(!c.ice && c.dx === 1, `v3 hielo: en la nieve patina (${c.dx} px)`)
   // pasar de hielo a nieve frena enseguida (ICE_OFF_COST por px fuera del hielo)
