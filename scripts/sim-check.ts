@@ -4013,7 +4013,8 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
     }
   }
   console.log(`v3 balance con arsenal: ${((performance.now() - t0) / 1000).toFixed(1)} s`)
-// ---------- 20. v3 sim-mundo: nieve, recompensas y personalidades ----------
+}
+// ---------- 21. v3 sim-mundo: nieve, recompensas y personalidades ----------
 // Mapa de prueba: piso parejo en y 300 con NIEVE_FLAT px del material de arriba (nieve o hielo).
 const NIEVE_FLAT = 12
 function snowFlat(floor: number = SNOW, size: MapSize = 'small', n = 2): GameState {
