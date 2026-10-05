@@ -91,7 +91,7 @@ import { tankTilt } from '../src/sim/tilt'
 import { propSupported, resolveBlast, blastFor, collapseAfterShot } from '../src/sim/physics'
 import { aiStats, lavaRisk } from '../src/sim/ai'
 import { noisySteer, planSteer } from '../src/sim/ai-arsenal'
-import { LAVA_DELAY } from '../src/sim/game'
+import { LAVA_DELAY, START_DRAW, START_SHOTS, initialAmmo } from '../src/sim/game'
 import { skylineOf } from '../src/sim/ballistics'
 import { resolveShot } from '../src/sim/weapons'
 import { collapseStats } from '../src/sim/collapse'
@@ -633,7 +633,8 @@ for (const size of MAP_SIZE_ORDER) {
         check(r.ms < AI_BUDGET_MS, `la IA tardó ${r.ms.toFixed(0)} ms ${tag}`)
         check(!!r.flights && r.flights.length >= 1 && r.flights[0].path.length > 2, `tiro sin trayectoria ${tag}`)
         const impacts = r.events.filter((e) => e.type === 'impact')
-        check(impacts.length >= 1, `el tiro de la IA (${r.plan.weapon}) no explotó ${tag} turno ${turn}`)
+        // el teledirigido de la IA puede salir del mapa (arranca con él si lo sortea)
+        check(impacts.length >= 1 || r.plan.weapon === 'guided', `el tiro de la IA (${r.plan.weapon}) no explotó ${tag} turno ${turn}`)
         s = r.state
       }
     }
@@ -998,7 +999,9 @@ function match(bots: number, seed: number, size: MapSize = 'small'): MatchStats 
         // v2.4: tope 30 en Mediano y Grande (antes 27 en todos). Desde v2.3 (empuje, cornisas) Mediano con 4 mide
         // 25,9-26,2 (10 y 20 partidas): quedaba a menos de un tiro del tope y el error de 20 partidas es ~1,8
         // tiros. Chico sigue en 27 (mide ~17).
-        const cap = size === 'small' ? 27 : 30
+        // Arsenal sorteado (4 armas con 2 tiros): menos balas fuertes de arranque, Mediano y Grande miden ~32 con el
+        // misil base en 28/20; tope 34 (Chico ~23).
+        const cap = size === 'small' ? 27 : 34
         check(avg <= cap, `balance ${size} 4 tanques: ${avg.toFixed(1)} tiros/partida (tope ${cap})`)
       }
     }
@@ -2910,7 +2913,7 @@ function targetOf(s: GameState, ammo?: Partial<Record<WeaponId, number>>): numbe
           worst[key] = Math.max(worst[key] ?? 0, r.ms)
           worstMs = Math.max(worstMs, r.ms)
           check(r.ms < AI_BUDGET_MS, `v5: la IA tardó ${r.ms.toFixed(0)} ms ${tag}`)
-          check(r.events.some((e) => e.type === 'impact'), `v5: el tiro de la IA no explotó ${tag} turno ${turn}`)
+          check(r.events.some((e) => e.type === 'impact') || r.plan.weapon === 'guided', `v5: el tiro de la IA no explotó ${tag} turno ${turn}`)
           s = r.state
         }
       }
@@ -2948,9 +2951,11 @@ function targetOf(s: GameState, ammo?: Partial<Record<WeaponId, number>>): numbe
     // objetivo: ~40 tiros con 8 (el tope de calma corta las rondas largas)
     // v2.2: sin tope de calma (cada daño a otro frena la lava) las partidas de 6 y 8 se alargan
     // máximo de 8 tanques: 70 (con la inclinación del casco una de 20 partidas llegó a 67; la media es lo que importa)
-    check(avg <= (n === 8 ? 50 : 44) && Math.max(...shots) <= (n === 8 ? 70 : 60), `v5: balance ${size} ${n} tanques: ${avg.toFixed(1)} tiros/partida, máximo ${Math.max(...shots)}`)
+    // arsenal sorteado: ~45 con 6 y ~54 con 8 (antes ~36 y ~40); topes 50/62 y máximos 80/85
+    check(avg <= (n === 8 ? 62 : 50) && Math.max(...shots) <= (n === 8 ? 85 : 80), `v5: balance ${size} ${n} tanques: ${avg.toFixed(1)} tiros/partida, máximo ${Math.max(...shots)}`)
     // v2.3: con el sorteo de lugares y de primer turno, ninguna posición gana más del 30% (6 en Mediano)
-    check(Math.max(...ranks) <= games * (n === 6 ? 0.3 : 0.6), `v5: una posición gana demasiado (${ranks.join('/')}) ${size} ${n}`)
+    // con 6 en 60 partidas el azar ya da 19 (0,32) con el arsenal sorteado
+    check(Math.max(...ranks) <= games * (n === 6 ? 0.34 : 0.6), `v5: una posición gana demasiado (${ranks.join('/')}) ${size} ${n}`)
   }
 }
 // ---------- 18. v2.3: abismo que mata, sorteo de lugares y de turno, puentes de Tierra ----------
@@ -3356,8 +3361,10 @@ const countIn = (t: { w: number; front: Uint8Array }, m: number, x0: number, y0:
   cor.wind = 0
   const b = aimAt(cor, CM0 - 4, 300)
   const rc = shoot(cor, 'normal', b.angle, b.power)
-  const crust = countIn(rc.state.terrain, DIRT, CC0, 300, CM0 - 22, 307)
-  check(crust === (CM0 - 22 - CC0 + 1) * 8, `v2.4 derrumbe: la cornisa se cayó (${crust})`)
+  // fuera del cráter (4 px del punto, radio de la normal y 4 de margen)
+  const keep = CM0 - 8 - WEAPONS.normal.radius
+  const crust = countIn(rc.state.terrain, DIRT, CC0, 300, keep, 307)
+  check(crust === (keep - CC0 + 1) * 8, `v2.4 derrumbe: la cornisa se cayó (${crust})`)
   // el puente del abismo cortado en un extremo sigue colgado del otro; cortado en los dos, cae al vacío
   const br = pitMap()
   br.players[1].x = 1200
@@ -3513,6 +3520,31 @@ function shootAt(s: GameState, weapon: WeaponId, x: number, y: number, lo = 5, h
   return { ...shoot(s, weapon, a.angle, a.power), d: a.d }
 }
 check(WEAPON_ORDER.length === 16 && new Set(WEAPON_ORDER).size === 16, 'v3: WEAPON_ORDER tiene las 16 armas')
+{
+  // arsenal inicial: misil base + START_DRAW armas al azar con START_SHOTS tiros; sale de la seed y del casillero
+  const drawn = (a: Record<WeaponId, number>) => WEAPON_ORDER.filter((id) => id !== 'normal' && a[id] > 0)
+  let ok = true
+  let distinct = 0
+  const hits: Record<string, number> = {}
+  for (let seed = 1; seed <= 400; seed++) {
+    const sets = [0, 1, 2, 3].map((i) => initialAmmo(seed, i))
+    for (const a of sets) {
+      const d = drawn(a)
+      if (a.normal !== WEAPONS.normal.ammo || d.length !== START_DRAW || d.some((id) => a[id] !== START_SHOTS)) ok = false
+      for (const id of d) hits[id] = (hits[id] ?? 0) + 1
+    }
+    if (drawn(sets[0]).join() !== drawn(sets[1]).join()) distinct++
+    if (JSON.stringify(sets[2]) !== JSON.stringify(initialAmmo(seed, 2))) ok = false
+  }
+  check(ok, 'arsenal inicial: misil base y 4 armas con 2 tiros, determinista')
+  check(distinct >= 390, `arsenal inicial: cada tanque sortea el suyo (${distinct}/400 distintos)`)
+  const counts = WEAPON_ORDER.filter((id) => id !== 'normal').map((id) => hits[id] ?? 0)
+  check(Math.min(...counts) > 300 && Math.max(...counts) < 560, `arsenal inicial: sorteo parejo (${Math.min(...counts)}–${Math.max(...counts)} de 1600×4/15)`)
+  const m = createMatch(mk(2, 'normal', BIOMES[0], 7))
+  check(m.players.every((p, i) => JSON.stringify(p.ammo) === JSON.stringify(initialAmmo(m.seed, i))), 'arsenal inicial: createMatch lo aplica')
+  const fired = shoot(m, 'normal', 60, 50).state
+  check(fired.players[0].ammo.normal === WEAPONS.normal.ammo, 'misil base: no gasta munición')
+}
 for (const id of WEAPON_ORDER) if (id !== 'normal') check(SHOP.some((e) => e.id === id && e.kind === 'weapon'), `v3 tienda: falta ${id}`)
 for (const id of ITEM_ORDER) check(SHOP.some((e) => e.id === id && e.kind === 'item'), `v3 tienda: falta el ítem ${id}`)
 {
@@ -3907,10 +3939,11 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
   only(sa, 'acid')
   sa.players[1].x = 600
   // búnker de metal sobre P1
-  // paredes y techo de 15 px: más que el radio de la normal (el escudo de metal la frena entera)
-  fillRect(sa.terrain, 571, 250, 629, 264, METAL, 'both')
-  fillRect(sa.terrain, 571, 250, 585, 299, METAL, 'both')
-  fillRect(sa.terrain, 615, 250, 629, 299, METAL, 'both')
+  // paredes y techo más gruesos que el radio de la normal (el escudo de metal la frena entera)
+  const wt = WEAPONS.normal.radius + 1
+  fillRect(sa.terrain, 586 - wt, 265 - wt, 614 + wt, 264, METAL, 'both')
+  fillRect(sa.terrain, 586 - wt, 250, 585, 299, METAL, 'both')
+  fillRect(sa.terrain, 615, 250, 614 + wt, 299, METAL, 'both')
   const pa = chooseShot(sa, 'hard')
   check(pa.weapon === 'acid', `IA: ácido contra el búnker (${pa.weapon})`)
   const sx = pitMap()
@@ -4008,8 +4041,9 @@ function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
       const avg = shots.reduce((a, b) => a + b, 0) / shots.length
       console.log(`v3 balance con arsenal ${size} ${bots + 1} tanques: ${avg.toFixed(1)} tiros/partida (min ${Math.min(...shots)}, max ${Math.max(...shots)}, ${shots.length} partidas), uso ${JSON.stringify(used)}`)
       check(unfinished === 0 && walked === 0, `v3 balance con arsenal ${size}: ${unfinished} sin terminar, ${walked} caminó al abismo`)
-      if (bots === 1) check(avg >= 8 && avg <= (size === 'small' ? 15 : 16), `v3 balance con arsenal ${size} 2 tanques fuera de rango (${avg.toFixed(1)})`)
-      else check(avg <= (size === 'small' ? 27 : 30), `v3 balance con arsenal ${size} 4 tanques: ${avg.toFixed(1)} tiros/partida`)
+      // arsenal sorteado: Mediano mide ~17 con 2 y ~33-35 con 4 (10-20 partidas, ruidosas)
+      if (bots === 1) check(avg >= 8 && avg <= (size === 'small' ? 15 : 19), `v3 balance con arsenal ${size} 2 tanques fuera de rango (${avg.toFixed(1)})`)
+      else check(avg <= (size === 'small' ? 27 : 37), `v3 balance con arsenal ${size} 4 tanques: ${avg.toFixed(1)} tiros/partida`)
     }
   }
   console.log(`v3 balance con arsenal: ${((performance.now() - t0) / 1000).toFixed(1)} s`)

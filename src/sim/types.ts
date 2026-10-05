@@ -235,7 +235,8 @@ export interface WeaponDef {
 }
 
 export const WEAPONS: Record<WeaponId, WeaponDef> = {
-  normal: { id: 'normal', name: 'Normal', radius: 14, damage: 22, terrain: 'destroy', blast: 'fire', ammo: 99 },
+  // misil base: munición infinita (no se gasta). Con el arsenal sorteado lleva más peso: 28/20 (antes 22/14)
+  normal: { id: 'normal', name: 'Normal', radius: 20, damage: 28, terrain: 'destroy', blast: 'fire', ammo: 99 },
   heavy: { id: 'heavy', name: 'Pesada', radius: 26, damage: 36, terrain: 'destroy', blast: 'bigfire', ammo: 2 },
   dirt: { id: 'dirt', name: 'Tierra', radius: 18, damage: 20, terrain: 'build', blast: 'dirt', ammo: 3 },
   cluster: { id: 'cluster', name: 'Racimo', radius: 10, damage: 12, terrain: 'destroy', blast: 'fire', ammo: 2, split: 5 },
@@ -250,7 +251,8 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
   mine: { id: 'mine', name: 'Mina', radius: 18, damage: 35, terrain: 'destroy', blast: 'spark', ammo: 0, mine: true },
   quake: { id: 'quake', name: 'Terremoto', radius: 70, damage: 10, terrain: 'none', blast: 'quake', ammo: 0, quake: 70 },
   blackhole: { id: 'blackhole', name: 'Agujero negro', radius: 12, damage: 8, terrain: 'destroy', blast: 'blackhole', ammo: 0, pull: 80 },
-  acid: { id: 'acid', name: 'Ácido', radius: 18, damage: 16, terrain: 'destroy', blast: 'acid', ammo: 0, acid: 2, hard: true },
+  // ácido: radio por encima del misil base (20) para que contra metal siga conviniendo (antes 18)
+  acid: { id: 'acid', name: 'Ácido', radius: 22, damage: 16, terrain: 'destroy', blast: 'acid', ammo: 0, acid: 2, hard: true },
   wall: { id: 'wall', name: 'Muro', radius: 30, damage: 0, terrain: 'wall', blast: 'wall', ammo: 0 },
 }
 

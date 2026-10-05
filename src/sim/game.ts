@@ -65,9 +65,23 @@ export const CREW_NAMES: Record<CrewId, string> = {
   colonel: 'Coronel',
 }
 
-function initialAmmo(): Record<WeaponId, number> {
+// Arsenal inicial: el misil base (munición infinita) y START_DRAW armas al azar con START_SHOTS tiros cada una.
+// El sorteo sale de la seed y del casillero, así que es distinto para cada tanque y igual en todas las PCs.
+export const START_DRAW = 4
+export const START_SHOTS = 2
+export const ARSENAL_SALT = 0x5bd1e995
+
+export function initialAmmo(seed: number, slot: number): Record<WeaponId, number> {
   const ammo = {} as Record<WeaponId, number>
-  for (const id of Object.keys(WEAPONS) as WeaponId[]) ammo[id] = WEAPON_ORDER.includes(id) ? WEAPONS[id].ammo : 0
+  for (const id of Object.keys(WEAPONS) as WeaponId[]) ammo[id] = 0
+  ammo.normal = WEAPONS.normal.ammo
+  const rng = new Rng(hashSeed(seed ^ ARSENAL_SALT ^ Math.imul(slot + 1, 0x9e3779b1)))
+  const pool = WEAPON_ORDER.filter((id) => id !== 'normal')
+  for (let k = 0; k < START_DRAW; k++) {
+    const j = rng.int(k, pool.length - 1)
+    ;[pool[k], pool[j]] = [pool[j], pool[k]]
+    ammo[pool[k]] = START_SHOTS
+  }
   return ammo
 }
 
@@ -112,7 +126,7 @@ export function createMatch(config: MatchConfig): GameState {
       power: 60,
       fuel: fuelFor(MAP_SIZES[size].w),
       weapon: 'normal',
-      ammo: initialAmmo(),
+      ammo: initialAmmo(seed, i),
       alive: true,
       money: START_MONEY,
       items: emptyItems(),
@@ -508,7 +522,7 @@ function fire(state: GameState, actor: Player): StepResult {
   }
   const next = cloneState(state)
   const shooter = next.players[next.current]
-  shooter.ammo[shooter.weapon] -= 1
+  if (shooter.weapon !== 'normal') shooter.ammo[shooter.weapon] -= 1 // el misil base no se gasta
   shooter.tracer = false
   const weapon = shooter.weapon
   const before = lifeOf(next)
