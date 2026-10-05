@@ -126,7 +126,7 @@ export const MATERIALS: MaterialDef[] = [
   { id: WATER, name: 'agua', toughness: 0, flammable: false, liquid: true },
   { id: LAVA, name: 'lava', toughness: 0, flammable: false, liquid: true },
   // v3 nieve. Los valores finos los balancea sim.
-  { id: SNOW, name: 'nieve', toughness: 1, flammable: false },
+  { id: SNOW, name: 'nieve', toughness: 1.3, flammable: false }, // v3: > 1, se rompe más allá del radio (blanda)
   { id: ICE, name: 'hielo', toughness: 0.8, flammable: false },
 ]
 

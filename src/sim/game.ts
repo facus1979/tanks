@@ -6,6 +6,10 @@ import { SLIDE_MAX, slopeAt, stepTank } from './slide'
 import { afterSteer, land, resolveShot, toFlight } from './weapons'
 import { steerGuided, ticksLeft } from './guided'
 import { MINE_DELAY, mineReactions, settleHazards, tickHazards } from './hazards'
+import { compactSnow, iceSkid } from './snow'
+import { bonusPaid, freshInLava, lavaBonus, maybeDropLoot, resetBonus, shotBonuses, type Before } from './bonus'
+import { personalityFor } from './ai-personality'
+import { placeTargets } from './gen'
 import { Rng, hashSeed, irange } from './rng'
 import { aiShop, buyEntry, sellEntry, shopEntry } from './shop'
 import { cloneTerrain, isSolid, takeDirty } from './terrain'
@@ -92,13 +96,14 @@ export function createMatch(config: MatchConfig): GameState {
   const rounds = Math.max(1, Math.floor(config.rounds || 1))
   const biomeMode = config.biome ?? BIOMES[0]
   const size: MapSize = config.size && MAP_SIZES[config.size] ? config.size : 'small'
+  const colors = slotColors(slots)
   const players: Player[] = slots.map((slot, i) => {
     const crew = slot.crew && CREWS.includes(slot.crew) ? slot.crew : CREWS[i % CREWS.length]
     return {
       id: i,
       name: slot.name?.trim() || CREW_NAMES[crew],
       kind: slot.kind === 'human' ? 'human' : 'ai',
-      color: TANK_COLORS[i % TANK_COLORS.length],
+      color: colors[i],
       crew,
       x: 0,
       y: 0,
@@ -115,6 +120,8 @@ export function createMatch(config: MatchConfig): GameState {
       tracer: false,
       anchored: false,
       deflector: false,
+      // v3: la IA tiene personalidad (la del casillero o sorteada con la seed); el humano no
+      ...(slot.kind === 'human' ? {} : { personality: personalityFor(seed, i, slot.personality) }),
       roundsWon: 0,
       kills: 0,
       ready: false,
@@ -152,8 +159,35 @@ export function createMatch(config: MatchConfig): GameState {
   return state
 }
 
+// v3: color de cada casillero. El pedido (SlotConfig.color, índice en TANK_COLORS) si viene y está libre; si
+// dos casilleros piden el mismo, el segundo toma el siguiente libre. Los que no piden, el de su índice como
+// antes (o el siguiente libre si ya lo tomó un pedido). Sin pedidos da los mismos colores que antes de v3.
+export function slotColors(slots: { color?: number }[]): number[] {
+  const n = TANK_COLORS.length
+  const used = new Set<number>()
+  const idx: number[] = new Array(slots.length).fill(-1)
+  const free = (from: number) => {
+    for (let k = 0; k < n; k++) if (!used.has((from + k) % n)) return (from + k) % n
+    return from % n
+  }
+  slots.forEach((s, i) => {
+    const c = s.color
+    if (c === undefined || !Number.isInteger(c) || c < 0 || c >= n) return
+    idx[i] = free(c)
+    used.add(idx[i])
+  })
+  slots.forEach((_, i) => {
+    if (idx[i] >= 0) return
+    idx[i] = free(i % n)
+    used.add(idx[i])
+  })
+  return idx.map((k) => TANK_COLORS[k])
+}
+
 // v2.3: sal del sorteo de lugares y primer turno (ver setupRound).
 export const ORDER_SALT = 0x2545f491
+// v3: sal del sorteo de los objetivos pagos
+export const TARGET_SALT = 0x7a49e7
 
 // Mapa nuevo, tanques en sus posiciones, vida llena. Muta el estado.
 function setupRound(state: GameState): void {
@@ -164,7 +198,8 @@ function setupRound(state: GameState): void {
   const gen = generate(biome, rng, state.players.length, state.width, state.height, humans)
   state.biome = biome
   state.terrain = gen.terrain
-  state.props = gen.props
+  // v3: objetivos pagos (0-2 según el tamaño), con un rng aparte: el mapa de generate no cambia
+  state.props = placeTargets(gen.terrain, gen.props, gen.spawns, new Rng(hashSeed(roundSeed(state.seed, state.round) ^ TARGET_SALT)), state.size)
   // v2.3: quién nace dónde y quién abre la ronda se sortean con la seed de la ronda (rng aparte: el mapa
   // y el viento no cambian). Antes el jugador 0 nacía siempre en una punta y abría la ronda 1 (con 6 en
   // Mediano a una ronda ganaba ~40%); la ronda r la abría el jugador (r - 1) % jugadores.
@@ -223,7 +258,7 @@ function setupRound(state: GameState): void {
   state.lava = null
   state.hazards = []
   state.guided = null
-  state.bonusFirstBlood = false
+  resetBonus(state)
   state.earnings = Object.fromEntries(state.players.map((p) => [p.id, 0]))
 }
 
@@ -266,6 +301,7 @@ export function applyCommand(state: GameState, command: Command): StepResult {
       const next = shallow(state)
       const p = next.players[i]
       p.kind = command.kind
+      // v3: un humano que pasa a IA juega sin personalidad (neutra), así la ida y vuelta no cambia el estado
       // en la tienda, una IA que entra compra y queda lista para no trabar la ronda
       if (next.phase === 'shop' && p.kind === 'ai' && !p.ready) {
         aiShop(p, next.difficulty, next.seed, next.round)
@@ -452,12 +488,14 @@ function move(state: GameState, dir: -1 | 1): StepResult {
   p.x = step.x
   p.y = step.floor
   p.fuel = Math.max(0, p.fuel - (1 + CLIMB_FUEL * uphill))
+  // v3 nieve: sobre hielo sigue patinando (sin combustible) en el sentido en que iba (ver iceSkid)
+  if (!step.air) iceSkid(next, p, dir, undefined, events, tankFloor)
   // v3: si caminó (o se deslizó) hasta el abismo se cae (la sesión frena antes al que no lo hace a
   // propósito, ver abyssAhead; la IA nunca camina hacia un abismo). v4: al agua, sin daño ni paracaídas.
   settleTank(next, p, events, undefined, undefined, MOVE_FREE_FALL)
   if (mine) afterMoved(next, events, [{ id: actor.id, x: actor.x, y: actor.y }], 0)
   // se mató cayendo: termina el turno como un tiro que dañó a un tanque
-  if (!p.alive) return endTurn(next, events, [], false)
+  if (!p.alive) return endTurn(next, events, [], false, false)
   return { state: next, events }
 }
 // margen para el atajo de move: un paso más un deslizamiento corto
@@ -474,6 +512,7 @@ function fire(state: GameState, actor: Player): StepResult {
   shooter.tracer = false
   const weapon = shooter.weapon
   const before = lifeOf(next)
+  const wasInLava = inLavaNow(next)
   const out = resolveShot(next, shooter, weapon, { pause: true })
   if (out.guided) {
     // v3: el teledirigido llegó al apogeo: se guía con 'steer' (phase 'guiding') hasta que choca o se acaba
@@ -482,7 +521,7 @@ function fire(state: GameState, actor: Player): StepResult {
     out.events.push({ type: 'guide', guided: { ...out.guided } })
     return { state: next, events: out.events, flights: out.flights }
   }
-  return finishShot(next, shooter, weapon, before, out.flights, out.events)
+  return finishShot(next, shooter, weapon, before, wasInLava, out.flights, out.events)
 }
 
 // v3: correcciones del teledirigido. Solo el dueño y solo en 'guiding'; cada valor de dirs es un tick (lo que no
@@ -507,14 +546,20 @@ function steer(state: GameState, playerId: number, raw: unknown): StepResult {
   next.phase = 'aiming'
   const shooter = next.players[next.current]
   const before = lifeOf(next)
+  const wasInLava = inLavaNow(next)
   const flights: Flight[] = []
   const events: GameEvent[] = []
   const f = afterSteer(next, g, r, flights, events)
   const out = land(next, shooter, 'guided', f, flights, events)
-  return finishShot(next, shooter, 'guided', before, out.flights, out.events)
+  return finishShot(next, shooter, 'guided', before, wasInLava, out.flights, out.events)
 }
 
-function lifeOf(state: GameState): { hp: number; alive: boolean; x: number; y: number }[] {
+// v3: quién estaba ya en la lava antes del tiro (el bono de lava paga meter a un rival, no que ya estuviera)
+function inLavaNow(state: GameState): boolean[] {
+  return state.players.map((p) => inLava(state.terrain, p) || (state.lava !== null && p.y > state.lava))
+}
+
+function lifeOf(state: GameState): Before[] {
   return state.players.map((p) => ({ hp: p.hp + p.shield, alive: p.alive, x: p.x, y: p.y }))
 }
 
@@ -524,7 +569,8 @@ function finishShot(
   next: GameState,
   shooter: Player,
   weapon: WeaponId,
-  before: { hp: number; alive: boolean; x: number; y: number }[],
+  before: Before[],
+  wasInLava: boolean[],
   flights: Flight[],
   events: GameEvent[],
 ): StepResult {
@@ -563,11 +609,14 @@ function finishShot(
     }
   }
   next.earnings[shooter.id] = (next.earnings[shooter.id] ?? 0) + earned
+  // v3: recompensas del tiro (plata al momento) y los rivales que el tiro metió en la lava
+  shotBonuses(next, shooter.id, before, events, flights)
+  const fresh = freshInLava(next, shooter.id, before, wasInLava)
   if (shooter.ammo[weapon] <= 0) {
     const fallback = WEAPON_ORDER.find((id) => shooter.ammo[id] > 0)
     if (fallback) shooter.weapon = fallback
   }
-  return { ...endTurn(next, events, flights, damaged), flights }
+  return { ...endTurn(next, events, flights, damaged, true, fresh.size > 0 ? { shooterId: shooter.id, fresh } : undefined), flights }
 }
 
 // ---------- líquidos (v4) ----------
@@ -643,6 +692,8 @@ export function abyssAhead(state: GameState, dir: -1 | 1, steps = 1): boolean {
 
 // Segundos entre el último impacto del tiro y la subida de la lava (el playback la muestra después).
 export const LAVA_DELAY = 0.4
+// v3: segundos entre la lava y la caja de botín que cae al empezar el turno siguiente
+export const LOOT_DELAY = 0.3
 
 // La muerte súbita está activa: la lava sube en cada turno, hasta que un tanque le pegue a otro (v2.2).
 export function suddenDeath(state: GameState): boolean {
@@ -659,7 +710,10 @@ export function suddenDeath(state: GameState): boolean {
 //    impacto (o del fin del vuelo).
 // 3. advance: fin de ronda si queda uno o ninguno (todos quemados → empate), si no pasa el turno.
 // La lava no da ni quita plata: el daño no es de nadie y una muerte por lava no cuenta como kill.
-function endTurn(state: GameState, events: GameEvent[], flights: Flight[], damaged: boolean): StepResult {
+// v3: own = la grilla del estado es propia (fire la clonó; move la comparte con el estado anterior).
+// lava: rivales que el tiro metió en la lava; si la lava los mata al cerrar el turno, el que tiró cobra el bono.
+// Después de la lava: la nieve se compacta bajo los tanques y, si toca, cae una caja de botín.
+function endTurn(state: GameState, events: GameEvent[], flights: Flight[], damaged: boolean, own = true, lava?: { shooterId: number; fresh: Set<number> }): StepResult {
   const leftBefore = Math.max(0, SUDDEN_DEATH_CALM - state.calm)
   state.calm = damaged ? 0 : Math.min(SUDDEN_DEATH_CALM, state.calm + 1)
   const left = Math.max(0, SUDDEN_DEATH_CALM - state.calm)
@@ -667,7 +721,9 @@ function endTurn(state: GameState, events: GameEvent[], flights: Flight[], damag
   if (state.players.filter((p) => p.alive).length > 1) {
     const t = shotEnd(events, flights) + LAVA_DELAY
     if (suddenDeath(state)) riseLava(state, events)
+    const mark = events.length
     burnInLava(state, events, t)
+    if (lava) lavaBonus(state, lava.shooterId, lava.fresh, events, mark)
     // v3: peligros (ácido al que empieza, minas vencidas)
     if (state.hazards.length > 0 && tickHazards(state, events, t, nextAlive(state)) > 0) {
       mineReactions(state, events, 0, () => false, t + MINE_DELAY)
@@ -675,6 +731,8 @@ function endTurn(state: GameState, events: GameEvent[], flights: Flight[], damag
       settleLiquids(state, events, flights)
       settleHazards(state, events, shotEnd(events, flights))
     }
+    if (state.biome === 'snow') compactSnow(state, events, t, own)
+    if (state.players.filter((p) => p.alive).length > 1) maybeDropLoot(state, events, t + LOOT_DELAY)
   }
   return advance(state, events)
 }
@@ -776,14 +834,16 @@ function endRound(state: GameState, events: GameEvent[], winnerId: number | null
   state.roundWinnerId = winnerId
   const earnings: Record<number, number> = {}
   for (const p of state.players) {
-    let e = state.earnings[p.id] ?? 0
+    // v3: los bonos ya están en p.money (se cobraron al momento): acá va el resto
+    const paid = bonusPaid(state, p.id)
+    let e = (state.earnings[p.id] ?? 0) - paid
     if (p.alive) e += EARN.survive
     if (p.id === winnerId) {
       e += EARN.roundWin
       p.roundsWon += 1
     }
     const money = Math.max(0, p.money + Math.round(e))
-    earnings[p.id] = money - p.money
+    earnings[p.id] = money - p.money + paid
     p.money = money
   }
   state.earnings = earnings

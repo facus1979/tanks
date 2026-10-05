@@ -8,6 +8,7 @@
 import { columnGround, isSolid } from './terrain'
 import { MAX_CLIMB, SLIDE_SLOPE, TANK_H, TANK_HALF_W, TANK_W, type GameEvent, type GameState, type Player, type Vec2 } from './types'
 import { PATH_DT } from './ballistics'
+import { iceSkid } from './snow'
 
 // Pixels por punto del path (cada PATH_DT = 1/60 s): el empuje va a 120 px/s y el deslizamiento a 60 px/s.
 export const BLAST_STEP = 2
@@ -150,7 +151,8 @@ export function knock(
   const path = travel(state, p, dir, dist, BLAST_STEP, tankFloorFn, false)
   if (!path) return t
   events.push({ type: 'slide', playerId: p.id, cause, path, t })
-  return t + (path.length - 1) * PATH_DT
+  // v3 nieve: si el empujón lo dejó sobre hielo, sigue patinando (ver iceSkid en snow.ts)
+  return iceSkid(state, p, dir, t + (path.length - 1) * PATH_DT, events, tankFloorFn) ?? t
 }
 
 // Deslizamiento: si el piso del tanque es más empinado que SLIDE_SLOPE, baja hasta quedar estable
