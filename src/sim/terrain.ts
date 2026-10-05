@@ -1,5 +1,5 @@
 import { hash2 } from './rng'
-import { AIR, BEDROCK, DIRT, LAVA, MATERIALS, STONE, WATER, WORLD_H, WORLD_W, type Material, type Terrain } from './types'
+import { AIR, BEDROCK, DIRT, LAVA, MATERIALS, SNOW, STONE, WATER, WORLD_H, WORLD_W, type Material, type Terrain } from './types'
 
 // v4: tablas por material. SOLID[m] = 1 si colisiona (todo menos el aire y los líquidos); LIQUID[m] = 1
 // para agua y lava. Tablas en vez de consultar MATERIALS en cada pixel: isSolid es lo más llamado.
@@ -9,6 +9,10 @@ for (let m = 1; m < 256; m++) {
   if (MATERIALS[m]?.liquid) LIQUID[m] = 1
   else SOLID[m] = 1
 }
+
+// v3: la dureza más alta (la nieve, > 1): hasta dónde puede llegar una explosión que rompe.
+const SNOW_TOUGH = MATERIALS[SNOW]?.toughness ?? 1
+const MAX_TOUGH = Math.max(1, SNOW_TOUGH)
 
 export function createTerrain(w = WORLD_W, h = WORLD_H): Terrain {
   return { w, h, front: new Uint8Array(w * h), back: new Uint8Array(w * h) }
@@ -182,16 +186,41 @@ export type Debris = Partial<Record<Material, number>>
 // después la reparte; si no hay lugar se pierde). Marca el rectángulo como sucio para el flujo.
 // Pulido v2: stoneFrom (build): desde esa fila hacia abajo la tierra cae sobre la lava de muerte súbita
 // (GameState.lava) y queda piedra, igual que sobre la lava de la grilla.
-export function deform(terrain: Terrain, cx: number, cy: number, radius: number, mode: 'destroy' | 'build' | 'dig', stoneFrom = Infinity): Debris {
+// v3: hard (ácido): destroy rompe todo (piedra y metal incluidos) en el radio entero, salvo la roca madre.
+export function deform(terrain: Terrain, cx: number, cy: number, radius: number, mode: 'destroy' | 'build' | 'dig', stoneFrom = Infinity, hard = false): Debris {
   const debris: Debris = {}
   const { w, h, front, back } = terrain
+  // v3: la nieve (toughness > 1) se rompe más allá del radio: el recorrido llega hasta radius · MAX_TOUGH.
+  // Lo sucio se marca con el rectángulo de siempre y, solo si se rompió algo afuera, con el grande (así en
+  // los mapas sin nieve no cambia nada).
   const r = Math.ceil(radius) + 2
+  const rr = mode === 'destroy' ? Math.ceil(radius * MAX_TOUGH) + 2 : r
   const x0 = Math.max(0, Math.floor(cx - r))
   const x1 = Math.min(w - 1, Math.ceil(cx + r))
   const y0 = Math.max(0, Math.floor(cy - r))
   const y1 = Math.min(h - 1, Math.ceil(cy + r))
   if (x0 > x1 || y0 > y1) return debris
   markDirty(terrain, x0 - 1, y0 - 1, x1 + 1, y1 + 1)
+  if (rr > r) {
+    const ox0 = Math.max(0, Math.floor(cx - rr))
+    const ox1 = Math.min(w - 1, Math.ceil(cx + rr))
+    const oy0 = Math.max(0, Math.floor(cy - rr))
+    const oy1 = Math.min(h - 1, Math.ceil(cy + rr))
+    let outside = false
+    for (let y = oy0; y <= oy1; y++) {
+      for (let x = ox0; x <= ox1; x++) {
+        if (x >= x0 && x <= x1 && y >= y0 && y <= y1) continue
+        const i = y * w + x
+        if (front[i] !== SNOW) continue
+        const d = Math.hypot(x + 0.5 - cx, y + 0.5 - cy) + (hash2(x, y, 91) - 0.5) * 1.6
+        if (d > radius * SNOW_TOUGH) continue
+        front[i] = AIR
+        debris[SNOW] = (debris[SNOW] ?? 0) + 1
+        outside = true
+      }
+    }
+    if (outside) markDirty(terrain, ox0 - 1, oy0 - 1, ox1 + 1, oy1 + 1)
+  }
   let displaced: number[] | null = null // build: índice de cada celda de agua tapada
   for (let y = y0; y <= y1; y++) {
     for (let x = x0; x <= x1; x++) {
@@ -216,7 +245,7 @@ export function deform(terrain: Terrain, cx: number, cy: number, radius: number,
       }
       if (m === AIR || LIQUID[m]) continue
       // dig: la excavadora atraviesa todo salvo la roca madre
-      const tough = mode === 'dig' ? (m === BEDROCK ? 0 : 1) : (MATERIALS[m]?.toughness ?? 1)
+      const tough = mode === 'dig' || hard ? (m === BEDROCK ? 0 : 1) : (MATERIALS[m]?.toughness ?? 1)
       if (tough <= 0 || d > radius * tough) continue
       front[i] = AIR
       debris[m] = (debris[m] ?? 0) + 1

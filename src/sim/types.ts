@@ -126,7 +126,7 @@ export const MATERIALS: MaterialDef[] = [
   { id: WATER, name: 'agua', toughness: 0, flammable: false, liquid: true },
   { id: LAVA, name: 'lava', toughness: 0, flammable: false, liquid: true },
   // v3 nieve. Los valores finos los balancea sim.
-  { id: SNOW, name: 'nieve', toughness: 1, flammable: false },
+  { id: SNOW, name: 'nieve', toughness: 1.3, flammable: false }, // v3: > 1, se rompe más allá del radio (blanda)
   { id: ICE, name: 'hielo', toughness: 0.8, flammable: false },
 ]
 
@@ -360,11 +360,24 @@ export const SHOP: ShopEntry[] = [
   { id: 'digger', kind: 'weapon', name: 'Excavadora', price: 150, qty: 2, max: 9 },
   { id: 'roller', kind: 'weapon', name: 'Rodadora', price: 220, qty: 2, max: 9 },
   { id: 'nuke', kind: 'weapon', name: 'Nuke', price: 900, qty: 1, max: 2 },
+  // v3 (sim-armas): precios por unidad entre la rodadora (110) y la nuke; las que más rinden, con tope bajo
+  { id: 'guided', kind: 'weapon', name: 'Teledirigido', price: 380, qty: 2, max: 6 },
+  { id: 'bouncer', kind: 'weapon', name: 'Rebotadora', price: 240, qty: 2, max: 9 },
+  { id: 'laser', kind: 'weapon', name: 'Láser', price: 260, qty: 2, max: 6 },
+  { id: 'mine', kind: 'weapon', name: 'Mina', price: 200, qty: 2, max: 6 },
+  { id: 'quake', kind: 'weapon', name: 'Terremoto', price: 320, qty: 1, max: 3 },
+  { id: 'blackhole', kind: 'weapon', name: 'Agujero negro', price: 360, qty: 1, max: 3 },
+  { id: 'acid', kind: 'weapon', name: 'Ácido', price: 260, qty: 2, max: 6 },
+  { id: 'wall', kind: 'weapon', name: 'Muro', price: 120, qty: 2, max: 6 },
   { id: 'shield', kind: 'item', name: 'Escudo', price: 350, qty: 1, max: 3 },
   { id: 'parachute', kind: 'item', name: 'Paracaídas', price: 120, qty: 1, max: 3 },
   { id: 'fuel', kind: 'item', name: 'Combustible', price: 80, qty: 1, max: 5 },
   { id: 'repair', kind: 'item', name: 'Reparación', price: 250, qty: 1, max: 3 },
   { id: 'tracer', kind: 'item', name: 'Trazador', price: 150, qty: 1, max: 5 },
+  { id: 'jetpack', kind: 'item', name: 'Jetpack', price: 200, qty: 1, max: 3 },
+  { id: 'teleport', kind: 'item', name: 'Teletransporte', price: 300, qty: 1, max: 2 },
+  { id: 'anchor', kind: 'item', name: 'Ancla', price: 120, qty: 1, max: 3 },
+  { id: 'deflector', kind: 'item', name: 'Deflector', price: 280, qty: 1, max: 3 },
 ]
 
 // Plata que se gana en la ronda. La reparte sim al cerrar la ronda.

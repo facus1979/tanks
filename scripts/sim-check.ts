@@ -28,6 +28,12 @@ import {
   MAX_PLAYERS,
   MAX_PLAYERS_BY_SIZE,
   TANK_COLORS,
+  SNOW,
+  ICE,
+  BONUS,
+  ICE_SLIDE,
+  PERSONALITIES,
+  PROP_SIZE,
   physicsFor,
   applyCommand,
   chooseShot,
@@ -54,6 +60,7 @@ import {
   biomeFor,
   owned,
   roundSeed,
+  aiShop,
   abyssAhead,
   materialAt,
   ABYSS_DROP,
@@ -63,6 +70,9 @@ import {
   PARACHUTE_MIN_DAMAGE,
   PATH_DT,
   fuelFor,
+  JETPACK_RANGE,
+  STEER_RATE,
+  STEER_TICK,
   type Biome,
   type Command,
   type Difficulty,
@@ -80,17 +90,20 @@ import {
 import { tankTilt } from '../src/sim/tilt'
 import { propSupported, resolveBlast, blastFor, collapseAfterShot } from '../src/sim/physics'
 import { aiStats, lavaRisk } from '../src/sim/ai'
+import { noisySteer, planSteer } from '../src/sim/ai-arsenal'
 import { LAVA_DELAY } from '../src/sim/game'
 import { skylineOf } from '../src/sim/ballistics'
 import { resolveShot } from '../src/sim/weapons'
 import { collapseStats } from '../src/sim/collapse'
-import { generate, humanSafe, padBounds, SPAWN_PIT_GAP, SPAWN_GAP_CROWD, spawnStats, CORNICE_CRUST, CORNICE_LEN, CORNICE_SPAWN_FLAT, CORNICE_SPILL, type Generated } from '../src/sim/gen'
+import { ICE_CRUST, generate, humanSafe, padBounds, SPAWN_PIT_GAP, SPAWN_GAP_CROWD, spawnStats, CORNICE_CRUST, CORNICE_LEN, CORNICE_SPAWN_FLAT, CORNICE_SPILL, type Generated } from '../src/sim/gen'
 import { Rng } from '../src/sim/rng'
-import { cloneTerrain, columnGround, createTerrain, deform, fillRect, hasLiquid } from '../src/sim/terrain'
+import { cloneTerrain, columnGround, columnTop, createTerrain, deform, fillRect, hasLiquid } from '../src/sim/terrain'
 import { applyPatch, flowLiquids, liquidVolume } from '../src/sim/flow'
 import { flowStats } from '../src/sim/game'
 import { inLava, inWater } from '../src/sim/physics'
 import { slopeAt } from '../src/sim/slide'
+import { SNOW_SINK, iceRisk, snowSinkAt } from '../src/sim/snow'
+import { bonusStats } from '../src/sim/bonus'
 
 function mk(bots: number, difficulty: Difficulty, biome: MatchConfig['biome'], seed: number, rounds = 1, humans = 0, size?: MapSize): MatchConfig {
   const slots: SlotConfig[] = []
@@ -137,7 +150,9 @@ function aiTurn(state: GameState, difficulty: Difficulty): StepResult & { ms: nu
   const ms = performance.now() - t0
   const pre: GameEvent[] = []
   for (const item of plan.items ?? []) {
-    const r = applyCommand(state, { type: 'useItem', playerId: p.id, item })
+    // v3: jetpack y teletransporte con su destino
+    const target = item === 'jetpack' || item === 'teleport' ? plan.itemTarget : undefined
+    const r = applyCommand(state, { type: 'useItem', playerId: p.id, item, target })
     pre.push(...r.events)
     state = r.state
   }
@@ -150,7 +165,34 @@ function aiTurn(state: GameState, difficulty: Difficulty): StepResult & { ms: nu
   state = applyCommand(state, { type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }).state
   state = applyCommand(state, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }).state
   const r = applyCommand(state, { type: 'fire', playerId: p.id })
+  // v3: teledirigido: las correcciones del plan (en tandas de 2 ticks, como la red), ceros si se acaban
+  if (r.state.phase === 'guiding') {
+    const ev = [...pre, ...r.events]
+    const flights = [...(r.flights ?? [])]
+    let st = r.state
+    const steer = plan.steer ?? []
+    for (let i = 0; i < 60 && st.phase === 'guiding'; i += 2) {
+      const dirs = [steer[i] ?? 0, steer[i + 1] ?? 0]
+      const rr = applyCommand(st, { type: 'steer', playerId: p.id, dirs })
+      ev.push(...rr.events)
+      flights.push(...(rr.flights ?? []))
+      st = rr.state
+    }
+    return { state: st, events: ev, flights, ms, plan }
+  }
   return { ...r, events: [...pre, ...r.events], ms, plan }
+}
+
+// v3: las correcciones del teledirigido de un plan, en tandas de 2 ticks (como las manda la red); vacío si no es
+// teledirigido. Las tandas que sobran después de que el misil cayó no hacen nada.
+function steerChunks(plan: ShotPlan): (-1 | 0 | 1)[][] {
+  if (plan.weapon !== 'guided') return []
+  const out: (-1 | 0 | 1)[][] = []
+  for (let i = 0; i < 30; i += 2) out.push([plan.steer?.[i] ?? 0, plan.steer?.[i + 1] ?? 0])
+  return out
+}
+function targetOf2(plan: ShotPlan, item: ItemId) {
+  return item === 'jetpack' || item === 'teleport' ? plan.itemTarget : undefined
 }
 
 function playTurns(s: GameState, turns: number, difficulty: Difficulty = 'normal'): { state: GameState; events: GameEvent[] } {
@@ -313,7 +355,7 @@ function tramoChecks(g: Generated, biome: Biome, size: MapSize, seed: number): v
     let deepest = 0
     let dry = true
     for (let x = q.x0; x < q.x1; x++) {
-      const y = columnGround(t, x)
+      const y = lakeBed(t, x) // v3: debajo del hielo de un lago congelado
       deepest = Math.max(deepest, y - q.level)
       if (y <= q.level) dry = false
     }
@@ -389,7 +431,9 @@ function tankChecks(s: GameState, tag: string): void {
       for (let x = p.x - TANK_HALF_W - 4; x < p.x + TANK_HALF_W + 4; x++) {
         const i = y * W + x
         const body = y >= p.y - TANK_H && x >= p.x - TANK_HALF_W && x < p.x + TANK_HALF_W
-        if (body ? t.front[i] !== AIR || t.back[i] !== AIR : STRUCTURE.has(t.front[i]) || STRUCTURE.has(t.back[i])) inside++
+        // v3 nieve: el tanque nace hundido SNOW_SINK px en la nieve: en esas filas la pared de fondo es nieve
+        const trench = y >= p.y - SNOW_SINK && t.back[i] === SNOW
+        if (body ? t.front[i] !== AIR || (t.back[i] !== AIR && !trench) : STRUCTURE.has(t.front[i]) || STRUCTURE.has(t.back[i])) inside++
       }
     }
     check(inside === 0, `tanque ${p.id} dentro de una estructura (${inside} px) ${tag}`)
@@ -414,8 +458,16 @@ function tankChecks(s: GameState, tag: string): void {
 
 // ---------- 2. generación válida ----------
 const STRUCTURE = new Set([BRICK, WOOD, SLAT, BEAM, POST, METAL])
+// v3: hash de los mapas de Chico de nieve (30 seeds × 1-4 jugadores), fijo desde que se armó el bioma
+const CHICO_SNOW_HASH = '5d272a31'
+// v3: el lecho de una cuenca: el primer sólido debajo del hielo de un lago congelado
+function lakeBed(t: { w: number; h: number; front: Uint8Array }, x: number): number {
+  let y = columnGround(t as never, x)
+  while (y < t.h && t.front[y * t.w + x] === ICE) y++
+  return y < t.h && t.front[y * t.w + x] === WATER ? columnGround(t as never, x, y) : y
+}
 // v3: snow sin firma propia hasta que el área sim arme el bioma (hoy usa el generador del bosque)
-const signature: Record<Biome, number[]> = { forest: [STONE, BRICK, SLAT], jungle: [STONE, SLAT], industrial: [BRICK, METAL], snow: [] }
+const signature: Record<Biome, number[]> = { forest: [STONE, BRICK, SLAT], jungle: [STONE, SLAT], industrial: [BRICK, METAL], snow: [SNOW, ICE, WOOD, METAL] }
 // Chico con 20 seeds (los mapas de v1); Mediano y Grande con 10.
 const GEN_SEEDS: Record<MapSize, number> = { small: 20, medium: 10, large: 10 }
 for (const size of MAP_SIZE_ORDER) for (const biome of BIOMES) {
@@ -446,7 +498,8 @@ for (const size of MAP_SIZE_ORDER) for (const biome of BIOMES) {
         liquidChecks(g, `${size}/${biome}/seed ${seed}`)
       }
       // v4: Chico sin líquidos; ningún tanque nace con líquido en la caja
-      if (size === 'small') check(count(s, WATER) + count(s, LAVA) === 0, `líquido en Chico ${tag}`)
+      // v3: la nieve sí (el lago congelado de Chico)
+      if (size === 'small' && biome !== 'snow') check(count(s, WATER) + count(s, LAVA) === 0, `líquido en Chico ${tag}`)
       for (const p of s.players) check(!hasLiquid(t, WATER, p.x - TANK_HALF_W, p.y - TANK_H, p.x + TANK_HALF_W, p.y + 1) && !hasLiquid(t, LAVA, p.x - TANK_HALF_W, p.y - TANK_H, p.x + TANK_HALF_W, p.y + 1), `tanque nace en un líquido ${tag} p${p.id}`)
       // spawns repartidos: ninguno a menos de un sexto del espacio parejo de otro
       if (size !== 'small') {
@@ -497,8 +550,10 @@ for (const size of MAP_SIZE_ORDER) {
   }
   // Chico no cambia: los mapas de 1 a 4 jugadores, byte a byte iguales a los de v1-v4 (hash de grillas,
   // utilería y spawns de 30 seeds × 3 biomas × 1-4 jugadores, tomado antes de v5)
+  // v3: la nieve va con su propio hash (abajo): los otros tres biomas tienen que dar el de siempre
+  const chicoHash = (biomes: Biome[]) => {
   let all = 0x811c9dc5
-  for (const biome of BIOMES) {
+  for (const biome of biomes) {
     for (let seed = 1; seed <= 30; seed++) {
       for (let c = 1; c <= 4; c++) {
         const g = generate(biome, new Rng(roundSeed(seed, 1)), c)
@@ -515,7 +570,13 @@ for (const size of MAP_SIZE_ORDER) {
       }
     }
   }
-  check(all.toString(16) === '1a082a97', `v5: los mapas de Chico cambiaron (hash ${all.toString(16)}, esperaba 1a082a97)`)
+  return all.toString(16)
+  }
+  const old = chicoHash(['forest', 'jungle', 'industrial'])
+  check(old === '1a082a97', `v5: los mapas de Chico cambiaron (hash ${old}, esperaba 1a082a97)`)
+  const snowHash = chicoHash(['snow'])
+  console.log(`v3 Chico nieve: hash ${snowHash}`)
+  check(snowHash === CHICO_SNOW_HASH, `v3: los mapas de Chico de nieve cambiaron (hash ${snowHash}, esperaba ${CHICO_SNOW_HASH})`)
 
   // spawns con 6 en Mediano y 8 en Grande: válidos, repartidos a lo ancho y a SPAWN_GAP_CROWD o más
   // (más que el alcance de cualquier arma al arrancar: ningún tiro llega a dos tanques a la vez)
@@ -752,7 +813,6 @@ function shoot(s: GameState, weapon: WeaponId, angle: number, power: number): St
   return applyCommand(s, { type: 'fire', playerId: s.players[s.current].id })
 }
 const impactsOf = (r: StepResult) => r.events.filter((e): e is Extract<GameEvent, { type: 'impact' }> => e.type === 'impact')
-check(WEAPON_ORDER.length === 8, 'WEAPON_ORDER tiene las 8 armas')
 {
   const r = shoot(flat(), 'cluster', 60, 70)
   const n = WEAPONS.cluster.split ?? 0
@@ -1063,7 +1123,7 @@ function playMatch(config: MatchConfig, maxShots = 150): MatchRun {
 {
   // rotate y random
   const biomes = [1, 2, 3, 4].map((r) => biomeFor('rotate', 9, r))
-  check(biomes.join() === 'forest,jungle,industrial,forest', `rotate: ${biomes.join()}`)
+  check(biomes.join() === 'forest,jungle,industrial,snow', `rotate: ${biomes.join()}`)
   check(biomeFor('random', 9, 2) === biomeFor('random', 9, 2), 'random determinista')
   check(new Set([1, 2, 3, 4, 5, 6, 7, 8].map((r) => biomeFor('random', 9, r))).size > 1, 'random varía por ronda')
   check(biomeFor('industrial', 9, 3) === 'industrial', 'bioma fijo')
@@ -1291,12 +1351,14 @@ function toRoundover(): GameState {
       if (a.phase === 'aiming') {
         const p = a.players[a.current]
         const plan = chooseShot(a, config.difficulty)
-        for (const item of plan.items ?? []) send({ type: 'useItem', playerId: p.id, item })
+        for (const item of plan.items ?? []) send({ type: 'useItem', playerId: p.id, item, target: targetOf2(plan, item) })
         for (let i = 0; i < Math.abs(plan.move ?? 0); i++) send({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
         if (a.current !== p.id || a.phase !== 'aiming') continue
         send({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon })
         send({ type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power })
         send({ type: 'fire', playerId: p.id })
+      for (const dirs of steerChunks(plan)) send({ type: 'steer', playerId: p.id, dirs })
+        for (const dirs of steerChunks(plan)) send({ type: 'steer', playerId: p.id, dirs })
       } else if (a.phase === 'roundover') send({ type: 'nextRound' })
       else if (a.phase === 'shop') {
         for (const p of a.players) {
@@ -1725,7 +1787,8 @@ type DeathEv = Extract<GameEvent, { type: 'death' }>
     const hit = found.events.filter((e): e is DamageEv => e.type === 'damage' && e.playerId === 1).reduce((a, e) => a + e.amount, 0)
     check(s.players[0].kills === 1, `abismo: el que lo tiró suma kill (${s.players[0].kills})`)
     check(s.phase === 'roundover' && s.roundWinnerId === 0, 'abismo: la ronda termina con el ganador')
-    const expect = EARN.kill + hit * EARN.perDamage + EARN.survive + EARN.roundWin
+    // v3: más los bonos de abismo y de primera sangre
+    const expect = EARN.kill + hit * EARN.perDamage + EARN.survive + EARN.roundWin + BONUS.abyss + BONUS.firstblood
     check(s.earnings[0] === expect, `abismo: plata del que lo tiró ${s.earnings[0]} (esperaba ${expect})`)
     check(s.earnings[1] === 0, `abismo: el que cayó no cobra (${s.earnings[1]})`)
   }
@@ -1865,9 +1928,9 @@ type DeathEv = Extract<GameEvent, { type: 'death' }>
       const p = a.players[a.current]
       const plan = chooseShot(a, 'normal')
       const cmds: Command[] = []
-      for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item })
+      for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item, target: targetOf2(plan, item) })
       for (let i = 0; i < Math.abs(plan.move ?? 0); i++) cmds.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
-      cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+      cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id }, ...steerChunks(plan).map((dirs): Command => ({ type: 'steer', playerId: p.id, dirs })))
       for (const cmd of cmds) {
         a = applyCommand(a, cmd).state
         b = applyCommand(b, cmd).state
@@ -2275,7 +2338,7 @@ function breakWall(m: number): { before: GameState; r: StepResult } {
       const plan = chooseShot(a, 'normal')
       const cmds: Command[] = []
       for (let i = 0; i < Math.abs(plan.move ?? 0); i++) cmds.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
-      cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+      cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id }, ...steerChunks(plan).map((dirs): Command => ({ type: 'steer', playerId: p.id, dirs })))
       for (const cmd of cmds) {
         a = applyCommand(a, cmd).state
         b = applyCommand(b, cmd).state
@@ -2429,7 +2492,7 @@ function pushAt(weapon: WeaponId, x: number, y = 270, prep?: (s: GameState) => v
           if (r.state === m || r.state.current !== p.id) break
           rampSteps++
           // v2.3: al borde de un abismo el tanque se puede volcar (vuelco al abismo): eso no es la rampa
-          rampSlides += slidesOf(r.events).filter((e) => !r.state.terrain.pits?.some((v, x) => v === 1 && Math.abs(x - e.path[0].x) <= TANK_W)).length
+          rampSlides += slidesOf(r.events).filter((e) => e.cause !== 'ice' && !r.state.terrain.pits?.some((v, x) => v === 1 && Math.abs(x - e.path[0].x) <= TANK_W)).length
           m = r.state
         }
       }
@@ -2700,6 +2763,7 @@ function crowdMap(xs: number[], hp: number[] = []): GameState {
     p.y = 300
     p.hp = hp[i] ?? 100
     for (const id of WEAPON_ORDER) p.ammo[id] = WEAPONS[id].ammo
+    p.personality = undefined // v3: la IA neutra (las personalidades tienen su propia prueba)
   })
   s.current = 0
   s.wind = 0
@@ -2812,12 +2876,13 @@ function targetOf(s: GameState, ammo?: Partial<Record<WeaponId, number>>): numbe
       if (a.round === 2 && opener < 0) opener = a.current
       const p = a.players[a.current]
       const plan = chooseShot(a, 'normal')
-      for (const item of plan.items ?? []) send({ type: 'useItem', playerId: p.id, item })
+      for (const item of plan.items ?? []) send({ type: 'useItem', playerId: p.id, item, target: targetOf2(plan, item) })
       for (let i = 0; i < Math.abs(plan.move ?? 0); i++) send({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
       if (a.current !== p.id || a.phase !== 'aiming') continue
       send({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon })
       send({ type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power })
       send({ type: 'fire', playerId: p.id })
+      for (const dirs of steerChunks(plan)) send({ type: 'steer', playerId: p.id, dirs })
       if (!snap && steps > 60) {
         snap = true
         b = decodeState(encodeState(b))
@@ -3077,6 +3142,7 @@ const abyssDeath = (ev: GameEvent[], id: number) => ev.some((e) => e.type === 'd
     for (const id of WEAPON_ORDER) s.players[0].ammo[id] = 0
     s.players[0].ammo.normal = 99
     s.players[0].ammo.dirt = 9
+    for (const p of s.players) p.personality = undefined // v3: IA neutra
     s.current = 0
     s.wind = 0
     return s
@@ -3376,9 +3442,9 @@ const countIn = (t: { w: number; front: Uint8Array }, m: number, x0: number, y0:
     const p = a.players[a.current]
     const plan = chooseShot(a, 'normal')
     const cmds: Command[] = []
-    for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item })
+    for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item, target: targetOf2(plan, item) })
     for (let i = 0; i < Math.abs(plan.move ?? 0); i++) cmds.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
-    cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+    cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id }, ...steerChunks(plan).map((dirs): Command => ({ type: 'steer', playerId: p.id, dirs })))
     for (const cmd of cmds) {
       const ra = applyCommand(a, cmd)
       const rb = applyCommand(b, cmd)
@@ -3397,9 +3463,9 @@ const countIn = (t: { w: number; front: Uint8Array }, m: number, x0: number, y0:
     const p = c.players[c.current]
     const plan = chooseShot(c, 'normal')
     const cmds: Command[] = []
-    for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item })
+    for (const item of plan.items ?? []) cmds.push({ type: 'useItem', playerId: p.id, item, target: targetOf2(plan, item) })
     for (let i = 0; i < Math.abs(plan.move ?? 0); i++) cmds.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
-    cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+    cmds.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id }, ...steerChunks(plan).map((dirs): Command => ({ type: 'steer', playerId: p.id, dirs })))
     for (const cmd of cmds) {
       const rc = applyCommand(c, cmd)
       log2 += JSON.stringify(rc.events.map((e) => (e.type === 'collapse' ? { ...e, patches: e.patches.length } : e.type === 'flow' ? { ...e, patches: e.patches.length } : e)))
@@ -3419,6 +3485,983 @@ const countIn = (t: { w: number; front: Uint8Array }, m: number, x0: number, y0:
   check(r.flights![0].impact.water === true && imp?.water === true && imp.radius === WEAPONS.normal.radius * WATER_BLAST_SCALE, `v2.4 Impact.water: explosión sumergida sin la marca (${JSON.stringify(r.flights![0].impact)})`)
   const dry = shoot(flat(), 'normal', 60, 60)
   check(dry.flights![0].impact.water === undefined && impactsOf(dry).every((e) => e.water === undefined), 'v2.4 Impact.water: explosión seca con la marca')
+}
+// ---------- 20. v3 sim-armas: armas nuevas, teledirigido, ítems, minas y ácido ----------
+type HazardEv = Extract<GameEvent, { type: 'hazard' }>
+type SlideEv = Extract<GameEvent, { type: 'slide' }>
+const hazardsOf = (ev: GameEvent[]) => ev.filter((e): e is HazardEv => e.type === 'hazard')
+// flat() con munición de todo y los ítems nuevos
+function armed(): GameState {
+  const s = flat()
+  for (const p of s.players) {
+    for (const id of WEAPON_ORDER) p.ammo[id] = Math.max(p.ammo[id], 5)
+    for (const id of ITEM_ORDER) p.items[id] = 3
+  }
+  s.wind = 0 // aimAt apunta sin viento
+  return s
+}
+// pasa el turno del que tiene el turno con un tiro inofensivo (para volver a P0 o hacer correr los turnos)
+function pass(s: GameState): StepResult {
+  const id = s.players[s.current].id
+  const x = s.players[s.current].x
+  // tiro al costado de afuera del mapa
+  return shoot(s, 'normal', x < s.width / 2 ? 175 : 5, 100)
+}
+// tiro que cae cerca de (x, y) con el arma (vuelo normal), desde P0
+function shootAt(s: GameState, weapon: WeaponId, x: number, y: number, lo = 5, hi = 175): StepResult & { d: number } {
+  const a = aimAt(s, x, y, lo, hi)
+  return { ...shoot(s, weapon, a.angle, a.power), d: a.d }
+}
+check(WEAPON_ORDER.length === 16 && new Set(WEAPON_ORDER).size === 16, 'v3: WEAPON_ORDER tiene las 16 armas')
+for (const id of WEAPON_ORDER) if (id !== 'normal') check(SHOP.some((e) => e.id === id && e.kind === 'weapon'), `v3 tienda: falta ${id}`)
+for (const id of ITEM_ORDER) check(SHOP.some((e) => e.id === id && e.kind === 'item'), `v3 tienda: falta el ítem ${id}`)
+{
+  // rebotadora: una explosión 'spark' por rebote y una final 'fire'; cada tramo arranca después del anterior
+  const bounceMap = () => {
+    const b = armed()
+    b.players[1].x = 760
+    return b
+  }
+  const s = bounceMap()
+  const r = shoot(s, 'bouncer', 60, 45)
+  const imps = impactsOf(r)
+  const n = WEAPONS.bouncer.bounces ?? 0
+  check(imps.length >= 2 && imps.length <= n + 1, `rebotadora: ${imps.length} explosiones (esperaba 2..${n + 1})`)
+  check(imps.slice(0, -1).every((e) => e.blast === 'spark') && imps[imps.length - 1]?.blast === 'fire', 'rebotadora: rebotes spark y final fire')
+  const st = r.flights!.map((f) => f.startT ?? 0)
+  check(r.flights!.length === imps.length && st.every((t, i) => i === 0 || t > st[i - 1]), 'rebotadora: un tramo por rebote, en orden')
+  check(imps.every((e, i) => i === 0 || e.t > imps[i - 1].t), 'rebotadora: explosiones en orden')
+  check(netHash(shoot(bounceMap(), 'bouncer', 60, 45).state) === netHash(r.state), 'rebotadora: determinista')
+}
+{
+  // láser: recto, sin gravedad; atraviesa una pared fina de tierra; frena en piedra
+  const s = armed()
+  s.players[1].x = 420
+  fillRect(s.terrain, 300, 240, 309, 299, DIRT, 'both')
+  // ángulo hacia el centro de P1
+  const m = muzzle(200, 300, 0)
+  const a = (Math.atan2(-(290 - m.y), 420 - m.x) * 180) / Math.PI
+  const r = shoot(s, 'laser', a, 50)
+  const beam = r.events.find((e): e is Extract<GameEvent, { type: 'beam' }> => e.type === 'beam')
+  check(!!beam && beam.t === 0, 'láser: evento beam')
+  check(r.events.some((e) => e.type === 'damage' && e.playerId === 1 && e.amount === WEAPONS.laser.damage), `láser: pega directo a través de la pared de tierra (${JSON.stringify(r.events.filter((e) => e.type === 'damage'))})`)
+  check(countIn(r.state.terrain, DIRT, 300, 240, 309, 299) < countIn(s.terrain, DIRT, 300, 240, 309, 299) - 20, 'láser: abre un agujero en la tierra')
+  const s2 = armed()
+  s2.players[1].x = 420
+  fillRect(s2.terrain, 300, 240, 309, 299, STONE, 'both')
+  const r2 = shoot(s2, 'laser', a, 50)
+  check(!r2.events.some((e) => e.type === 'damage' && e.playerId === 1), 'láser: la piedra lo frena')
+  const i2 = impactsOf(r2)[0]
+  check(!!i2 && i2.x >= 298 && i2.x <= 302, `láser: impacto en la piedra (${i2?.x.toFixed(1)})`)
+  // tierra gruesa (más de LASER_SOFT): también lo frena
+  const s3 = armed()
+  s3.players[1].x = 420
+  fillRect(s3.terrain, 300, 240, 369, 299, DIRT, 'both')
+  check(!shoot(s3, 'laser', a, 50).events.some((e) => e.type === 'damage' && e.playerId === 1), 'láser: no perfora una montaña')
+  // sin gravedad: tirado a 0° sigue a la altura de la boca
+  const s4 = armed()
+  s4.players[1].x = 700
+  const r4 = shoot(s4, 'laser', 0, 50)
+  const b4 = r4.events.find((e): e is Extract<GameEvent, { type: 'beam' }> => e.type === 'beam')
+  check(!!b4 && Math.abs(b4.y1 - b4.y0) < 0.01 && b4.x1 - b4.x0 > 300, 'láser: recto y largo')
+}
+{
+  // mina: queda clavada; un tanque que se mueve a su radio la dispara; al vencer explota
+  const s = armed()
+  s.players[1].x = 480
+  const r = shootAt(s, 'mine', 440, 300)
+  const placed = hazardsOf(r.events).filter((e) => e.action === 'place')
+  check(placed.length === 1 && r.state.hazards.length === 1 && r.state.hazards[0].kind === 'mine', `mina: queda en el mapa (d ${r.d.toFixed(1)})`)
+  check(!r.events.some((e) => e.type === 'damage'), 'mina: plantarla no hace daño')
+  const mine = r.state.hazards[0]
+  check(!!mine && Math.abs(mine.y - 300) <= 2, `mina: sobre el piso (y ${mine?.y})`)
+  // P1 camina hacia la mina
+  let c = r.state
+  const ev: GameEvent[] = []
+  for (let i = 0; i < 30 && c.current === 1 && c.hazards.length > 0; i++) {
+    const rr = applyCommand(c, { type: 'move', playerId: 1, dir: -1 })
+    ev.push(...rr.events)
+    c = rr.state
+  }
+  check(hazardsOf(ev).some((e) => e.action === 'trigger') && c.hazards.length === 0, 'mina: la pisa al moverse y explota')
+  check(ev.some((e) => e.type === 'damage' && e.playerId === 1), 'mina: daña al que la pisa')
+  check(c.earnings[0] > 0, `mina: la plata es del dueño (${c.earnings[0]})`)
+  // una mina pegada a un tanque que lo empujan: explota
+  const s2 = armed()
+  s2.players[1].x = 480
+  s2.hazards = [{ id: 0, kind: 'mine', ownerId: 1, x: 460, y: 300, radius: 14, turns: 9 }]
+  const r2 = shootAt(s2, 'normal', 500, 300, 5, 90)
+  check(hazardsOf(r2.events).some((e) => e.action === 'trigger'), `mina: el empujón la dispara (${r2.state.players[1].x})`)
+  // vence: con turns 1 explota al cambiar el turno
+  const s3 = armed()
+  s3.hazards = [{ id: 3, kind: 'mine', ownerId: 1, x: 400, y: 300, radius: 14, turns: 1 }]
+  const r3 = pass(s3)
+  check(hazardsOf(r3.events).some((e) => e.action === 'trigger' && e.hazard.id === 3) && r3.state.hazards.length === 0, 'mina: explota al vencer')
+  // un tanque que estaba adentro cuando cayó no la dispara hasta moverse
+  const s4 = armed()
+  s4.players[1].x = 480
+  const r4 = shootAt(s4, 'mine', 480, 280)
+  check(r4.state.hazards.length === 1 && !hazardsOf(r4.events).some((e) => e.action === 'trigger'), 'mina: pegarle a un tanque la planta a sus pies')
+}
+{
+  // ácido: rompe piedra y metal; deja un charco que daña al empezar el turno del que está adentro
+  const s = armed()
+  s.players[1].x = 600
+  fillRect(s.terrain, 380, 280, 420, 299, METAL, 'both')
+  const metal0 = count(s, METAL)
+  const r = shootAt(s, 'acid', 400, 280)
+  check(count(r.state, METAL) < metal0 - 300, `ácido: rompe el metal (${metal0} → ${count(r.state, METAL)})`)
+  const n = shootAt(s, 'normal', 400, 280)
+  check(count(n.state, METAL) > count(r.state, METAL) + 200, 'ácido: rompe más que la normal')
+  check(r.state.hazards.some((h) => h.kind === 'acid'), 'ácido: deja un charco')
+  // charco bajo P1: al empezar su turno pierde ACID_DAMAGE
+  const s2 = armed()
+  s2.hazards = [{ id: 0, kind: 'acid', ownerId: 0, x: 600, y: 300, radius: 18, turns: 4 }]
+  const r2 = pass(s2)
+  check(r2.events.some((e) => e.type === 'damage' && e.playerId === 1 && e.amount === 10) && hazardsOf(r2.events).some((e) => e.action === 'trigger'), 'ácido: daña al que empieza el turno adentro')
+  check(r2.state.earnings[0] > 0, 'ácido: el daño es plata del dueño')
+  let c = r2.state
+  for (let i = 0; i < 6; i++) c = pass(c).state
+  check(c.hazards.length === 0, 'ácido: se seca')
+  // bajo el agua no deja charco
+  const sw = poolMap(WATER)
+  sw.players[0].x = 500
+  for (const p of sw.players) p.ammo.acid = 2
+  const aw = aimAt(sw, 650, 330, 20, 85)
+  const rw = shoot(sw, 'acid', aw.angle, aw.power)
+  check(rw.state.hazards.length === 0, 'ácido: en el agua se diluye')
+}
+{
+  // terremoto: derrumba una ladera, sacude tanques (slide 'quake') y emite 'quake' + 'collapse'
+  const s = armed()
+  s.players[1].x = 540
+  // loma empinada con un barranco al lado de P1
+  for (let x = 420; x < 500; x++) fillRect(s.terrain, x, 300 - Math.min(80, (x - 420) * 2), x, 299, DIRT, 'both')
+  const before = s.terrain.front.slice()
+  const r = shootAt(s, 'quake', 506, 300, 5, 90)
+  check(r.events.some((e) => e.type === 'quake'), 'terremoto: evento quake')
+  check(collapsesOf(r.events).length >= 1, 'terremoto: derrumbe animado')
+  let moved = 0
+  for (let i = 0; i < before.length; i++) if (before[i] !== r.state.terrain.front[i]) moved++
+  check(moved > 100, `terremoto: mueve el terreno (${moved} celdas)`)
+  check(r.events.some((e) => e.type === 'slide' && e.cause === 'quake'), 'terremoto: sacude tanques')
+  check(netHash(shootAt(s, 'quake', 506, 300, 5, 90).state) === netHash(r.state), 'terremoto: determinista')
+}
+// un agujero negro que se va por el abismo cerca del labio derecho (cruza la boca a ~20 px del labio)
+function intoPit(s: GameState): StepResult & { d: number } {
+  let best = { angle: 50, power: 50, d: Infinity }
+  for (let angle = 8; angle <= 70; angle += 2) {
+    for (let power = 20; power <= 100; power += 0.5) {
+      const f = fly({ terrain: s.terrain, players: s.players, props: s.props, ownerId: s.players[s.current].id, angle, power, wind: 0 })
+      if (f.impact.kind !== 'out') continue
+      const at = f.path.find((q) => q.x >= PIT0 && q.x <= PIT1 && q.y >= 306)
+      if (!at) continue
+      const d = Math.abs(at.x - (PIT1 - 20))
+      if (d < best.d) best = { angle, power, d }
+    }
+  }
+  return { ...shoot(s, 'blackhole', best.angle, best.power), d: best.d }
+}
+{
+  // agujero negro: atrae al rival hacia el centro; con un abismo al lado, lo tira
+  const s = armed()
+  s.players[1].x = 560
+  const r = shootAt(s, 'blackhole', 500, 300, 5, 90)
+  const sl = r.events.find((e): e is SlideEv => e.type === 'slide' && e.cause === 'pull' && e.playerId === 1)
+  check(r.events.some((e) => e.type === 'pull'), 'agujero negro: evento pull')
+  check(!!sl && r.state.players[1].x < 560, `agujero negro: atrae al rival (${r.state.players[1].x})`)
+  check(r.state.players[1].x >= impactsOf(r)[0].x - 1, 'agujero negro: no lo pasa del centro')
+  // con un abismo al lado: el agujero negro se abre en la boca y lo arrastra adentro
+  const p = pitMap()
+  fillRect(p.terrain, PIT0, 290, PIT1, 307, AIR) // la boca abierta
+  for (const q of p.players) q.ammo.blackhole = 2
+  p.players[1].x = PIT1 + 1 + TANK_HALF_W + 2
+  p.wind = 0
+  const rp = intoPit(p)
+  check(rp.events.some((e) => e.type === 'death' && e.playerId === 1 && e.cause === 'abyss'), `agujero negro: lo arrastra al abismo (x ${rp.state.players[1].x}, d ${rp.d.toFixed(1)})`)
+  // anclado no se mueve
+  const pa = pitMap()
+  for (const q of pa.players) q.ammo.blackhole = 2
+  fillRect(pa.terrain, PIT0, 290, PIT1, 307, AIR)
+  pa.players[1].x = PIT1 + 1 + TANK_HALF_W + 2
+  pa.players[1].anchored = true
+  pa.wind = 0
+  const ra = intoPit(pa)
+  check(ra.state.players[1].alive && ra.state.players[1].x === PIT1 + 1 + TANK_HALF_W + 2, 'ancla: el agujero negro no lo mueve')
+}
+{
+  // muro: pared fina y alta de tierra donde cae; frena un tiro bajo
+  const s = armed()
+  const r = shootAt(s, 'wall', 400, 300, 5, 90)
+  const t = r.state.terrain
+  let tall = 0
+  for (let y = 300 - 2 * WEAPONS.wall.radius; y < 300; y++) if (isSolid(t, Math.round(impactsOf(r)[0].x), y)) tall++
+  check(tall >= 2 * WEAPONS.wall.radius - 6, `muro: alto (${tall})`)
+  check(!isSolid(t, Math.round(impactsOf(r)[0].x) + 12, 280), 'muro: fino')
+  check(!r.events.some((e) => e.type === 'damage'), 'muro: no hace daño')
+  // P1 le tira plano a P0 y el muro lo frena
+  let c = r.state
+  const hit = shoot(c, 'normal', 175, 70)
+  c = hit.state
+  check(!hit.events.some((e) => e.type === 'damage' && e.playerId === 0), 'muro: frena un tiro bajo')
+}
+{
+  // deflector: el impacto directo se desvía hacia arriba y se gasta
+  const s = armed()
+  s.players[1].x = 480
+  s.players[1].deflector = true
+  const a = aimAt(s, 480, 290, 20, 80)
+  const r = shoot(s, 'heavy', a.angle, a.power)
+  check(r.events.some((e) => e.type === 'deflect' && e.playerId === 1), 'deflector: evento deflect')
+  check(!r.state.players[1].deflector, 'deflector: se gasta')
+  const dmg = r.events.filter((e) => e.type === 'damage' && e.playerId === 1).reduce((n, e) => n + (e.type === 'damage' ? e.amount : 0), 0)
+  check(dmg < WEAPONS.heavy.damage, `deflector: no recibe el impacto directo (${dmg})`)
+  check(r.flights!.length >= 2, 'deflector: el proyectil sigue en otro tramo')
+  // láser reflejado
+  const s2 = armed()
+  s2.players[1].x = 420
+  s2.players[1].deflector = true
+  const m = muzzle(200, 300, 0)
+  const la = (Math.atan2(-(290 - m.y), 420 - m.x) * 180) / Math.PI
+  const r2 = shoot(s2, 'laser', la, 50)
+  check(r2.events.filter((e) => e.type === 'beam').length === 2 && !r2.events.some((e) => e.type === 'damage' && e.playerId === 1), 'deflector: refleja el láser')
+}
+{
+  // ancla: sin empuje hasta su próximo turno; anclado no camina
+  const s = armed()
+  s.players[1].x = 480
+  s.current = 1
+  const an = applyCommand(s, { type: 'useItem', playerId: 1, item: 'anchor' })
+  check(an.state.players[1].anchored && an.state.current === 1 && an.events.some((e) => e.type === 'item'), 'ancla: se activa sin gastar el turno')
+  check(applyCommand(an.state, { type: 'move', playerId: 1, dir: 1 }).state === an.state, 'ancla: anclado no camina')
+  const t1 = pass(an.state).state
+  check(t1.current === 0 && t1.players[1].anchored, 'ancla: dura hasta su turno')
+  const a = aimAt(t1, 480, 290, 20, 80)
+  const r = shoot(t1, 'heavy', a.angle, a.power)
+  check(!r.events.some((e) => e.type === 'slide' && e.playerId === 1) && r.state.players[1].x === 480, 'ancla: el impacto no lo empuja')
+  check(r.state.current === 1 && !r.state.players[1].anchored, 'ancla: se suelta al empezar su turno')
+}
+{
+  // jetpack: salta a un destino dentro del rango (arco), sin gastar el turno; fuera de rango o adentro del
+  // terreno no hace nada; sin piso, cae
+  const s = armed()
+  fillRect(s.terrain, 120, 240, 160, 299, DIRT, 'both') // meseta a la izquierda
+  const r = applyCommand(s, { type: 'useItem', playerId: 0, item: 'jetpack', target: { x: 140, y: 240 } })
+  const jp = r.events.find((e): e is Extract<GameEvent, { type: 'jetpack' }> => e.type === 'jetpack')
+  check(!!jp && r.state.players[0].x === 140 && r.state.players[0].y === 240 && r.state.current === 0, `jetpack: salta a la meseta (${r.state.players[0].x}, ${r.state.players[0].y})`)
+  check(!!jp && Math.min(...jp.path.map((p) => p.y)) < 240 - 20, 'jetpack: en arco')
+  check(r.state.players[0].items.jetpack === 2, 'jetpack: se gasta')
+  check(applyCommand(s, { type: 'useItem', playerId: 0, item: 'jetpack', target: { x: 200 + JETPACK_RANGE + 30, y: 300 } }).state === s, 'jetpack: fuera de rango no')
+  check(applyCommand(s, { type: 'useItem', playerId: 0, item: 'jetpack', target: { x: 140, y: 280 } }).state.players[0].y === 240, 'jetpack: un destino dentro del terreno se apoya arriba')
+  check(applyCommand(s, { type: 'useItem', playerId: 0, item: 'jetpack', target: { x: 260, y: 360 } }).state === s, 'jetpack: adentro del terreno no')
+  const air = applyCommand(s, { type: 'useItem', playerId: 0, item: 'jetpack', target: { x: 260, y: 220 } })
+  check(air.state.players[0].y === 300 && air.events.some((e) => e.type === 'fall'), 'jetpack: sin piso, cae')
+  // teletransporte: lejos, evento teleport; al lado de una mina, la dispara
+  const tp = applyCommand(s, { type: 'useItem', playerId: 0, item: 'teleport', target: { x: 520, y: 300 } })
+  check(tp.events.some((e) => e.type === 'teleport') && tp.state.players[0].x === 520 && tp.state.current === 0, 'teleport: aparece en el destino')
+  check(applyCommand(s, { type: 'useItem', playerId: 0, item: 'teleport', target: { x: 600, y: 300 } }).state === s, 'teleport: no se mete en otro tanque')
+  const sm = armed()
+  sm.hazards = [{ id: 0, kind: 'mine', ownerId: 1, x: 400, y: 300, radius: 14, turns: 9 }]
+  const tm = applyCommand(sm, { type: 'useItem', playerId: 0, item: 'teleport', target: { x: 410, y: 300 } })
+  check(hazardsOf(tm.events).some((e) => e.action === 'trigger') && tm.events.some((e) => e.type === 'damage' && e.playerId === 0), 'teleport: cae al lado de una mina y explota')
+  const anc = applyCommand(applyCommand(s, { type: 'useItem', playerId: 0, item: 'anchor' }).state, { type: 'useItem', playerId: 0, item: 'jetpack', target: { x: 140, y: 240 } })
+  check(anc.state.players[0].x === 200, 'jetpack: anclado no salta')
+}
+// teledirigido
+function guidedShot(s: GameState, angle = 60, power = 62): StepResult {
+  return shoot(s, 'guided', angle, power)
+}
+{
+  const s = armed()
+  const r = guidedShot(s)
+  check(r.state.phase === 'guiding' && !!r.state.guided && r.events.some((e) => e.type === 'guide'), 'teledirigido: al apogeo queda en guiding')
+  check(r.state.guided!.guide > 1.4 && r.flights!.length === 1, 'teledirigido: vuelo hasta el apogeo')
+  check(applyCommand(r.state, { type: 'aim', playerId: 0, angle: 10, power: 10 }).state === r.state, 'teledirigido: en guiding no se apunta')
+  check(applyCommand(r.state, { type: 'steer', playerId: 1, dirs: [1] }).state === r.state, 'teledirigido: solo el dueño dirige')
+  // determinismo por tandas: de a 1, de a 2 y todo junto dan lo mismo
+  const dirs: (-1 | 0 | 1)[] = []
+  for (let i = 0; i < 30; i++) dirs.push(i < 10 ? 1 : i < 18 ? 0 : -1)
+  const runIn = (chunk: number) => {
+    let c = r.state
+    const ev: GameEvent[] = []
+    let i = 0
+    let n = 0
+    while (c.phase === 'guiding' && n++ < 100) {
+      const rr = applyCommand(c, { type: 'steer', playerId: 0, dirs: dirs.slice(i, i + chunk).length ? dirs.slice(i, i + chunk) : [0] })
+      ev.push(...rr.events)
+      c = rr.state
+      i += chunk
+    }
+    return { c, ev }
+  }
+  const a1 = runIn(1)
+  const a2 = runIn(2)
+  const a30 = runIn(30)
+  check(a1.c.phase === 'aiming' && a1.c.current === 1 && a1.c.guided === null, 'teledirigido: termina el turno')
+  check(netHash(a1.c) === netHash(a2.c) && netHash(a1.c) === netHash(a30.c), 'teledirigido: mismo resultado en tandas de 1, 2 y 30')
+  // partir una tanda en cualquier punto da el mismo estado (la red predice con tandas parciales)
+  let splitBad = 0
+  for (let k = 1; k < 12; k++) {
+    const whole = applyCommand(r.state, { type: 'steer', playerId: 0, dirs: dirs.slice(0, 12) }).state
+    const half = applyCommand(r.state, { type: 'steer', playerId: 0, dirs: dirs.slice(0, k) }).state
+    const both = applyCommand(half, { type: 'steer', playerId: 0, dirs: dirs.slice(k, 12) }).state
+    if (netHash(whole) !== netHash(both)) splitBad++
+  }
+  check(splitBad === 0, `teledirigido: [a] y después [b] = [a, b] (${splitBad} cortes distintos)`)
+  check(a1.ev.some((e) => e.type === 'impact') && a1.ev.some((e) => e.type === 'turn'), 'teledirigido: explota y pasa el turno')
+  const imp = a1.ev.find((e): e is Extract<GameEvent, { type: 'impact' }> => e.type === 'impact')
+  check(!!imp && imp.t > r.state.guided!.t, 'teledirigido: tiempos desde el disparo')
+  // réplica: snapshot en guiding
+  const mid = applyCommand(r.state, { type: 'steer', playerId: 0, dirs: dirs.slice(0, 5) }).state
+  const copy = decodeState(encodeState(mid))
+  check(netHash(copy) === netHash(mid) && copy.phase === 'guiding', 'teledirigido: el snapshot en guiding es idéntico')
+  const end1 = applyCommand(mid, { type: 'steer', playerId: 0, dirs: dirs.slice(5) }).state
+  const end2 = applyCommand(copy, { type: 'steer', playerId: 0, dirs: dirs.slice(5) }).state
+  check(netHash(end1) === netHash(end2), 'teledirigido: la réplica desde el snapshot termina igual')
+  // giro limitado: con todo a un lado la dirección cambia a lo sumo STEER_RATE · tiempo (+ temblor y gravedad)
+  const g0 = r.state.guided!
+  const turnOf = (d: -1 | 0 | 1, n: number) => {
+    const c = applyCommand(r.state, { type: 'steer', playerId: 0, dirs: new Array(n).fill(d) }).state
+    return c.guided ? Math.atan2(c.guided.vy, c.guided.vx) : NaN
+  }
+  const h0 = turnOf(0, 6)
+  const hR = turnOf(1, 6)
+  const hL = turnOf(-1, 6)
+  const lim = STEER_RATE * 6 * STEER_TICK
+  check(Math.abs(hR - h0 - lim) < 0.08 && Math.abs(h0 - hL - lim) < 0.08, `teledirigido: giro limitado (${(hR - h0).toFixed(3)} / ${(h0 - hL).toFixed(3)}, esperaba ${lim.toFixed(3)})`)
+  check(g0.seed !== 0, 'teledirigido: temblor con seed')
+  // el temblor existe: sin correcciones, dos seeds distintas caen en lugares distintos
+  const ws = r.state
+  const alt = { ...ws, guided: { ...ws.guided!, seed: ws.guided!.seed ^ 0x5bd1e995 } }
+  const ia = impactsOf(applyCommand(ws, { type: 'steer', playerId: 0, dirs: new Array(30).fill(0) }))[0]
+  const ib = impactsOf(applyCommand(alt, { type: 'steer', playerId: 0, dirs: new Array(30).fill(0) }))[0]
+  check(!!ia && !!ib && Math.abs(ia.x - ib.x) > 2, `teledirigido: el temblor cambia el impacto (${ia?.x.toFixed(1)} / ${ib?.x.toFixed(1)})`)
+  // chocar en el ascenso: explota como un tiro normal sin guiado
+  const sw = armed()
+  fillRect(sw.terrain, 230, 200, 240, 299, STONE, 'both')
+  const rw = guidedShot(sw, 30, 60)
+  check(rw.state.phase === 'aiming' && impactsOf(rw).length === 1, 'teledirigido: si choca antes del apogeo, explota')
+}
+{
+  // precisión: ni la IA difícil ni un guiado "perfecto" (corrige cada tick viendo dónde está, sin saber el
+  // temblor que viene) pegan siempre. Blanco a 300-460 px, tiro inicial con el error de la normal.
+  let aiHit = 0
+  let perfect = 0
+  let none = 0
+  const N = 24
+  for (let k = 0; k < N; k++) {
+    const s = armed()
+    s.wind = (k % 7) - 3
+    s.players[1].x = 500 + (k % 5) * 40
+    // tiro base que pega, con error de ±7° / ±8
+    const a = aimAt(s, s.players[1].x, 290, 20, 85)
+    const rng = new Rng(1000 + k)
+    const angle = a.angle + (rng.next() * 2 - 1) * 7
+    const power = a.power + (rng.next() * 2 - 1) * 8
+    const r = guidedShot(s, angle, power)
+    if (r.state.phase !== 'guiding') continue
+    const hitP1 = (ev: GameEvent[]) => ev.some((e) => e.type === 'damage' && e.playerId === 1 && e.amount >= WEAPONS.guided.damage * 0.95)
+    // sin guiar
+    if (hitP1(applyCommand(r.state, { type: 'steer', playerId: 0, dirs: new Array(30).fill(0) }).events)) none++
+    // IA difícil: plan de una (sin temblor) con su error de dirección
+    const g = r.state.guided!
+    const plan = noisySteer(planSteer(r.state, g, r.state.players[1]), 'hard', () => rng.next())
+    if (hitP1(applyCommand(r.state, { type: 'steer', playerId: 0, dirs: plan }).events)) aiHit++
+    // perfecto: replanifica cada tick con la posición real
+    let c = r.state
+    const ev: GameEvent[] = []
+    for (let i = 0; i < 40 && c.phase === 'guiding'; i++) {
+      const d = planSteer(c, c.guided!, c.players[1])[0] ?? 0
+      const rr = applyCommand(c, { type: 'steer', playerId: 0, dirs: [d] })
+      ev.push(...rr.events)
+      c = rr.state
+    }
+    if (hitP1(ev)) perfect++
+  }
+  console.log(`v3 teledirigido: impactos directos sin guiar ${none}/${N}, IA difícil ${aiHit}/${N}, guiado perfecto ${perfect}/${N}`)
+  check(perfect < N && aiHit < N, 'teledirigido: nunca es un tiro seguro')
+  check(aiHit > none && perfect >= aiHit, 'teledirigido: guiar sirve (más impactos que sin guiar)')
+}
+{
+  // IA: usa el teledirigido con correcciones, el láser a quemarropa, el ácido contra un búnker, la mina y el
+  // muro sin tiro, el ancla al borde y el jetpack para salir de la lava
+  const only = (s: GameState, id: WeaponId) => {
+    for (const w of WEAPON_ORDER) s.players[0].ammo[w] = 0
+    s.players[0].ammo.normal = 99
+    s.players[0].ammo[id] = 3
+    s.players[0].weapon = 'normal'
+  }
+  const sg = armed()
+  only(sg, 'guided')
+  sg.players[1].x = 700
+  const pg = chooseShot(sg, 'hard')
+  check(pg.weapon === 'guided' && (pg.steer?.length ?? 0) === 30, `IA: usa el teledirigido lejos con plan (${pg.weapon}, ${pg.steer?.length})`)
+  const sl = armed()
+  only(sl, 'laser')
+  sl.players[1].x = 300
+  fillRect(sl.terrain, 240, 247, 247, 299, DIRT, 'both') // pared fina de tierra
+  fillRect(sl.terrain, 236, 240, 380, 246, BEDROCK, 'both') // techo: ningún globo llega
+  const pl = chooseShot(sl, 'hard')
+  check(pl.weapon === 'laser', `IA: láser a través de una pared fina (${pl.weapon})`)
+  const sa = armed()
+  only(sa, 'acid')
+  sa.players[1].x = 600
+  // búnker de metal sobre P1
+  // paredes y techo de 15 px: más que el radio de la normal (el escudo de metal la frena entera)
+  fillRect(sa.terrain, 571, 250, 629, 264, METAL, 'both')
+  fillRect(sa.terrain, 571, 250, 585, 299, METAL, 'both')
+  fillRect(sa.terrain, 615, 250, 629, 299, METAL, 'both')
+  const pa = chooseShot(sa, 'hard')
+  check(pa.weapon === 'acid', `IA: ácido contra el búnker (${pa.weapon})`)
+  const sx = pitMap()
+  sx.players[0].items.anchor = 1
+  fillRect(sx.terrain, PIT0, 290, PIT1, 307, AIR) // la boca abierta a la altura del tanque
+  sx.players[0].x = PIT0 - 20
+  const px = chooseShot(sx, 'normal')
+  check((px.items ?? []).includes('anchor') || (px.move ?? 0) !== 0, `IA: ancla al borde del abismo (${JSON.stringify(px.items)}, move ${px.move})`)
+}
+{
+  // IA con todo el arsenal: partidas de 3 rondas (normal y difícil) con todo comprable; cuántas veces usa cada
+  // arma e ítem, que nunca se trabe en 'guiding' y peor tiempo
+  const used: Record<string, number> = {}
+  let worst = 0
+  let stuck = 0
+  let games = 0
+  let baseMs = 0
+  let fullMs = 0
+  for (const [difficulty, size, n] of [['normal', 'small', 3], ['hard', 'small', 2], ['normal', 'medium', 4], ['hard', 'large', 4]] as [Difficulty, MapSize, number][]) {
+    for (let seed = 1; seed <= 3; seed++) {
+      let s = createMatch(mk(n - 1, difficulty, 'forest', 700 + seed, 1, 0, size))
+      for (const p of s.players) {
+        for (const id of WEAPON_ORDER) if (id !== 'normal') p.ammo[id] = 2
+        for (const id of ITEM_ORDER) p.items[id] = 1
+      }
+      games++
+      for (let turn = 0; turn < 60 && s.phase === 'aiming'; turn++) {
+        // el mismo turno con el kit de siempre (para comparar tiempos sin depender de la carga de la máquina)
+        if (turn % 3 === 0) {
+          const k = { ...s, players: s.players.map((p) => ({ ...p, ammo: { ...p.ammo }, items: { ...p.items } })) }
+          const me = k.players[k.current]
+          for (const id of WEAPON_ORDER) me.ammo[id] = Math.min(me.ammo[id], WEAPONS[id].ammo)
+          for (const id of ITEM_ORDER) me.items[id] = 0
+          const t0 = performance.now()
+          chooseShot(k, difficulty)
+          baseMs += performance.now() - t0
+          const t1 = performance.now()
+          chooseShot(s, difficulty)
+          fullMs += performance.now() - t1
+        }
+        const r = aiTurn(s, difficulty)
+        worst = Math.max(worst, r.ms)
+        worstMs = Math.max(worstMs, r.ms)
+        used[r.plan.weapon] = (used[r.plan.weapon] ?? 0) + 1
+        for (const it of r.plan.items ?? []) used[it] = (used[it] ?? 0) + 1
+        if (r.state.phase === 'guiding') stuck++
+        s = r.state
+      }
+    }
+  }
+  console.log(`v3 IA con arsenal (${games} partidas): ${Object.entries(used).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(', ')}; peor ${worst.toFixed(0)} ms; tiempo medio con el arsenal / con el kit de siempre: ${(fullMs / Math.max(1, baseMs)).toFixed(2)}`)
+  check(stuck === 0, 'IA: nunca se queda en guiding')
+  const newOnes = ['guided', 'bouncer', 'laser', 'acid', 'quake', 'blackhole', 'mine', 'wall'].filter((id) => (used[id] ?? 0) > 0)
+  check(newOnes.length >= 5, `IA: usa las armas nuevas (${newOnes.join(', ')})`)
+  check(fullMs < 3 * baseMs, `IA: el arsenal cuesta ${(fullMs / Math.max(1, baseMs)).toFixed(2)} veces el turno de siempre (tope 3)`)
+}
+{
+  // balance por tamaño con las armas nuevas en la tienda: cada IA entra a la partida con ARSENAL_MONEY y compra
+  // armas (aiShop de la normal, que ahora incluye las 8 nuevas; los ítems se descartan) antes de jugar una ronda.
+  // Mismos topes que el balance de siempre (sección 10). 10 partidas por caso (con --balance, 20).
+  const ARSENAL_MONEY = 1600
+  const games = process.argv.includes('--balance') ? 20 : 10
+  const t0 = performance.now()
+  for (const size of MAP_SIZE_ORDER) {
+    for (const bots of [1, 3]) {
+      const shots: number[] = []
+      const used: Record<string, number> = {}
+      let unfinished = 0
+      let walked = 0
+      // 2 tanques en Mediano y Grande: el doble (de 2 a 28 tiros por partida: con 10 el piso de 8 falla por azar)
+      const n2 = bots === 1 && size !== 'small' ? games * 2 : games
+      for (let g = 1; g <= n2; g++) {
+        let s = createMatch(mk(bots, 'normal', BIOMES[g % 3], 900 + g, 1, 0, size))
+        for (const p of s.players) {
+          p.money = ARSENAL_MONEY
+          aiShop(p, 'normal', s.seed, 1)
+          // solo armas: escudo, reparación y deflector alargan cualquier partida (con o sin armas nuevas) y el
+          // balance de siempre se mide sin ítems
+          for (const id of ITEM_ORDER) p.items[id] = 0
+        }
+        let n = 0
+        while (s.phase === 'aiming' && n < 120) {
+          const r = aiTurn(s, 'normal')
+          if (r.events.some((e) => e.type === 'death' && e.cause === 'abyss') && !r.flights) walked++
+          if (r.flights) {
+            n++
+            used[r.plan.weapon] = (used[r.plan.weapon] ?? 0) + 1
+          }
+          for (const it of r.plan.items ?? []) used[it] = (used[it] ?? 0) + 1
+          s = r.state
+        }
+        if (s.phase === 'aiming') unfinished++
+        shots.push(n)
+      }
+      const avg = shots.reduce((a, b) => a + b, 0) / shots.length
+      console.log(`v3 balance con arsenal ${size} ${bots + 1} tanques: ${avg.toFixed(1)} tiros/partida (min ${Math.min(...shots)}, max ${Math.max(...shots)}, ${shots.length} partidas), uso ${JSON.stringify(used)}`)
+      check(unfinished === 0 && walked === 0, `v3 balance con arsenal ${size}: ${unfinished} sin terminar, ${walked} caminó al abismo`)
+      if (bots === 1) check(avg >= 8 && avg <= (size === 'small' ? 15 : 16), `v3 balance con arsenal ${size} 2 tanques fuera de rango (${avg.toFixed(1)})`)
+      else check(avg <= (size === 'small' ? 27 : 30), `v3 balance con arsenal ${size} 4 tanques: ${avg.toFixed(1)} tiros/partida`)
+    }
+  }
+  console.log(`v3 balance con arsenal: ${((performance.now() - t0) / 1000).toFixed(1)} s`)
+}
+// ---------- 21. v3 sim-mundo: nieve, recompensas y personalidades ----------
+// Mapa de prueba: piso parejo en y 300 con NIEVE_FLAT px del material de arriba (nieve o hielo).
+const NIEVE_FLAT = 12
+function snowFlat(floor: number = SNOW, size: MapSize = 'small', n = 2): GameState {
+  const s = cloneState(createMatch({ slots: Array.from({ length: n }, () => ({ kind: 'ai' as const })), rounds: 1, difficulty: 'normal', biome: 'snow', seed: 5, size }))
+  const t = s.terrain
+  t.front.fill(AIR)
+  t.back.fill(AIR)
+  if (size !== 'small') t.pits = new Uint8Array(t.w)
+  fillRect(t, 0, 300, t.w - 1, t.h - 1, DIRT, 'both')
+  fillRect(t, 0, 300, t.w - 1, 300 + NIEVE_FLAT - 1, floor, 'both')
+  fillRect(t, 0, t.h - 3, t.w - 1, t.h - 1, BEDROCK, 'both')
+  s.props = []
+  s.hazards = []
+  s.players.forEach((p, i) => {
+    p.x = 200 + (i * (t.w - 400)) / Math.max(1, n - 1)
+    p.y = 300
+    p.personality = undefined
+    for (const id of WEAPON_ORDER) p.ammo[id] = WEAPONS[id].ammo
+  })
+  s.current = 0
+  s.wind = 0
+  return s
+}
+const bonusesOf = (ev: GameEvent[]) => ev.filter((e): e is Extract<GameEvent, { type: 'bonus' }> => e.type === 'bonus')
+// un tiro que no le pega a nadie ni toca el terreno cerca: derecho para arriba un poco de costado
+const missShot = (s: GameState) => shoot(s, 'normal', s.players[s.current].x < s.width / 2 ? 178 : 2, 100)
+{
+  // nieve: generación en los tres tamaños
+  let maps = 0
+  let frozenCols = 0
+  let openCols = 0
+  let sunk = 0
+  let tanks = 0
+  let crevasses = 0
+  let cabins = 0
+  const cells = { snow: 0, ice: 0 }
+  for (const size of MAP_SIZE_ORDER) {
+    for (let seed = 1; seed <= 8; seed++) {
+      const s = createMatch(mk(3, 'normal', 'snow', seed, 1, 0, size))
+      const t = s.terrain
+      maps++
+      cells.snow += count(s, SNOW)
+      cells.ice += count(s, ICE)
+      // lagos congelados: ninguna columna con el agua a la vista (la primera celda que no es aire); las que
+      // tienen hielo con agua debajo son las del lago
+      for (let x = 0; x < t.w; x++) {
+        const top = columnTop(t, x)
+        if (top >= t.h) continue
+        const m = t.front[top * t.w + x]
+        if (m === WATER) openCols++
+        else if (m === ICE && top + ICE_CRUST < t.h && t.front[(top + ICE_CRUST) * t.w + x] === WATER) frozenCols++
+      }
+      // los tanques nacen hundidos en la nieve (o sobre hielo / piedra, sin nieve que pisar)
+      for (const p of s.players) {
+        tanks++
+        if (t.back[(p.y - 1) * t.w + Math.round(p.x)] === SNOW && t.front[(p.y - 1) * t.w + Math.round(p.x) - TANK_HALF_W - 1] === SNOW) sunk++
+        check(snowSinkAt(t, p.x, p.y) === 0, `v3 nieve: un tanque nace sin hundirse ${size}/${seed}`)
+      }
+      // Chico con 3 tanques: grieta (aire con pared de fondo de hielo bajo la superficie). Con 4 no entra: la
+      // grieta va a 32 px o más de los pads (más cerca, caminar desde el pad la hace resbalar adentro)
+      if (size === 'small') {
+        const g3 = generate('snow', new Rng(roundSeed(seed, 1)), 3).terrain
+        let crev = false
+        for (let x = 0; x < g3.w && !crev; x++) crev = g3.front[400 * g3.w + x] === AIR && g3.back[400 * g3.w + x] === ICE && columnGround(g3, x) > 400
+        if (crev) crevasses++
+      }
+      if (count(s, WOOD) > 150) cabins++
+    }
+  }
+  console.log(`v3 nieve: ${maps} mapas, nieve ${(cells.snow / maps).toFixed(0)} y hielo ${(cells.ice / maps).toFixed(0)} celdas por mapa, lagos ${frozenCols} columnas congeladas (${openCols} abiertas), tanques hundidos ${sunk}/${tanks}, grietas en Chico con 3 tanques ${crevasses}/8, con cabaña ${cabins}/${maps}`)
+  check(openCols === 0 && frozenCols > 0, `v3 nieve: lagos sin congelar (${openCols} columnas)`)
+  check(sunk >= tanks * 0.6, `v3 nieve: pocos tanques hundidos al nacer (${sunk}/${tanks})`)
+  check(cabins === maps, `v3 nieve: mapas sin cabaña (${cabins}/${maps})`)
+  check(crevasses >= 5, `v3 nieve: pocas grietas en Chico (${crevasses}/8)`)
+  // determinismo del generador de nieve
+  for (const size of MAP_SIZE_ORDER) {
+    const a = createMatch(mk(3, 'normal', 'snow', 77, 1, 0, size))
+    const b = createMatch(mk(3, 'normal', 'snow', 77, 1, 0, size))
+    check(hashState(a) === hashState(b), `v3 nieve: generación no determinista ${size}`)
+  }
+}
+{
+  // nieve blanda: la misma explosión rompe más nieve que tierra
+  const broke = (m: number) => {
+    const t = createTerrain(200, 200)
+    fillRect(t, 0, 100, 199, 199, m)
+    const d = deform(t, 100, 100, 14, 'destroy')
+    return d[m] ?? 0
+  }
+  const sn = broke(SNOW)
+  const di = broke(DIRT)
+  console.log(`v3 nieve: una normal rompe ${sn} px de nieve y ${di} de tierra`)
+  check(sn > di * 1.4, `v3 nieve: la nieve no se rompe más fácil (${sn} contra ${di})`)
+}
+{
+  // compactación: al cerrar el turno el tanque se hunde SNOW_SINK px una sola vez, y sale caminando
+  let s = snowFlat(SNOW)
+  let r = missShot(s)
+  const falls = r.events.filter((e) => e.type === 'fall')
+  check(r.state.players.every((p) => p.y === 300 + SNOW_SINK) && falls.length === 2, `v3 nieve: no se hunde al apoyarse (${r.state.players.map((p) => p.y).join('/')})`)
+  s = r.state
+  r = missShot(s)
+  check(r.state.players.every((p) => p.y === 300 + SNOW_SINK), `v3 nieve: se hunde más de una vez (${r.state.players.map((p) => p.y).join('/')})`)
+  s = r.state
+  s.current = 0
+  const x0 = s.players[0].x
+  for (let i = 0; i < 20; i++) s = applyCommand(s, { type: 'move', playerId: 0, dir: 1 }).state
+  check(s.players[0].x >= x0 + 18 && s.players[0].y === 300, `v3 nieve: el tanque queda trabado en su huella (x ${s.players[0].x - x0}, y ${s.players[0].y})`)
+  // sobre hielo no se hunde
+  const ice = missShot(snowFlat(ICE))
+  check(ice.state.players.every((p) => p.y === 300), 'v3 nieve: se hunde en el hielo')
+}
+{
+  // hielo: el que se mueve patina ICE_SLIDE px de más; sobre nieve, no; con el ancla no se mueve
+  const step = (s: GameState) => {
+    const r = applyCommand(s, { type: 'move', playerId: 0, dir: 1 })
+    return { dx: r.state.players[0].x - s.players[0].x, ice: r.events.some((e) => e.type === 'slide' && e.cause === 'ice'), fuel: s.players[0].fuel - r.state.players[0].fuel }
+  }
+  const a = step(snowFlat(ICE))
+  check(a.ice && a.dx === 1 + ICE_SLIDE && a.fuel === 1, `v3 hielo: moverse no patina (${a.dx} px, combustible ${a.fuel})`)
+  const anchored = snowFlat(ICE)
+  anchored.players[0].anchored = true
+  const b = step(anchored)
+  // el ancla fija el tanque hasta su próximo turno: no camina ni patina (regla de sim-armas)
+  check(!b.ice && b.dx === 0, `v3 hielo: con el ancla se mueve o patina (${b.dx} px)`)
+  const c = step(snowFlat(SNOW))
+  check(!c.ice && c.dx === 1, `v3 hielo: en la nieve patina (${c.dx} px)`)
+  // pasar de hielo a nieve frena enseguida (ICE_OFF_COST por px fuera del hielo)
+  const half = snowFlat(ICE)
+  fillRect(half.terrain, 210, 300, half.terrain.w - 1, 311, SNOW, 'both')
+  const d = step(half)
+  check(d.dx < 1 + ICE_SLIDE && d.dx > 1, `v3 hielo: no frena al salir del hielo (${d.dx} px)`)
+  // empujado: sobre hielo llega más lejos que sobre nieve
+  const push = (floor: number) => {
+    const s = snowFlat(floor)
+    s.players[1].x = 400
+    const ev = resolveBlast(s, blastFor('normal', 380, 299, 0))
+    return { dx: s.players[1].x - 400, ice: ev.some((e) => e.type === 'slide' && e.cause === 'ice' && e.t !== undefined) }
+  }
+  const pi = push(ICE)
+  const ps = push(SNOW)
+  console.log(`v3 hielo: un paso patina ${a.dx} px (al salir del hielo ${d.dx}); empuje de una normal a 6 px: ${pi.dx} px en hielo, ${ps.dx} en nieve`)
+  check(pi.ice && pi.dx >= ps.dx + ICE_SLIDE / 2, `v3 hielo: el empuje no patina (${pi.dx} contra ${ps.dx})`)
+  // patinando al abismo y al agua
+  const brink = (hole: 'pit' | 'water') => {
+    const s = snowFlat(ICE, 'medium')
+    const t = s.terrain
+    if (hole === 'pit') {
+      fillRect(t, 450, 300, 560, t.h - 1, AIR, 'both')
+      for (let x = 450; x <= 560; x++) t.pits![x] = 1
+    } else {
+      fillRect(t, 450, 300, 560, 300 + NIEVE_FLAT - 1, AIR, 'both')
+      fillRect(t, 450, 312, 560, 350, WATER)
+    }
+    s.players[1].x = hole === 'pit' ? 412 : 440
+    const ev = resolveBlast(s, blastFor('heavy', s.players[1].x - 26, 299, 0))
+    return { ev, p: s.players[1] }
+  }
+  const pit = brink('pit')
+  check(pit.ev.some((e) => e.type === 'death' && e.playerId === 1 && e.cause === 'abyss'), `v3 hielo: el patinazo no lo lleva al abismo (x ${pit.p.x})`)
+  const wet = brink('water')
+  check(wet.ev.some((e) => e.type === 'fall' && e.playerId === 1 && e.water === true), `v3 hielo: el patinazo no lo lleva al agua (x ${wet.p.x})`)
+  // la IA no se queda sobre hielo al borde de un peligro
+  const risky = snowFlat(ICE, 'medium')
+  fillRect(risky.terrain, 260, 300, 330, risky.terrain.h - 1, AIR, 'both')
+  for (let x = 260; x <= 330; x++) risky.terrain.pits![x] = 1
+  risky.players[0].x = 236
+  check(iceRisk(risky, risky.players[0]) > 0 && iceRisk(snowFlat(ICE, 'medium'), risky.players[0]) === 0, 'v3 hielo: iceRisk no ve el abismo')
+  let moved = 0
+  for (const wind of [-5, 0, 5]) {
+    const s = cloneState(risky)
+    s.wind = wind
+    const plan = chooseShot(s, 'normal', () => 0.5)
+    if ((plan.move ?? 0) < 0) moved++
+  }
+  check(moved >= 2, `v3 hielo: la IA se queda sobre el hielo al borde del abismo (${moved}/3)`)
+}
+{
+  // lagos congelados: el hielo se pisa; una explosión lo rompe y el agua queda a la vista; el que estaba
+  // encima cae al agua (sin daño)
+  const lake = () => {
+    const s = snowFlat(SNOW)
+    const t = s.terrain
+    fillRect(t, 380, 300, 560, 350, WATER)
+    fillRect(t, 380, 300, 560, 304, ICE)
+    s.players[1].x = 470
+    s.players[1].y = tankFloor(t, 470, 0)
+    return s
+  }
+  const s = lake()
+  check(s.players[1].y === 300, `v3 lago: el hielo no se pisa (y ${s.players[1].y})`)
+  const ice0 = countIn(s.terrain, ICE, 380, 300, 560, 304)
+  const ev = resolveBlast(s, blastFor('normal', 420, 301, 0))
+  const exposed = [...Array(30).keys()].some((k) => s.terrain.front[columnTop(s.terrain, 405 + k) * s.terrain.w + 405 + k] === WATER)
+  check(countIn(s.terrain, ICE, 380, 300, 560, 304) < ice0 && exposed && (ev.find((e) => e.type === 'impact') as { debris: Record<number, number> }).debris[ICE]! > 0, 'v3 lago: la explosión no rompe el hielo')
+  const s2 = lake()
+  const ev2 = resolveBlast(s2, blastFor('heavy', 470, 302, 0, 1))
+  check(ev2.some((e) => e.type === 'fall' && e.playerId === 1 && e.water === true) && s2.players[1].alive, 'v3 lago: el tanque no cae al agua al romperse el hielo')
+}
+{
+  // recompensas: primera sangre y tiro largo, al momento
+  const s = snowFlat(DIRT)
+  s.players[1].x = 650
+  const a = aimAt(s, 650, 292)
+  const m0 = s.players[0].money
+  const r = shoot(s, 'normal', a.angle, a.power)
+  const b = bonusesOf(r.events)
+  const kinds = b.map((e) => e.kind).sort().join()
+  const sum = b.reduce((x, e) => x + e.amount, 0)
+  check(kinds === 'firstblood,longshot' && sum === BONUS.firstblood + BONUS.longshot, `v3 bonos: primera sangre y tiro largo (${kinds})`)
+  check(r.state.players[0].money === m0 + sum && r.state.bonusFirstBlood, `v3 bonos: la plata no se suma al momento (${r.state.players[0].money - m0})`)
+  check(b.every((e) => Number.isFinite(e.x) && Number.isFinite(e.y) && e.t !== undefined && e.playerId === 0), 'v3 bonos: evento sin x/y/t')
+  // el segundo impacto: tiro largo sí, primera sangre no
+  const s2 = cloneState(r.state)
+  s2.current = 0
+  const r2 = shoot(s2, 'normal', a.angle, a.power)
+  check(bonusesOf(r2.events).map((e) => e.kind).join() === 'longshot', `v3 bonos: segunda sangre (${bonusesOf(r2.events).map((e) => e.kind).join()})`)
+  // cerca: sin tiro largo
+  const near = snowFlat(DIRT)
+  near.players[1].x = 450
+  const an = aimAt(near, 450, 292)
+  check(bonusesOf(shoot(near, 'normal', an.angle, an.power).events).every((e) => e.kind !== 'longshot'), 'v3 bonos: tiro largo a 250 px')
+}
+{
+  // kill doble, y la plata de fin de ronda no cuenta dos veces los bonos
+  const s = snowFlat(DIRT, 'small', 3)
+  s.players[1].x = 600
+  s.players[2].x = 640
+  s.players[1].hp = 5
+  s.players[2].hp = 5
+  s.bonusFirstBlood = true
+  const a = aimAt(s, 620, 299)
+  const m0 = s.players[0].money
+  const r = shoot(s, 'nuke', a.angle, a.power)
+  const kinds = bonusesOf(r.events).map((e) => e.kind)
+  check(kinds.includes('double') && r.state.phase === 'roundover', `v3 bonos: kill doble (${kinds.join()})`)
+  const paid = bonusesOf(r.events).reduce((x, e) => x + e.amount, 0)
+  const ro = r.events.find((e) => e.type === 'roundover') as Extract<GameEvent, { type: 'roundover' }>
+  const expect = 2 * EARN.kill + 10 * EARN.perDamage + EARN.survive + EARN.roundWin + paid
+  check(r.state.players[0].money === m0 + expect && ro.earnings[0] === expect && r.state.earnings[0] === expect, `v3 bonos: plata de la ronda ${r.state.players[0].money - m0} / ${ro.earnings[0]} (esperaba ${expect})`)
+}
+{
+  // kill por lava: el empujón lo mete en la lava y la lava lo mata al cerrar el turno
+  const s = snowFlat(DIRT)
+  fillRect(s.terrain, 400, 300, 520, 340, LAVA)
+  s.players[1].x = 385
+  s.players[1].hp = 20
+  s.bonusFirstBlood = true
+  const a = aimAt(s, 360, 299)
+  const r = shoot(s, 'normal', a.angle, a.power)
+  check(!r.state.players[1].alive && bonusesOf(r.events).some((e) => e.kind === 'lava'), `v3 bonos: kill por lava (${bonusesOf(r.events).map((e) => e.kind).join()}, vida ${r.state.players[1].hp})`)
+}
+{
+  // botín y objetivo: romperlos con un tiro paga BONUS.loot / BONUS.target
+  for (const kind of ['loot', 'target'] as const) {
+    const s = snowFlat(DIRT)
+    const size = PROP_SIZE[kind]
+    s.props = [{ id: 0, kind, x: 450, y: 300 - size.h, w: size.w, h: size.h, alive: true }]
+    s.bonusFirstBlood = true
+    const a = aimAt(s, 450 + size.w / 2, 300 - size.h / 2)
+    const m0 = s.players[0].money
+    const r = shoot(s, 'normal', a.angle, a.power)
+    const b = bonusesOf(r.events).filter((e) => e.kind === kind)
+    check(b.length === 1 && !r.state.props[0].alive && r.state.players[0].money === m0 + BONUS[kind], `v3 bonos: romper ${kind} (${b.length} bonos, viva ${r.state.props[0].alive})`)
+    check(r.flights![0].impact.kind === 'prop', `v3 bonos: el proyectil no choca con ${kind} (${r.flights![0].impact.kind})`)
+  }
+}
+{
+  // cajas de botín: caen a partir de la segunda vuelta, nunca sobre un tanque ni en un líquido, deterministas
+  let drops = 0
+  let bad = 0
+  let broken = 0
+  let rounds = 0
+  for (const size of MAP_SIZE_ORDER) {
+    for (const seed of [1, 2, 3, 4]) {
+      const run = () => {
+        let s = createMatch(mk(3, 'normal', BIOMES[seed % BIOMES.length], seed, 1, 0, size))
+        const log: string[] = []
+        for (let k = 0; k < 30 && s.phase === 'aiming'; k++) {
+          const r = aiTurn(s, 'normal')
+          for (const e of r.events) {
+            if (e.type === 'prop' && e.kind === 'loot') log.push(`${e.propId}:${e.x},${e.y},${e.destroyed}`)
+            if (e.type === 'prop' && e.kind === 'loot' && !e.destroyed && !log.includes('drop' + e.propId)) {
+              log.push('drop' + e.propId)
+              const p = r.state.props[e.propId]
+              const onTank = r.state.players.some((q) => q.alive && p.x + p.w > q.x - TANK_HALF_W && p.x < q.x + TANK_HALF_W)
+              if (onTank || !propSupported(r.state, p) || hasLiquid(r.state.terrain, WATER, p.x, p.y, p.x + p.w, p.y + p.h + 1)) bad++
+            }
+          }
+          s = r.state
+        }
+        return { log: log.join(';'), s }
+      }
+      const a = run()
+      const b = run()
+      rounds++
+      check(a.log === b.log, `v3 botín: no determinista ${size}/${seed}`)
+      drops += a.s.props.filter((p) => p.kind === 'loot').length
+      broken += a.s.props.filter((p) => p.kind === 'loot' && !p.alive).length
+    }
+  }
+  console.log(`v3 botín: ${drops} cajas en ${rounds} rondas de 30 turnos, ${broken} rotas, ${bad} mal ubicadas`)
+  check(bad === 0 && drops >= rounds, `v3 botín: ${bad} mal ubicadas, ${drops} cajas en ${rounds} rondas`)
+}
+{
+  // objetivos pagos: 0-1 en Chico, 1 en Mediano, 1-2 en Grande; apoyados, lejos de los tanques; generate no cambia
+  const per: Record<string, number[]> = { small: [], medium: [], large: [] }
+  for (const size of MAP_SIZE_ORDER) {
+    for (const biome of BIOMES) {
+      for (let seed = 1; seed <= 10; seed++) {
+        const s = createMatch(mk(3, 'normal', biome, seed, 1, 0, size))
+        const targets = s.props.filter((p) => p.kind === 'target')
+        per[size].push(targets.length)
+        for (const p of targets) {
+          check(propSupported(s, p), `v3 objetivo sin apoyo ${size}/${biome}/${seed}`)
+          const gap = Math.min(...s.players.map((q) => Math.abs(q.x - (p.x + p.w / 2))))
+          check(gap >= 60, `v3 objetivo a ${gap} px de un tanque ${size}/${biome}/${seed}`)
+        }
+      }
+    }
+  }
+  const avg = (a: number[]) => (a.reduce((x, y) => x + y, 0) / a.length).toFixed(2)
+  console.log(`v3 objetivos por mapa: Chico ${avg(per.small)}, Mediano ${avg(per.medium)}, Grande ${avg(per.large)}`)
+  check(Math.max(...per.small) <= 1 && Math.max(...per.medium) <= 1 && Math.max(...per.large) <= 2 && per.large.some((n) => n === 2), 'v3 objetivos: cantidad por tamaño')
+}
+{
+  // personalidades: sorteadas con la seed (o las del casillero), solo en las IA
+  const a = createMatch(mk(7, 'normal', 'forest', 21, 1, 1, 'large'))
+  const b = createMatch(mk(7, 'normal', 'forest', 21, 1, 1, 'large'))
+  check(a.players.every((p, i) => (p.kind === 'human' ? p.personality === undefined : PERSONALITIES.includes(p.personality!) && p.personality === b.players[i].personality)), 'v3 personalidades: sorteo')
+  check(new Set(a.players.map((p) => p.personality).filter(Boolean)).size >= 3, 'v3 personalidades: el sorteo no varía')
+  const c = createMatch({ slots: [{ kind: 'ai', personality: 'sniper' }, { kind: 'ai', personality: 'digger' }], rounds: 1, difficulty: 'normal', seed: 3 })
+  check(c.players[0].personality === 'sniper' && c.players[1].personality === 'digger', 'v3 personalidades: la del casillero')
+}
+{
+  // v3 perfil: el color pedido en el casillero (SlotConfig.color); repetido, el siguiente libre; sin pedido, por índice
+  const col = (slots: SlotConfig[]) => createMatch({ slots, rounds: 1, difficulty: 'normal', seed: 2 }).players.map((p) => TANK_COLORS.indexOf(p.color)).join()
+  check(col([{ kind: 'human' }, { kind: 'ai' }, { kind: 'ai' }]) === '0,1,2', 'v3 colores: sin pedido, por índice')
+  check(col([{ kind: 'human', color: 5 }, { kind: 'ai' }]) === '5,1', 'v3 colores: el pedido')
+  check(col([{ kind: 'human', color: 1 }, { kind: 'ai' }]) === '1,2', 'v3 colores: el del índice ya tomado pasa al siguiente')
+  check(col([{ kind: 'human', color: 3 }, { kind: 'human', color: 3 }, { kind: 'ai', color: 9 }]) === '3,4,2', `v3 colores: repetidos (${col([{ kind: 'human', color: 3 }, { kind: 'human', color: 3 }, { kind: 'ai', color: 9 }])})`)
+}
+{
+  // personalidades: perfil (armas, distancia de tiro, movimiento) y victorias. 4 IA, una de cada una, con el
+  // orden de los casilleros rotando; Chico y Mediano.
+  interface Prof { turns: number; shots: number; dist: number; moved: number; weapons: Record<string, number>; wins: number; bonus: number; cover: number }
+  const prof: Record<string, Prof> = {}
+  for (const p of PERSONALITIES) prof[p] = { turns: 0, shots: 0, dist: 0, moved: 0, weapons: {}, wins: 0, bonus: 0, cover: 0 }
+  let games = 0
+  const t0 = performance.now()
+  for (const size of ['small', 'medium'] as MapSize[]) {
+    for (let seed = 1; seed <= 24; seed++) {
+      const order = PERSONALITIES.map((_, i) => PERSONALITIES[(i + seed) % PERSONALITIES.length])
+      let s = createMatch({ slots: order.map((personality) => ({ kind: 'ai' as const, personality })), rounds: 1, difficulty: 'normal', biome: BIOMES[seed % BIOMES.length], seed: 500 + seed, size })
+      for (let k = 0; k < 120 && s.phase === 'aiming'; k++) {
+        const p = s.players[s.current]
+        const pr = prof[p.personality!]
+        const x0 = p.x
+        const r = aiTurn(s, 'normal')
+        pr.turns++
+        if (r.plan.weapon === 'dirt' || r.plan.weapon === 'wall') pr.cover++
+        pr.moved += Math.abs(r.plan.move ?? 0)
+        if (r.flights && r.flights.length > 0) {
+          pr.shots++
+          pr.weapons[r.plan.weapon] = (pr.weapons[r.plan.weapon] ?? 0) + 1
+          pr.dist += Math.abs(r.flights[0].impact.x - (x0 + (r.plan.move ?? 0)))
+        }
+        for (const e of bonusesOf(r.events)) if (e.playerId === p.id && (e.kind === 'loot' || e.kind === 'target')) pr.bonus += e.amount
+        s = r.state
+      }
+      games++
+      if (s.roundWinnerId !== null) prof[s.players[s.roundWinnerId].personality!].wins++
+    }
+  }
+  const ms = performance.now() - t0
+  const mean = (p: Prof, v: number) => (p.shots > 0 ? v / p.shots : 0)
+  for (const k of PERSONALITIES) {
+    const p = prof[k]
+    const top = Object.entries(p.weapons).sort((a, b) => b[1] - a[1]).map(([w, n]) => `${w} ${Math.round((100 * n) / p.shots)}%`).slice(0, 5).join(', ')
+    console.log(`v3 personalidad ${k}: ganó ${p.wins}/${games}, ${p.turns} turnos, distancia media de tiro ${mean(p, p.dist).toFixed(0)} px, se mueve ${(p.moved / p.turns).toFixed(1)} pasos por turno, cobertura/Tierra ${p.cover}, botín y objetivos $${p.bonus}, armas: ${top}`)
+  }
+  console.log(`v3 personalidades: ${games} partidas en ${(ms / 1000).toFixed(1)} s`)
+  const special = (p: Prof) => p.shots - (p.weapons.normal ?? 0)
+  check(mean(prof.sniper, prof.sniper.dist) > mean(prof.aggressive, prof.aggressive.dist), 'v3 personalidades: la francotiradora no tira más lejos que la agresiva')
+  check(prof.sniper.moved / prof.sniper.turns < prof.aggressive.moved / prof.aggressive.turns, 'v3 personalidades: la francotiradora se mueve más que la agresiva')
+  check(special(prof.aggressive) / prof.aggressive.shots > special(prof.sniper) / prof.sniper.shots, 'v3 personalidades: la agresiva no gasta más munición especial que la francotiradora')
+  check(prof.digger.cover + (prof.digger.weapons.digger ?? 0) > Math.max(...(['aggressive', 'sniper', 'opportunist'] as const).map((k) => prof[k].cover + (prof[k].weapons.digger ?? 0))), 'v3 personalidades: la cavadora no se cubre ni cava más que las otras')
+  for (const k of PERSONALITIES) check(prof[k].wins <= games * 0.42, `v3 personalidades: ${k} gana demasiado (${prof[k].wins}/${games})`)
+}
+{
+  // réplicas: una partida de nieve con botín, bonos y patinazos se reproduce igual desde los comandos, y el
+  // estado serializado (con lo cobrado en bonos) da el mismo hash
+  const cfg = mk(3, 'normal', 'snow', 31, 2, 0, 'medium')
+  let s = createMatch(cfg)
+  const cmds: Command[] = []
+  let log = ''
+  const ser = (ev: GameEvent[]) => JSON.stringify(ev.map((e) => (e.type === 'collapse' || e.type === 'flow' ? { ...e, patches: e.patches.length } : e)))
+  for (let k = 0; k < 40 && s.phase !== 'gameover'; k++) {
+    if (s.phase === 'roundover') {
+      cmds.push({ type: 'nextRound' })
+      const r = applyCommand(s, { type: 'nextRound' })
+      log += ser(r.events)
+      s = r.state
+      continue
+    }
+    const p = s.players[s.current]
+    const plan = chooseShot(s, 'normal')
+    const list: Command[] = []
+    for (const item of plan.items ?? []) list.push({ type: 'useItem', playerId: p.id, item })
+    for (let i = 0; i < Math.abs(plan.move ?? 0); i++) list.push({ type: 'move', playerId: p.id, dir: (plan.move ?? 0) > 0 ? 1 : -1 })
+    list.push({ type: 'selectWeapon', playerId: p.id, weapon: plan.weapon }, { type: 'aim', playerId: p.id, angle: plan.angle, power: plan.power }, { type: 'fire', playerId: p.id })
+    for (const c of list) {
+      cmds.push(c)
+      const r = applyCommand(s, c)
+      log += ser(r.events)
+      s = r.state
+    }
+  }
+  let c = createMatch(cfg)
+  let log2 = ''
+  for (const cmd of cmds) {
+    const r = applyCommand(c, cmd)
+    log2 += ser(r.events)
+    c = r.state
+  }
+  check(log === log2 && netHash(s) === netHash(c), 'v3 réplicas: la partida de nieve no se reproduce igual')
+  check(netHash(decodeState(encodeState(s))) === netHash(s), 'v3 réplicas: el snapshot cambia el hash')
+  console.log(`v3 réplicas: ${cmds.length} comandos, ${(log.match(/"type":"bonus"/g) ?? []).length} bonos, ${(log.match(/"cause":"ice"/g) ?? []).length} patinazos, réplicas iguales`)
+}
+{
+  // recompensas y balance de plata: lo que se cobra en bonos al lado de lo que se gana en la ronda
+  bonusStats.money = 0
+  bonusStats.count = {}
+  let earned = 0
+  let roundsN = 0
+  let playersN = 0
+  for (let seed = 1; seed <= 10; seed++) {
+    const r = playMatch(mk(3, 'normal', 'rotate', 300 + seed, 3, 0, seed % 2 ? 'small' : 'medium'))
+    for (const e of r.events) if (e.type === 'roundover') {
+      roundsN++
+      playersN += Object.keys(e.earnings).length
+      earned += Object.values(e.earnings).reduce((a, b) => a + b, 0)
+    }
+  }
+  const share = bonusStats.money / Math.max(1, earned)
+  console.log(`v3 bonos en 10 partidas de 3 rondas: ${JSON.stringify(bonusStats.count)}; ${(bonusStats.money / playersN).toFixed(0)} por jugador y ronda de ${(earned / playersN).toFixed(0)} ganados (${(100 * share).toFixed(0)}%)`)
+  check(share < 0.35, `v3 bonos: demasiada plata en bonos (${(100 * share).toFixed(0)}% de lo ganado)`)
 }
 console.log(`IA peor caso: ${worstMs.toFixed(0)} ms`)
 console.log(`${checks - failures}/${checks} chequeos OK`)
