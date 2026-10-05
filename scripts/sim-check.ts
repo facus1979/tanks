@@ -425,7 +425,7 @@ function tankChecks(s: GameState, tag: string): void {
 // ---------- 2. generación válida ----------
 const STRUCTURE = new Set([BRICK, WOOD, SLAT, BEAM, POST, METAL])
 // v3: hash de los mapas de Chico de nieve (30 seeds × 1-4 jugadores), fijo desde que se armó el bioma
-const CHICO_SNOW_HASH = 'pendiente'
+const CHICO_SNOW_HASH = '5d272a31'
 // v3: el lecho de una cuenca: el primer sólido debajo del hielo de un lago congelado
 function lakeBed(t: { w: number; h: number; front: Uint8Array }, x: number): number {
   let y = columnGround(t as never, x)
