@@ -75,7 +75,7 @@ const ITEM_ICONS = [
 ]
 
 export function itemIconStrip() {
-  const cv = new Canvas(12 * 5, 12)
+  const cv = new Canvas(12 * 9, 12) // v3: 9 ítems en el orden de ITEM_ORDER
   ITEM_ICONS.forEach((rows, i) => {
     if (rows.length !== 12) throw new Error(`ítem ${i} con ${rows.length} filas`)
     rows.forEach((r) => {
@@ -98,7 +98,89 @@ export function itemIconStrip() {
       if (c !== null) cv.put(x0 + x, y, c)
     }
   }
+  // v3 (ITEM_ORDER 6 a 9): jetpack, teletransporte, ancla, deflector
+  cv.sprite(JETPACK, 5 * 12, 0, ITEM_PAL)
+  teleportIcon(cv, 6 * 12)
+  cv.sprite(ANCHOR, 7 * 12, 0, ITEM_PAL)
+  deflectorIcon(cv, 8 * 12)
   return cv
+}
+
+// jetpack: dos tubos rojos con correa, toberas y llamas
+const JETPACK = [
+  '..kkk..kkk..',
+  '.kLRrkkLRrk.',
+  '.kRRrkkRRrk.',
+  '.kRRrSSRRrk.',
+  '.kRRrkkRRrk.',
+  '.kRRrkkRRrk.',
+  '.kkkkkkkkkk.',
+  '..kSk..kSk..',
+  '..kYk..kYk..',
+  '..YOY..YOY..',
+  '...O....O...',
+  '...O....O...',
+]
+
+// ancla de acero: argolla, cepo y uñas
+const ANCHOR = [
+  '....kkkk....',
+  '...kSkkSk...',
+  '....kSsk....',
+  '..kkkSskkk..',
+  '..kWSSSssk..',
+  '..kkkSskkk..',
+  '....kSsk....',
+  'kk..kSsk..kk',
+  'kSk.kSsk.ksk',
+  '.kSkkSskksk.',
+  '..kSSSssssk.',
+  '...kkkkkkk..',
+]
+
+// teletransporte: plataforma con un haz celeste tramado que sube y destellos
+function teleportIcon(cv, x0) {
+  for (let y = 0; y < 10; y++) {
+    for (let x = 1; x < 11; x++) {
+      const d = Math.abs(x - 5.5)
+      // más denso en el centro y abajo; núcleo blanco
+      const k = (1 - d / 5) * (0.35 + (y / 10) * 0.65)
+      if (d < 1) cv.put(x0 + x, y, y > 1 ? 0xffffff : 0xc8f4ff)
+      else if (bayer(x, y) < k) cv.put(x0 + x, y, d < 3 ? 0xa8ecff : 0x5aa0f0)
+    }
+  }
+  // plataforma: elipse con canto celeste encendido
+  for (let y = 8; y < 12; y++) {
+    for (let x = 0; x < 12; x++) {
+      const e = Math.hypot((x - 5.5) / 6, (y - 9.6) / 2.2)
+      if (e > 1) continue
+      cv.put(x0 + x, y, e > 0.8 || y === 11 ? OUT : y < 10 ? 0x7ad8f0 : 0x7a7468)
+    }
+  }
+  for (const [x, y] of [[1, 1], [10, 3], [0, 5]]) {
+    cv.put(x0 + x, y, 0xffffff)
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) if (x + dx >= 0 && x + dx < 12) cv.put(x0 + x + dx, y + dy, 0x7ad8f0)
+  }
+}
+
+// deflector: escudo curvo celeste (un arco que mira a la izquierda) y un tiro que rebota en él
+function deflectorIcon(cv, x0) {
+  // arco de radio 7 centrado afuera a la derecha
+  for (let y = 0; y < 12; y++) {
+    for (let x = 0; x < 12; x++) {
+      const d = Math.hypot(x - 14, y - 5.5)
+      if (d < 6.2 || d > 9.3) continue
+      cv.put(x0 + x, y, d < 7 || d > 8.6 ? OUT : d < 7.7 ? 0xffffff : 0x5aa0f0)
+    }
+  }
+  // tiro que entra desde abajo a la izquierda, pega y sale para arriba (punteado amarillo, punta roja)
+  for (const [x, y] of [[0, 10], [1, 9], [3, 8], [4, 7]]) cv.put(x0 + x, y, 0xffe27a)
+  for (const [x, y] of [[4, 4], [3, 3], [2, 2]]) cv.put(x0 + x, y, 0xffe27a)
+  cv.put(x0 + 5, 5, 0xffffff)
+  cv.put(x0 + 5, 6, 0xffe27a)
+  cv.rect(x0, 0, 2, 2, 0xe0463a)
+  cv.put(x0 + 2, 0, OUT)
+  cv.put(x0, 2, OUT)
 }
 
 // ---------- paracaídas abierto 20×16 ----------

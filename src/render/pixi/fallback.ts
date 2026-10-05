@@ -208,12 +208,14 @@ export const BIOME_PALETTE: Record<Biome, { grass: number[]; moss: number; rim: 
   forest: { grass: [0x3d4a2c, 0x5d6640, 0x8a8456], moss: 0x4d5a36, rim: 0x46352a, ambient: 0xf0dfc8 },
   jungle: { grass: [0x24421e, 0x3a6a2a, 0x78a03c], moss: 0x3a6a2c, rim: 0x3e3020, ambient: 0xd6e6c0 },
   industrial: { grass: [0x4a3a28, 0x6a5234, 0x9a7a48], moss: 0x5a4a34, rim: 0x4a3626, ambient: 0xf0b888 },
+  snow: { grass: [0xc8d4dc, 0xe4ecf0, 0xffffff], moss: 0xb8c8d0, rim: 0x6a7884, ambient: 0xe8f0f8 }, // v3 respaldo
 }
 
 export const BIOME_SKY: Record<Biome, number[]> = {
   forest: [0xc4ad8e, 0xd9c3a4, 0xebd8bf, 0xf6e9d7],
   jungle: [0x9ab89a, 0xb8d0a8, 0xd4e2c0, 0xe8f0d8],
   industrial: [0x6a4a5a, 0xb86a4a, 0xe8a060, 0xf6d49a],
+  snow: [0x8aa0b8, 0xb0c4d8, 0xd4e0ec, 0xeef4fa], // v3 respaldo
 }
 
 // Colores de escombro por material (índice = Material).
@@ -228,10 +230,16 @@ export const DEBRIS_COLORS: number[][] = [
   [0x6e5038, 0x563e2c, 0x4a3424],
   [0x8a8a84, 0x5a5a56, 0xb0b0a8],
   [0x2a2622, 0x3a3430],
+  [0x8ab8b8, 0xcfe4dc], // v4 agua (no se rompe; por si acaso)
+  [0xff8a2a, 0xc83a10], // v4 lava
+  [0xffffff, 0xe6eef8, 0xc8d6e6, 0xa8bcd4], // v3 nieve: terrones blancos con sombra azulada
+  [0xe8f8ff, 0xa8d8ee, 0x7ab4d4, 0xffffff], // v3 hielo: astillas celestes y brillos
 ]
 
 // Color plano por material cuando falta la textura.
-export const MATERIAL_FLAT = [0, 0x20150f, 0x807761, 0x6d3b2b, 0x4a3526, 0xa8966c, 0x5a4230, 0x6e5038, 0x7a7a74, 0x2a2622]
+// v3: agua y lava no se pintan con esto (van en la capa de líquidos); nieve e hielo, de respaldo hasta que
+// el arte pinte sus texturas (snow.ts les pone encima el borde, las sombras y los reflejos).
+export const MATERIAL_FLAT = [0, 0x20150f, 0x807761, 0x6d3b2b, 0x4a3526, 0xa8966c, 0x5a4230, 0x6e5038, 0x7a7a74, 0x2a2622, 0x6a9aa8, 0xc84a18, 0xdce6f0, 0x9fcfe8]
 
 // Tramo de escalera 8×4 como ladder() del look-test.
 export const gridCanvas8x4 = (): HTMLCanvasElement =>

@@ -6,7 +6,12 @@
 import type { BlastStyle, Terrain } from '../../sim/types'
 import { AIR, STONE, WATER, WEAPONS } from '../../sim/types'
 import { DEBRIS_COLORS, OUT } from './fallback'
+import type { FxKit } from './fxkit'
 import { LIQ, solidCell } from './liquids'
+import type { Texture } from 'pixi.js'
+import { rasterTexture, uploadRect, type RasterSource } from './gpu'
+import { LightLayer } from './lights'
+import type { Quality } from './quality'
 import { Raster, Rng, bayer, mix } from './raster'
 
 const FIRE = [0xfffbe2, 0xffe27a, 0xffb43e, 0xf77a28, 0xd24a1c, 0x8a2814]
@@ -26,6 +31,10 @@ const BURN_TAIL = 1.2 // humo que sigue después de apagarse las llamas
 // Tope de partículas vivas entre blobs, softs (sin la estela del proyectil), chispas y escombros.
 // Una explosión normal anda por ~230; al pasarse se descartan las más gastadas (edad/vida más alta).
 const MAX_PARTICLES = 300
+// v3: con calidad 'low' (quality.ts) el tope baja, se emite la mitad de las bocanadas de humo y polvo, los
+// escombros no dejan estela y se omiten las luces tenues.
+const MAX_PARTICLES_LOW = 160
+const LOW_MIN_LIGHT = 0.08
 // Polvo de suelo: más claro que el humo (SMOKE[0]), sin contorno oscuro.
 const PUFF_HI = 0xd2c6b0
 const PUFF_MID = 0xb8aa94
@@ -238,7 +247,13 @@ const easeOut = (u: number): number => 1 - (1 - u) * (1 - u)
 
 export class Fx {
   readonly fx: Raster
-  readonly light: Raster
+  // v3: las luces son sprites aditivos en la GPU (lights.ts); fx.light.light(...) sigue igual que con el Raster.
+  readonly light: LightLayer
+  // v3: textura de GPU que se llena directo desde los bytes de fx (sin canvas ni putImageData), ver present().
+  readonly fxTexture: Texture<RasterSource>
+  quality: Quality = 'high'
+  private softSkip = 0
+  private shown = [0, 0, -1, -1] // caja de fx subida el frame anterior (hay que borrarla si hoy no se pinta)
   shake = 0
   flash = 0
   flashColor = 0xfff1c9
@@ -266,10 +281,40 @@ export class Fx {
   private terrain: Terrain | null = null
   wreckPos: (id: number) => { x: number; y: number } | null = () => null
 
+  // v3 (render-armas): gancho hacia las partículas para los efectos de las armas e ítems nuevos (ver fxkit.ts).
+  readonly kit: FxKit = {
+    blob: (b) => this.blob(b),
+    soft: (s) => this.soft(s),
+    spark: (x, y, vx, vy, life) => this.sparks.push({ x, y, vx, vy, life, age: 0 }),
+    debris: (x, y, vx, vy, color, shape, life) => this.debris.push({ x, y, vx, vy, color, shape, life, age: 0, rest: false }),
+    light: (x, y, R, tint, k, life) => this.lights.push({ x, y, R, tint, k, life, age: 0 }),
+    fireball: (x, y, s, L, debris, amount, mini = false) => this.fire(x, y, s, L, debris, amount, mini),
+    cap: () => this.capParticles(),
+  }
+
   // w × h: tamaño de los buffers (la pantalla más un margen), no del mundo.
   constructor(w: number, h: number) {
-    this.fx = new Raster(w, h)
-    this.light = new Raster(w, h)
+    this.fx = new Raster(w, h, true)
+    this.light = new LightLayer(w, h)
+    this.fxTexture = rasterTexture(this.fx)
+  }
+
+  // Sube a la GPU lo que se dibujó en fx: la caja pintada en este frame unida a la del anterior (que quedó
+  // borrada en los bytes). Devuelve si el sprite de efectos tiene que verse.
+  present(): boolean {
+    const fx = this.fx
+    const p = this.shown
+    const has = fx.bx1 >= fx.bx0
+    if (has || p[2] >= p[0]) {
+      const x0 = has ? Math.min(fx.bx0, p[2] >= p[0] ? p[0] : fx.bx0) : p[0]
+      const y0 = has ? Math.min(fx.by0, p[2] >= p[0] ? p[1] : fx.by0) : p[1]
+      const x1 = Math.max(fx.bx1, p[2])
+      const y1 = Math.max(fx.by1, p[3])
+      uploadRect(this.fxTexture, x0, y0, x1, y1)
+    }
+    if (has) this.shown = [fx.bx0, fx.by0, fx.bx1, fx.by1]
+    else this.shown = [0, 0, -1, -1]
+    return fx.dirty
   }
 
   // Ubica los dos buffers sobre el mundo (ver Raster.setView).
@@ -374,6 +419,7 @@ export class Fx {
   }
 
   private soft(s: Partial<Soft> & Pick<Soft, 'x0' | 'y0' | 'r0' | 'r1' | 'life' | 'inner' | 'edge' | 'a0'>): void {
+    if (this.quality === 'low' && !s.trail && !s.top && this.softSkip++ % 2 === 1) return
     this.softs.push({ vx: 0, vy: 0, ax: 0, drag: 0, age: 0, keep: 0, top: false, trail: false, puff: 0, ...s })
   }
 
@@ -1413,14 +1459,25 @@ export class Fx {
     const edge = Math.max(0, rad + w - 1.5) ** 2
     const a = 0.55 + 0.4 * dither
     const body = u < 0.25 ? 0xffffff : 0xfff1c0
-    for (let y = y0; y <= y1; y++) {
-      const dy2 = (y - g.y) * (y - g.y)
-      if (dy2 > outer) continue
-      for (let x = x0; x <= x1; x++) {
+    // v3: cada fila recorre solo las dos cuerdas del anillo (antes, el cuadrado entero: con el de la nuke eran
+    // ~370 mil pixels por frame); el criterio por pixel es el mismo.
+    const ring = (y: number, xa: number, xb: number, dy2: number): void => {
+      for (let x = Math.max(x0, xa); x <= Math.min(x1, xb); x++) {
         const d2 = (x - g.x) * (x - g.x) + dy2
         if (d2 > outer || d2 < inner) continue
         if (bayer(x, y) > dither) continue
         fx.put(x, y, d2 > edge ? 0xffb43e : body, a)
+      }
+    }
+    for (let y = y0; y <= y1; y++) {
+      const dy2 = (y - g.y) * (y - g.y)
+      if (dy2 > outer) continue
+      const xo = Math.sqrt(outer - dy2) + 1
+      const xi = dy2 < inner ? Math.sqrt(inner - dy2) - 1 : -1
+      if (xi <= 2) ring(y, Math.floor(g.x - xo), Math.ceil(g.x + xo), dy2)
+      else {
+        ring(y, Math.floor(g.x - xo), Math.ceil(g.x - xi), dy2)
+        ring(y, Math.floor(g.x + xi), Math.ceil(g.x + xo), dy2)
       }
     }
   }
@@ -1677,7 +1734,7 @@ export class Fx {
   private capParticles(): void {
     let n = this.blobs.length + this.debris.length + this.sparks.length
     for (const s of this.softs) if (!s.trail) n++
-    const over = n - MAX_PARTICLES
+    const over = n - (this.quality === 'low' ? MAX_PARTICLES_LOW : MAX_PARTICLES)
     if (over <= 0) return
     const us: number[] = []
     for (const b of this.blobs) us.push(b.delay > 0 ? 0 : b.age / b.life)
@@ -1889,7 +1946,7 @@ export class Fx {
       const x = Math.round(d.x)
       const y = Math.round(d.y)
       const sp = Math.hypot(d.vx, d.vy)
-      if (!d.rest && sp > 40) {
+      if (!d.rest && sp > 40 && this.quality === 'high') {
         const ux = d.vx / sp
         const uy = d.vy / sp
         for (let k = 2; k < 6; k++) fx.put(x - ux * k * 1.6, y - uy * k * 1.6, 0x3a302a, 0.45 - k * 0.06)
@@ -1982,7 +2039,11 @@ export class Fx {
 
     const light = this.light
     light.clear()
-    for (const l of this.lights) light.light(l.x, l.y, l.R, l.tint, l.k * Math.pow(1 - l.age / l.life, 1.5))
+    const minK = this.quality === 'low' ? LOW_MIN_LIGHT : 0
+    for (const l of this.lights) {
+      const k = l.k * Math.pow(1 - l.age / l.life, 1.5)
+      if (k > minK) light.light(l.x, l.y, l.R, l.tint, k)
+    }
     for (const e of this.emitters) {
       if (e.kind === 'wreck') {
         if (!this.sunk(e.y - 10)) light.light(e.x, e.y - 12, 22 + Math.sin(this.time * 17 + e.x) * 2, 0xff8a3a, 0.28)
@@ -1991,5 +2052,6 @@ export class Fx {
         if (k > 0) light.light(e.x + e.w / 2, e.y - 6, Math.max(22, e.w * 1.6), 0xff8a3a, 0.3 * k * (0.85 + 0.15 * Math.sin(this.time * 13 + e.x)))
       }
     }
+    light.finish()
   }
 }

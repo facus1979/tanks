@@ -6,7 +6,13 @@ import { blastDamage, collapseAfterShot, inLava, submerged } from './physics'
 import { columnTop, hasLiquid, takeDirty } from './terrain'
 import { Rng, hashSeed } from './rng'
 import { SLIDE_MAX } from './slide'
-import { NAPALM_DPS, NAPALM_SPREAD, resolveShot } from './weapons'
+import { NAPALM_DPS, NAPALM_SPREAD, LASER_RANGE, resolveShot } from './weapons'
+import { aimLanding, apexOf, guidedTarget, jumpSpots, laserAngles, noisySteer, planSteer } from './ai-arsenal'
+import { ACID_DAMAGE, inHazard } from './hazards'
+import { setRecordFx } from './terrain-fx'
+import { landingFor } from './game'
+import { iceRisk } from './snow'
+import { diggerPlan, personalCost, personalPriority, personalScore, propAims, traitsOf } from './ai-personality'
 import {
   KNOCKBACK_MAX,
   LAVA,
@@ -25,7 +31,10 @@ import {
   type ItemId,
   type Player,
   type Terrain,
+  type Vec2,
   type WeaponId,
+  JETPACK_RANGE,
+  TELEPORT_RANGE,
 } from './types'
 
 // v5: la normal pasa de ±6° / ±7 a ±7° / ±8. Con el desempate simétrico (flatTie) los tanques que tiran
@@ -57,7 +66,21 @@ const COST: Record<WeaponId, number> = {
   digger: 400,
   roller: 60,
   nuke: 450,
+  // v3. mine y wall no salen de la búsqueda de daño: tienen su propia regla (ver chooseShot). El teledirigido
+  // suma GUIDED_REACH por distancia al blanco (compensa el error de puntería, ver simulate).
+  guided: 160,
+  bouncer: 100,
+  laser: 110,
+  mine: 1e9,
+  quake: 170,
+  blackhole: 170,
+  acid: 120,
+  wall: 1e9,
 }
+// v3: lo que vale el teledirigido por pixel de distancia horizontal al blanco (hasta GUIDED_REACH_MAX): lejos, el
+// error de puntería hace errar a los tiros comunes y el guiado lo corrige.
+const GUIDED_REACH = 0.6
+const GUIDED_REACH_MAX = 280
 
 // v2 muerte súbita. Con la lava subiendo la ronda se termina: la munición especial se gasta
 // (el costo de cada arma se multiplica por esto) y la IA pesa el daño de lava que la espera.
@@ -93,7 +116,7 @@ const LEADER_W = 0.1
 const DUTY_W = 0.15
 const EDGE_W = 0.12
 const KILL_BONUS = 40 // en puntos de daño (· 10 en el puntaje; simulate suma lo mismo por kill)
-function priorities(actor: Player, targets: Player[]): Map<number, number> {
+function priorities(actor: Player, targets: Player[], width = WORLD_W): Map<number, number> {
   const out = new Map<number, number>()
   if (targets.length < 2) {
     for (const t of targets) out.set(t.id, 1)
@@ -113,13 +136,16 @@ function priorities(actor: Player, targets: Player[]): Map<number, number> {
     if (actor.x > t.x ? targets.every((o) => o.x >= t.x) : targets.every((o) => o.x <= t.x)) w += EDGE_W
     w += (STRONG_W * Math.min(PLAYER_HP, t.hp + t.shield)) / PLAYER_HP
     if (topWins > 0 && leaders === 1 && t.roundsWon === topWins) w += LEADER_W
-    out.set(t.id, w)
+    // v3: la personalidad corre el orden (ver ai-personality.ts)
+    out.set(t.id, personalPriority(actor, t, targets, w, width))
   }
   return out
 }
 
 function costOf(state: GameState, id: WeaponId): number {
-  return state.lava !== null ? COST[id] * LAVA_COST_SCALE : COST[id]
+  // v3: cada personalidad gasta la munición especial a su manera
+  const base = personalCost(state.players[state.current], id, COST[id])
+  return state.lava !== null ? base * LAVA_COST_SCALE : base
 }
 
 // Daño de lava (en puntos de puntaje) que recibiría un tanque con el piso en y antes de su próximo
@@ -148,6 +174,11 @@ export interface ShotPlan {
   weapon: WeaponId
   move?: number
   items?: ItemId[]
+  // v3: correcciones del teledirigido, una por tick de STEER_TICK desde el apogeo (la sesión las manda con
+  // 'steer' mientras dure el guiado). Solo con weapon 'guided'.
+  steer?: (-1 | 0 | 1)[]
+  // v3: destino del jetpack o del teletransporte de items (la sesión lo manda como useItem.target).
+  itemTarget?: Vec2
 }
 
 // Umbrales de vida para reparar y para activar el escudo.
@@ -167,7 +198,15 @@ export function chooseItems(state: GameState, difficulty: Difficulty): ItemId[] 
   // la difícil lo prende de entrada si hay más de un rival
   const threat = difficulty === 'hard' ? rivals >= 2 || actor.hp < PLAYER_HP : actor.hp <= th.shield
   if (actor.items.shield > 0 && actor.shield <= 0 && threat) items.push('shield')
+  // v3: deflector bajo amenaza (como el escudo, pero dura hasta que lo toca un proyectil)
+  const danger = difficulty === 'hard' ? true : actor.hp <= (difficulty === 'normal' ? 75 : 45)
+  if (actor.items.deflector > 0 && !actor.deflector && danger) items.push('deflector')
   return items
+}
+
+// v3: estar dentro de un charco de ácido se paga como dos turnos de quemadura.
+export function acidRisk(state: GameState, p: { x: number; y: number }): number {
+  return state.hazards.some((h) => h.kind === 'acid' && inHazard(p, h)) ? 2 * ACID_DAMAGE * SELF_WEIGHT : 0
 }
 
 interface Candidate {
@@ -177,6 +216,12 @@ interface Candidate {
   score: number
   push?: boolean // v3: la estimación cree que tira a un rival al abismo
 }
+
+// v3: candidatos por arma que se verifican con la simulación completa (ver search)
+const POOL_FINE = 6
+const POOL_COARSE = 3
+const HEAVY_SIMS = 2
+const ROUGH = new Set<WeaponId>(['cluster', 'roller', 'napalm', 'bouncer'])
 
 // v3: cuántos tiros "al abismo" se verifican con la simulación completa por búsqueda.
 const PUSH_POOL = 6
@@ -193,7 +238,8 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
   const rand = random ?? rngFor(state)
   flowBudget = flowBudgetFor(state.terrain.w)
   centerAlways = difficulty === 'hard'
-  const weapons = WEAPON_ORDER.filter((id) => actor.ammo[id] > 0 && WEAPONS[id].terrain !== 'build')
+  // v3: mina y muro tienen su propia regla (más abajo); el resto entra en la búsqueda de daño
+  const weapons = WEAPON_ORDER.filter((id) => actor.ammo[id] > 0 && WEAPONS[id].terrain !== 'build' && !SPECIAL.has(id))
   const fallback = weapons[0] ?? WEAPON_ORDER.find((id) => actor.ammo[id] > 0) ?? 'normal'
   const targets = state.players.filter((p) => p.alive && p.id !== actor.id)
   const items = chooseItems(state, difficulty)
@@ -205,52 +251,91 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
   const here = search(state, weapons, true)
   let best = here.best
   let move = 0
+  let from = state // v3: el estado desde el que se tira (para planificar el guiado)
+  let jump: { item: ItemId; target: Vec2 } | null = null
+  // las búsquedas desde otros lugares son gruesas: sin teledirigido ni láser (ver search)
+  const moving = weapons.filter((id) => !WEAPONS[id].guided && !WEAPONS[id].beam)
+  const coarse = moving.length > 0 ? moving : weapons
 
   // a veces se mueve: siempre que el tiro esté bloqueado o no llegue, y de vez en cuando igual.
   // Con la lava cerca (muerte súbita) también, y cada posición se paga con la lava que la alcanzaría:
   // así sale de la lava o se aleja de ella (hacia arriba) si puede, y no se mete caminando.
-  const wander = rand() < 0.15
-  const risk = lavaRisk(state, actor.y) + poolRisk(state, actor)
+  // v3: cuánto y cómo se mueve depende de la personalidad; en la nieve pesa quedar sobre hielo cerca de un peligro
+  const traits = traitsOf(actor)
+  const wander = rand() < traits.wander
+  const risk = lavaRisk(state, actor.y) + poolRisk(state, actor) + acidRisk(state, actor) + iceRisk(state, actor)
   const total = best.score - risk
-  if (actor.fuel > 0 && (best.score < 1000 || wander || risk > 0)) {
-    const steps = risk > 0 ? [-60, -40, -20, 20, 40, 60] : best.score < 1000 ? [-40, -20, 20, 40] : [-20, 20]
+  let top = total + 60
+  if (actor.fuel > 0 && !actor.anchored && (best.score < 1000 || wander || risk > 0)) {
+    const steps = risk > 0 ? [-60, -40, -20, 20, 40, 60] : best.score < 1000 ? [-40, -20, 20, 40] : traits.steps
     // v5: se queda con la mejor posición de todas (antes, la primera que superaba por 60 a la actual, y
     // como las de la izquierda se prueban primero, ganaban los empates: otro sesgo hacia un lado)
-    let top = total + 60
     for (const d of steps) {
       const moved = walk(state, d)
       if (!moved) continue
-      const c = search(moved.state, weapons, false).best
+      const c = search(moved.state, coarse, false).best
       const mp = moved.state.players[moved.state.current]
-      const score = c.score - lavaRisk(state, mp.y) - poolRisk(moved.state, mp)
+      const score = c.score - lavaRisk(state, mp.y) - poolRisk(moved.state, mp) - acidRisk(moved.state, mp) - iceRisk(moved.state, mp) - traits.moveCost * Math.abs(mp.x - actor.x)
       if (score > top) {
         best = c
         top = score
         move = moved.dx
+        from = moved.state
       }
+    }
+  }
+
+  // v3: jetpack o teletransporte para salir de la lava, del ácido o de un pozo sin tiro (normal y difícil)
+  if (difficulty !== 'easy' && !actor.anchored && (actor.items.jetpack > 0 || actor.items.teleport > 0) && (risk > 0 || (best.score < 1000 && here.blocked > 0.5))) {
+    const j = jumpPlan(state, coarse, top)
+    if (j) {
+      best = j.best
+      move = 0
+      from = j.state
+      jump = j.jump
+      aiStats.jumps++
     }
   }
 
   // v2.3: sin tiro desde ningún lado y con la lava cortándole el camino hacia el rival más cercano:
   // camina hasta la orilla y tira Tierra a la lava de adelante, que se vuelve piedra (un tramo de puente
   // por turno); con el puente ya tendido (sin lava adelante), lo cruza. No en la fácil.
-  if (best.score < 1000 && difficulty !== 'easy') {
+  if (best.score < 1000 && difficulty !== 'easy' && !jump) {
     const b = bridgePlan(state, targets)
     if (b?.shot) {
       aiStats.bridges++
       best = { angle: b.shot.angle, power: b.shot.power, weapon: 'dirt', score: 0 }
       move = b.move
+      from = b.state
     } else if (b) {
       aiStats.crossings++
-      best = search(b.state, weapons, false).best
+      best = search(b.state, coarse, false).best
       move = b.move
+      from = b.state
     }
   }
 
+  // v3 cavadora: se cubre con Tierra o Muro, o cava hacia el rival (ver diggerPlan)
+  if (move === 0) {
+    const dp = diggerPlan(state, actor, targets, best.score, rand)
+    if (dp) return { ...dp, ...extra }
+  }
+
   // tapado y sin tiro: excavadora hacia el rival más cercano
-  if (best.score < 1000 && best.weapon !== 'dirt' && move === 0 && here.blocked > 0.5 && actor.ammo.digger > 0) {
+  if (best.score < 1000 && best.weapon !== 'dirt' && move === 0 && !jump && here.blocked > 0.5 && actor.ammo.digger > 0) {
     const t = nearest(actor, targets)
     return { angle: t.x > actor.x ? 30 : 150, power: 45, weapon: 'digger', ...extra }
+  }
+
+  // v3: sin tiro que haga daño: mina a los pies del rival más cercano (le tapa el paso: explota cuando se mueva
+  // o lo empujen) o, si lo tiene en línea (a su altura y cerca), un muro adelante para cubrirse.
+  let special = false
+  if (best.score < 1000 && best.weapon !== 'dirt' && !jump && difficulty !== 'easy') {
+    const sp = specialPlan(from, targets)
+    if (sp) {
+      best = sp
+      special = true
+    }
   }
 
   const k = mapScale(state)
@@ -259,18 +344,98 @@ export function chooseShot(state: GameState, difficulty: Difficulty, random?: ()
   // en mapas grandes un punto de potencia son muchos pixels: el plan va con un decimal
   const q = k > 1 ? 10 : 1
   const round = (n: number) => Math.round(n * q) / q
+  // la mina y el muro son tiros cortos y cerca: van con la mitad del error
+  const e = special ? 0.5 : 1
   const plan: ShotPlan = {
-    angle: clamp(round(best.angle + ((rand() * 2 - 1) * err.angle) / errScale), 0, 180),
-    power: clamp(round(best.power + ((rand() * 2 - 1) * err.power) / errScale), 10, 100),
+    angle: clamp(round(best.angle + ((rand() * 2 - 1) * err.angle * e) / errScale), 0, 180),
+    power: clamp(round(best.power + ((rand() * 2 - 1) * err.power * e) / errScale), 10, 100),
     weapon: best.weapon,
   }
+  // el láser no tiene potencia ni error de potencia que valga: el ángulo, con un tercio del error
+  if (WEAPONS[best.weapon].beam) plan.angle = clamp(round(best.angle + ((rand() * 2 - 1) * err.angle) / 3 / errScale), 0, 180)
   if (move !== 0) plan.move = move
+  // v3: ancla si se queda quieta al borde de un abismo o de la lava (que no la empujen adentro)
+  if (move === 0 && !jump && actor.items.anchor > 0 && !actor.anchored && brinksOf(state.terrain, [actor]).length > 0) items.push('anchor')
+  if (jump) {
+    items.push(jump.item)
+    plan.itemTarget = jump.target
+  }
   if (items.length > 0) plan.items = items
+  // v3: teledirigido: correcciones planificadas desde el apogeo del tiro con error, sin temblor, y con el error
+  // de dirección según la dificultad
+  if (WEAPONS[plan.weapon].guided) {
+    const s = { ...from, players: from.players.map((p) => ({ ...p })) }
+    const me = s.players[s.current]
+    me.angle = plan.angle
+    me.power = plan.power
+    const g = apexOf(s, me)
+    if (g) {
+      const sky = skylineOf(s.terrain, s.players, s.props)
+      plan.steer = noisySteer(planSteer(s, g, guidedTarget(s, g, s.players.filter((p) => p.alive && p.id !== me.id), sky), sky), difficulty, rand)
+    } else plan.steer = []
+  }
   return plan
+}
+
+// v3: armas con regla propia (no entran en la búsqueda de daño).
+const SPECIAL = new Set<WeaponId>(['mine', 'wall'])
+
+// v3: mina o muro (ver chooseShot). El muro solo si el rival más cercano está a su altura (±MURO_DY) y a menos
+// de WALL_RANGE: se levanta WALL_AHEAD px adelante. La mina, a los pies del más cercano (del lado de la IA).
+const WALL_RANGE = 420
+const WALL_DY = 50
+const WALL_AHEAD = TANK_HALF_W + 26
+function specialPlan(state: GameState, targets: Player[]): Candidate | null {
+  const actor = state.players[state.current]
+  const t = nearest(actor, targets)
+  const dir = t.x > actor.x ? 1 : -1
+  const k = mapScale(state)
+  if (actor.ammo.wall > 0 && Math.abs(t.x - actor.x) < WALL_RANGE * k && Math.abs(t.y - actor.y) < WALL_DY) {
+    const x = actor.x + dir * WALL_AHEAD
+    const a = aimLanding(state, actor, x, actor.y)
+    if (a.d < 10) return { angle: a.angle, power: a.power, weapon: 'wall', score: 0 }
+  }
+  if (actor.ammo.mine > 0) {
+    const x = t.x - dir * (TANK_HALF_W + 6)
+    const a = aimLanding(state, actor, x, t.y)
+    if (a.d < 12) return { angle: a.angle, power: a.power, weapon: 'mine', score: 0 }
+  }
+  return null
+}
+
+// v3: jetpack o teletransporte. Prueba pocos destinos (piso a esas distancias, sin lava, ácido ni abismo) y se
+// queda con el mejor si supera a quedarse (top: el puntaje a superar, ya con el margen).
+const JET_OFFSETS = [-110, -70, -40, 40, 70, 110]
+const TELE_OFFSETS = [-360, -240, -140, 140, 240, 360]
+function jumpPlan(state: GameState, weapons: WeaponId[], top: number): { best: Candidate; state: GameState; jump: { item: ItemId; target: Vec2 } } | null {
+  const actor = state.players[state.current]
+  const item: ItemId = actor.items.jetpack > 0 ? 'jetpack' : 'teleport'
+  const range = item === 'jetpack' ? JETPACK_RANGE : TELEPORT_RANGE
+  const spots = jumpSpots(state, actor, item === 'jetpack' ? JET_OFFSETS : TELE_OFFSETS, range)
+  let out: { best: Candidate; state: GameState; jump: { item: ItemId; target: Vec2 } } | null = null
+  let tries = 0
+  for (const spot of spots) {
+    const land = landingFor(state, actor.id, spot)
+    if (!land || land.y >= state.terrain.h - 2) continue
+    const r = applyCommand(state, { type: 'useItem', playerId: actor.id, item, target: spot })
+    if (r.state === state || r.state.current !== state.current || r.state.phase !== 'aiming') continue
+    const p = r.state.players[r.state.current]
+    const risk = lavaRisk(state, p.y) + poolRisk(r.state, p) + acidRisk(r.state, p) + (r.events.some((e) => e.type === 'damage') ? 400 : 0)
+    if (risk > 0) continue
+    if (++tries > 4) break
+    const c = search(r.state, weapons, false).best
+    if (c.score > top) {
+      top = c.score
+      out = { best: c, state: r.state, jump: { item, target: spot } }
+    }
+  }
+  return out
 }
 
 // v3: la IA no se acerca a menos de esto (en pasos de 1 px) de quedar colgando sobre un abismo.
 export const AI_ABYSS_MARGIN = 24
+// v3: caída más larga que la IA acepta al caminar en la nieve (las grietas de Chico tienen fondo)
+export const AI_FALL_STOP = 40
 
 // Aplica 'move' hasta |dx| pixels. null si no pudo avanzar al menos 4. Nunca camina hacia un abismo:
 // frena AI_ABYSS_MARGIN px antes del primer paso que la tiraría (Pulido v2: incluido el que la deja en
@@ -299,6 +464,16 @@ function walk(state: GameState, dx: number): { state: GameState; dx: number } | 
       limit = Math.min(limit, abyss ? n - AI_ABYSS_MARGIN : n)
       break
     }
+    // v3: no pisa minas ni se mete en un charco de ácido; en la nieve no se tira caminando (o patinando) a una
+    // grieta: una caída de más de AI_FALL_STOP px corta
+    if (
+      r.events.some((e) => e.type === 'hazard' && e.action === 'trigger') ||
+      (acidRisk(r.state, r.state.players[r.state.current]) > 0 && acidRisk(s, s.players[s.current]) === 0) ||
+      (state.biome === 'snow' && r.events.some((e) => e.type === 'fall' && e.playerId === id && !e.water && e.to - e.from > AI_FALL_STOP))
+    ) {
+      limit = Math.min(limit, n)
+      break
+    }
     // v4: no se mete caminando en la lava (si ya estaba adentro, puede seguir para salir)
     if (inLava(r.state.terrain, r.state.players[r.state.current]) && !inLava(s.terrain, s.players[s.current])) {
       limit = Math.min(limit, n)
@@ -314,7 +489,7 @@ function walk(state: GameState, dx: number): { state: GameState; dx: number } | 
 
 // v2.3: medición para sim-check (no cambia la simulación): turnos en que la IA tendió un tramo de puente y
 // turnos en que caminó por un puente ya tendido.
-export const aiStats = { bridges: 0, crossings: 0 }
+export const aiStats = { bridges: 0, crossings: 0, jumps: 0 }
 
 // v2.3: puente de Tierra sobre la lava. La Tierra no se derrite (lavaSolid) y lo que construye sobre la
 // lava es piedra: cada tiro deja un montículo de piedra de ~2 · radio de ancho por el que se puede pasar.
@@ -394,7 +569,7 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   let total = 0
   let blocked = 0
   const sky = skylineOf(state.terrain, state.players, state.props)
-  const prio = priorities(actor, targets)
+  const prio = priorities(actor, targets, state.width)
   // v3: rivales que se sostienen sobre un abismo (ver ledgeOf): la estimación suma el tiro que les
   // rompe el piso, y la simulación completa confirma si de verdad caen.
   const ledges = ledgesOf(state.terrain, targets)
@@ -416,6 +591,11 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
   // empuja adentro (se verifica con la simulación completa, que resuelve el empuje)
   const brinks = brinksOf(state.terrain, targets)
   const brinkAim = brinks.map(() => ({ angle: 0, power: 0, d: Infinity }))
+  // v3: el agujero negro va del lado del peligro (atrae al rival hacia ese lado)
+  const pullAim = brinks.map(() => ({ angle: 0, power: 0, d: Infinity }))
+  // v3: botín y objetivos pagos: el tiro que cae más cerca de cada uno también se verifica
+  const loot = propAims(state)
+  const lootAim = loot.map(() => ({ angle: 0, power: 0, d: Infinity }))
   let direct = false // algún tiro de la búsqueda pega directo en un rival
   const consider = (angle: number, power: number) => {
     const r = estimate(state, actor, targets, weapons, angle, power, sky, ledges, prio)
@@ -432,6 +612,12 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
       for (let i = 0; i < brinks.length; i++) {
         const d = Math.abs(r.at.x - brinks[i].x) + Math.abs(r.at.y - brinks[i].y)
         if (d < brinkAim[i].d) brinkAim[i] = { angle, power, d }
+        const dh = Math.abs(r.at.x - brinks[i].hx) + Math.abs(r.at.y - brinks[i].y)
+        if (dh < pullAim[i].d) pullAim[i] = { angle, power, d: dh }
+      }
+      for (let i = 0; i < loot.length; i++) {
+        const d = Math.abs(r.at.x - loot[i].x) + Math.abs(r.at.y - loot[i].y)
+        if (d < lootAim[i].d) lootAim[i] = { angle, power, d }
       }
     }
     if (r.blocked) blocked++
@@ -481,15 +667,36 @@ function search(state: GameState, weapons: WeaponId[], fine: boolean): Search {
     for (let a = -2; a <= 2; a += 1) for (let p = -1.5; p <= 1.5; p += 0.5) consider(clamp(ba.angle + a, 0, 180), clamp(ba.power + p, 10, 100))
   }
   // verificación con la simulación completa (racimo, rodadora y napalm no se estiman bien)
-  const pool = [...perWeapon.values(), best, ...pushes]
+  // v3: con 16 armas, verificar todas en cada búsqueda era lo más caro del turno: se verifican las POOL_FINE
+  // (POOL_COARSE desde otros lugares) mejores según la estimación; las que la estimación no ve bien (racimo,
+  // rodadora, napalm, rebotadora) entran siempre en la fina.
+  const ranked = [...perWeapon.values()].sort((a, b) => b.score - a.score || WEAPON_ORDER.indexOf(a.weapon) - WEAPON_ORDER.indexOf(b.weapon))
+  // con el kit de siempre (hasta 7 armas que no son la Tierra) se verifican todas, como antes de v3
+  const keep = ranked.length <= 7 ? ranked : ranked.slice(0, fine ? POOL_FINE : POOL_COARSE)
+  if (fine && ranked.length > 7) for (const c of ranked.slice(POOL_FINE)) if (ROUGH.has(c.weapon)) keep.push(c)
+  const pool = [...keep, best, ...pushes]
   for (const ba of brinkAim) {
     if (ba.d >= 16) continue
     for (const id of BRINK_WEAPONS) if (weapons.includes(id)) pool.push({ angle: ba.angle, power: ba.power, weapon: id, score: 0 })
   }
+  // v3: agujero negro del lado del peligro
+  if (weapons.includes('blackhole')) for (const pa of pullAim) if (pa.d < 24) pool.push({ angle: pa.angle, power: pa.power, weapon: 'blackhole', score: 0 })
+  // v3: láser hacia los dos rivales más cercanos a su alcance (en línea recta; solo en la búsqueda fina)
+  if (fine && weapons.includes('laser')) {
+    const near = targets.filter((t) => Math.hypot(t.x - actor.x, t.y - actor.y) < LASER_RANGE - 10).sort((a, b) => Math.abs(a.x - actor.x) - Math.abs(b.x - actor.x))
+    for (const t of near.slice(0, 2)) for (const a of laserAngles(state, actor, t)) pool.push({ angle: a, power: actor.power, weapon: 'laser', score: 0 })
+  }
   const lipWeapon: WeaponId = weapons.includes('heavy') ? 'heavy' : weapons[0]
   for (const la of lipAim) if (la.d < 16) pool.push({ angle: la.angle, power: la.power, weapon: lipWeapon, score: 0 })
+  for (const la of lootAim) if (la.d < 20) pool.push({ angle: la.angle, power: la.power, weapon: weapons[0], score: 0 })
   let verified: Candidate = { ...best, score: -Infinity }
+  // v3: terremoto y agujero negro son las simulaciones más caras: a lo sumo HEAVY_SIMS de cada uno por búsqueda
+  const heavy: Partial<Record<WeaponId, number>> = {}
   for (const c of pool) {
+    if (c.weapon === 'quake' || c.weapon === 'blackhole') {
+      heavy[c.weapon] = (heavy[c.weapon] ?? 0) + 1
+      if (heavy[c.weapon]! > HEAVY_SIMS) continue
+    }
     const score = simulate(state, c, prio)
     if (score > verified.score) verified = { ...c, score }
   }
@@ -574,6 +781,7 @@ function estimate(
   const wet = submerged(state.terrain, x, y) ? WATER_BLAST_SCALE : 1
   for (const id of weapons) {
     const w = WEAPONS[id]
+    if (w.beam) continue // v3: el láser no vuela: tiene su propio apuntado (search)
     const spread = w.split ? 2.4 : w.rolls ? 2 : 1
     const blast = { x, y, radius: w.radius * spread * wet, damage: w.damage, terrain: w.terrain }
     let dmg = 0
@@ -703,16 +911,48 @@ function scratchState(state: GameState): GameState {
     props: state.props.map((p) => ({ ...p })),
     players: state.players.map((p) => ({ ...p, ammo: { ...p.ammo }, items: { ...p.items } })),
     earnings: { ...state.earnings },
+    hazards: state.hazards.map((h) => ({ ...h })), // v3: la mina o el ácido del tiro simulado no tocan el estado real
+    guided: null,
   }
 }
 
+// v3: medición (para sim-check y perfiles; no cambia nada): ms y llamadas de simulate por arma.
+export const aiProf: Record<string, { n: number; ms: number }> = {}
 function simulate(state: GameState, c: Candidate, prio?: Map<number, number>): number {
+  const t0 = performance.now()
+  setRecordFx(false) // sin parches de terremoto ni agujero negro (nadie los anima)
+  let r: number
+  try {
+    r = simulateShot(state, c, prio)
+  } finally {
+    setRecordFx(true)
+  }
+  const e = (aiProf[c.weapon] ??= { n: 0, ms: 0 })
+  e.n++
+  e.ms += performance.now() - t0
+  return r
+}
+function simulateShot(state: GameState, c: Candidate, prio?: Map<number, number>): number {
   const s = scratchState(state)
   const actor = s.players[s.current]
   actor.angle = c.angle
   actor.power = c.power
   const before = s.players.map((p) => ({ hp: p.hp, alive: p.alive, x: p.x, y: p.y }))
-  const { events } = resolveShot(s, actor, c.weapon)
+  // v3: el teledirigido se simula con las correcciones que planificaría (sin temblor)
+  let opts: { steer?: number[]; wobble?: boolean } = {}
+  let reach = 0
+  if (WEAPONS[c.weapon].guided) {
+    const g = apexOf(s, actor)
+    if (g) {
+      const rivals = s.players.filter((p) => p.alive && p.id !== actor.id)
+      const target = guidedTarget(s, g, rivals)
+      opts = { steer: planSteer(s, g, target), wobble: false }
+      reach = Math.min(GUIDED_REACH_MAX, (GUIDED_REACH * Math.abs(target.x - actor.x)) / mapScale(state))
+    }
+  }
+  const hz = new Set(s.hazards.map((h) => h.id))
+  const { events } = resolveShot(s, actor, c.weapon, opts)
+  const extra = personalScore(actor, before, s.players, events) // v3: botín, objetivos y distancia según la personalidad
   // v2.4: el derrumbe, con el mismo resolver que fire (sin parches): un terrón que cae sobre un rival lo aplasta
   collapseAfterShot(s, events, 0, false)
   // v4: si el tiro tocó cerca de lava, la deja correr (como fire) y el rival que quede en ella cuenta
@@ -734,6 +974,12 @@ function simulate(state: GameState, c: Candidate, prio?: Map<number, number>): n
     else if (newlyInLava(state, s, p.id)) dmg += Math.min(p.hp + p.shield, AI_LAVA_HIT)
     for (const e of events) if (e.type === 'impact') near = Math.min(near, Math.hypot(p.x - e.x, p.y - TANK_H / 2 - e.y))
   }
+  // v3: un charco de ácido nuevo bajo un rival le va a hacer daño en sus próximos turnos
+  for (const h of s.hazards) {
+    if (h.kind !== 'acid' || hz.has(h.id)) continue
+    for (const p of s.players) if (p.alive && p.id !== actor.id && inHazard(p, h)) dmg += Math.min(p.hp + p.shield, 2 * ACID_DAMAGE) * (prio?.get(p.id) ?? 1)
+  }
+  if (dmg > 0) dmg += reach / 10
   let self = before[actor.id].hp - actor.hp
   if (actor.alive && newlyInLava(state, s, actor.id)) self += AI_LAVA_HIT
   if (!actor.alive) return -1e5
@@ -747,10 +993,10 @@ function simulate(state: GameState, c: Candidate, prio?: Map<number, number>): n
     const d0 = hazardDist(mask, before[p.id].x, before[p.id].y)
     const d1 = hazardDist(mask, p.x, p.y)
     if (d1 >= d0) continue
-    drift += p.id === actor.id ? -2 * (d0 - d1) * HAZARD_PULL : (d0 - d1) * HAZARD_PULL
+    drift += p.id === actor.id ? -2 * (d0 - d1) * HAZARD_PULL : (d0 - d1) * HAZARD_PULL * traitsOf(actor).hazard
   }
   const cost = costOf(state, c.weapon)
-  return (dmg > 0 ? 1000 + dmg * 10 + kills * KILL_BONUS * 10 - self * SELF_WEIGHT - cost : -near - self * SELF_WEIGHT - cost * 0.01) + drift + flatTie(c.angle)
+  return (dmg > 0 ? 1000 + dmg * 10 + kills * KILL_BONUS * 10 - self * SELF_WEIGHT - cost : -near - self * SELF_WEIGHT - cost * 0.01) + drift + extra + flatTie(c.angle)
 }
 
 // Pulido v2: columnas peligrosas (abismo o lava arriba de todo) por grilla. Se calcula una vez por grilla
@@ -840,9 +1086,9 @@ function lavaLipsOf(t: Terrain, targets: Player[]): { x: number; y: number }[] {
 // Pulido v2: rivales con un abismo o lava de la grilla a menos de un empujón de su costado. Por cada uno,
 // el punto donde tiene que caer el tiro: pegado al otro costado de su caja, a la altura de las orugas.
 const BRINK_REACH = KNOCKBACK_MAX + 8
-const BRINK_WEAPONS: WeaponId[] = ['heavy', 'normal', 'nuke']
-function brinksOf(t: Terrain, targets: Player[]): { x: number; y: number }[] {
-  const out: { x: number; y: number }[] = []
+const BRINK_WEAPONS: WeaponId[] = ['heavy', 'normal', 'nuke', 'quake'] // v3: el terremoto también los sacude al vacío
+function brinksOf(t: Terrain, targets: Player[]): { x: number; y: number; hx: number }[] {
+  const out: { x: number; y: number; hx: number }[] = []
   for (const p of targets) {
     for (const side of [-1, 1] as const) {
       let hazard = false
@@ -855,7 +1101,7 @@ function brinksOf(t: Terrain, targets: Player[]): { x: number; y: number }[] {
           if (top < t.h && t.front[top * t.w + x] === LAVA) hazard = true
         }
       }
-      if (hazard) out.push({ x: p.x - side * (TANK_HALF_W + 3), y: p.y - 3 })
+      if (hazard) out.push({ x: p.x - side * (TANK_HALF_W + 3), y: p.y - 3, hx: p.x + side * (TANK_HALF_W + 10) })
     }
   }
   return out

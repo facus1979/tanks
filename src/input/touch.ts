@@ -7,6 +7,8 @@
 // HUD C (pulido v2): mover (◀ ▶) y elegir arma ya se tocan en el tablero de abajo del HUD, así que esos
 // botones no se crean; quedan potencia, ángulo, ítem, fuego, pausa, recentrar y pantalla completa,
 // ubicados por place() arriba del tablero y a la izquierda de los rivales (arriba a la derecha).
+// v3 teledirigido: mientras se guía (setSteer), dos botones grandes ◀ ▶ a los costados dirigen el misil;
+// también se puede arrastrar el dedo a la izquierda o a la derecha sobre el campo (desde donde se apoyó).
 import { VIEW_H, VIEW_W, type Viewport } from '../render/types'
 import type { Vec2 } from '../sim/types'
 import type { PadAction, PadState } from './gamepad'
@@ -22,6 +24,8 @@ const SLOW = 0.2
 // HUD (px lógicos de la pantalla de 800×450).
 const BAR_GAP = 6
 const RIVALS_W = 110 // v2.3: las placas de rivales de la derecha ocupan ~107 px lógicos
+// v3: pixels de la ventana que hay que arrastrar para dirigir el teledirigido
+const STEER_DRAG = 14
 
 export interface TouchAim {
   angle: number
@@ -53,6 +57,11 @@ export class TouchControls {
   private recenterBtn: HTMLButtonElement | null = null
   private cols: HTMLDivElement[] = []
   private topBar: HTMLDivElement | null = null
+  // v3 teledirigido: botones ◀ ▶ (lado apretado) y arrastre horizontal mientras se guía
+  private steerOn = false
+  private steerRoot = document.createElement('div')
+  private steerHeld = new Set<-1 | 1>()
+  private steerDrag: { id: number; x0: number; dir: -1 | 0 | 1 } | null = null
   // Punto de la ventana → mundo (renderer.screenToWorld). Sin él, mundo = pantalla lógica de 800 px.
   toWorld: ((clientX: number, clientY: number) => Vec2) | null = null
   // true: ese toque es de otro control (el minimapa) y no apunta.
@@ -80,7 +89,10 @@ export class TouchControls {
     this.guide.classList.add('touch-guide')
     this.line.setAttribute('stroke-dasharray', '4 4')
     this.guide.append(this.line)
-    this.root.append(left, right, top, this.guide)
+    this.steerRoot.className = 'touch-steer'
+    this.steerRoot.hidden = true
+    this.steerRoot.append(this.steerButton(-1), this.steerButton(1))
+    this.root.append(left, right, top, this.guide, this.steerRoot)
     document.getElementById('app')?.append(this.root)
     this.bindDrag()
   }
@@ -100,7 +112,52 @@ export class TouchControls {
       this.fingers.clear()
       this.twoFinger = false
       this.panDx = 0
+      this.steerHeld.clear()
+      this.steerDrag = null
     }
+  }
+
+  // v3: modo guiado del teledirigido (solo cuando lo dirige este dispositivo). Oculta los botones de
+  // apuntar y muestra ◀ ▶ grandes a los costados.
+  setSteer(on: boolean): void {
+    if (!this.enabled || on === this.steerOn) return
+    this.steerOn = on
+    this.steerRoot.hidden = !on
+    for (const col of this.cols) col.style.visibility = on ? 'hidden' : ''
+    if (!on) {
+      this.steerHeld.clear()
+      this.steerDrag = null
+    }
+    if (on) this.endDrag()
+  }
+
+  private steerButton(side: -1 | 1): HTMLButtonElement {
+    const b = btn(side < 0 ? '◀' : '▶', 'steer')
+    // en línea: los estilos de style.css son de vistas; botones grandes y translúcidos pegados a cada costado
+    Object.assign(b.style, {
+      position: 'fixed',
+      top: '22%',
+      height: '46%',
+      width: 'max(64px, 16vw)',
+      [side < 0 ? 'left' : 'right']: side < 0 ? 'max(6px, env(safe-area-inset-left))' : 'max(6px, env(safe-area-inset-right))',
+      fontSize: 'max(28px, 6vw)',
+      opacity: '0.55',
+      zIndex: '30',
+    })
+    const off = (): void => {
+      this.steerHeld.delete(side)
+      b.classList.remove('on')
+    }
+    b.addEventListener('pointerdown', (e) => {
+      e.preventDefault()
+      b.setPointerCapture(e.pointerId)
+      this.steerHeld.add(side)
+      b.classList.add('on')
+    })
+    b.addEventListener('pointerup', off)
+    b.addEventListener('pointercancel', off)
+    b.addEventListener('lostpointercapture', off)
+    return b
   }
 
   // Botón de recentrar: solo en mapas que no entran en pantalla.
@@ -145,6 +202,7 @@ export class TouchControls {
       angle: 0,
       power: 0,
       move: 0,
+      steer: 0,
       pan: 0,
       fine: false,
       stepAngle: this.steps.angle,
@@ -156,6 +214,12 @@ export class TouchControls {
     state.angle += this.speed('angUp') - this.speed('angDown')
     state.power += this.speed('powUp') - this.speed('powDown')
     // mover lo hacen ◀ ▶ del tablero del HUD (main.ts), no un botón táctil propio
+    if (this.steerOn) {
+      let side = 0
+      for (const s of this.steerHeld) side += s
+      if (side === 0 && this.steerDrag) side = this.steerDrag.dir
+      state.steer = Math.max(-1, Math.min(1, side))
+    }
     return state
   }
 
@@ -230,6 +294,11 @@ export class TouchControls {
         return
       }
       if (this.drag || this.twoFinger) return
+      if (this.steerOn) {
+        // guiando: el dedo dirige el misil, no apunta
+        if (!this.steerDrag) this.steerDrag = { id: e.pointerId, x0: e.clientX, dir: 0 }
+        return
+      }
       this.drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, aim: null }
     })
     target.addEventListener('pointermove', (e) => {
@@ -244,6 +313,12 @@ export class TouchControls {
       if (f) {
         f.x = e.clientX
         f.y = e.clientY
+      }
+      const sd = this.steerDrag
+      if (sd && sd.id === e.pointerId) {
+        const dx = e.clientX - sd.x0
+        sd.dir = dx <= -STEER_DRAG ? -1 : dx >= STEER_DRAG ? 1 : 0
+        return
       }
       const d = this.drag
       if (!d || d.id !== e.pointerId) return
@@ -271,6 +346,7 @@ export class TouchControls {
       this.fingers.delete(e.pointerId)
       if (this.fingers.size === 0) this.twoFinger = false
       if (this.drag?.id === e.pointerId) this.endDrag()
+      if (this.steerDrag?.id === e.pointerId) this.steerDrag = null
     }
     target.addEventListener('pointerup', end)
     target.addEventListener('pointercancel', end)

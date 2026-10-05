@@ -94,6 +94,11 @@ export const BEDROCK = 9 // fondo del mapa; indestructible
 // apoyo); fluyen con un autómata celular determinista. No tienen textura en el manifiesto: los dibuja el render.
 export const WATER = 10
 export const LAVA = 11
+// v3 bioma nieve. SNOW: blanda (se rompe fácil, amortigua caídas como la tierra), se compacta bajo el
+// tanque. ICE: sólido y resbaloso (el tanque patina: ver ICE_SLIDE); la capa de hielo de un lago congelado
+// se rompe con las explosiones y deja ver el agua de abajo.
+export const SNOW = 12
+export const ICE = 13
 
 export type Material = number
 
@@ -120,7 +125,13 @@ export const MATERIALS: MaterialDef[] = [
   // v4. Los nombres 'agua' y 'lava' los usa el minimapa para elegir color. Las explosiones no los rompen.
   { id: WATER, name: 'agua', toughness: 0, flammable: false, liquid: true },
   { id: LAVA, name: 'lava', toughness: 0, flammable: false, liquid: true },
+  // v3 nieve. Los valores finos los balancea sim.
+  { id: SNOW, name: 'nieve', toughness: 1.3, flammable: false }, // v3: > 1, se rompe más allá del radio (blanda)
+  { id: ICE, name: 'hielo', toughness: 0.8, flammable: false },
 ]
+
+// v3: en hielo, el tanque que se mueve o es empujado sigue patinando hasta ICE_SLIDE px de más.
+export const ICE_SLIDE = 24
 
 // v4 reglas de líquidos (ver PROYECTO.md, v2 "Reglas nuevas"):
 // - Agua: un tanque que cae al agua no recibe daño de caída. Un proyectil dentro del agua pierde velocidad
@@ -162,14 +173,16 @@ export interface Terrain {
   pits?: Uint8Array
 }
 
-export type Biome = 'forest' | 'jungle' | 'industrial'
-export const BIOMES: Biome[] = ['forest', 'jungle', 'industrial']
+export type Biome = 'forest' | 'jungle' | 'industrial' | 'snow'
+export const BIOMES: Biome[] = ['forest', 'jungle', 'industrial', 'snow'] // v3: nieve
 
 // ---------- utilería ----------
 
 // barrel explota en cadena; crate se rompe; el resto es decorativo y cae o desaparece
 // si se queda sin apoyo.
-export type PropKind = 'barrel' | 'crate' | 'ladder' | 'lamp' | 'flag' | 'windsock'
+// v3: loot = caja de botín (cae en paracaídas; romperla paga BONUS.loot al que la rompe).
+// target = objetivo pago del mapa (camión, depósito; destruirlo paga BONUS.target).
+export type PropKind = 'barrel' | 'crate' | 'ladder' | 'lamp' | 'flag' | 'windsock' | 'loot' | 'target'
 
 export interface Prop {
   id: number
@@ -183,23 +196,42 @@ export interface Prop {
 
 // ---------- armas ----------
 
-export type WeaponId = 'normal' | 'heavy' | 'dirt' | 'cluster' | 'napalm' | 'digger' | 'roller' | 'nuke'
+export type WeaponId =
+  | 'normal' | 'heavy' | 'dirt' | 'cluster' | 'napalm' | 'digger' | 'roller' | 'nuke'
+  // v3
+  | 'guided' // misil teledirigido: vuelo balístico hasta el apogeo; en la bajada se dirige (fase 'guiding')
+  | 'bouncer' // rebotadora: explota en cada rebote (bounces explosiones chicas + una final)
+  | 'laser' // rayo recto sin gravedad ni viento; atraviesa materiales blandos, frena en piedra/metal
+  | 'mine' // queda clavada donde cae (Hazard 'mine'); explota si un tanque pasa cerca o al vencer
+  | 'quake' // terremoto: derrumba y sacude una zona grande, mueve tanques
+  | 'blackhole' // agujero negro: atrae tanques y escombros hacia el centro un instante
+  | 'acid' // corroe piedra y metal, daña y deja un charco (Hazard 'acid') que daña por turno
+  | 'wall' // muro: levanta una pared vertical fina y alta de tierra donde cae
 
 // Estilo visual de la explosión. El renderer elige el efecto por este campo, nunca por el id.
-export type BlastStyle = 'fire' | 'bigfire' | 'dirt' | 'napalm' | 'dig' | 'nuke'
+export type BlastStyle = 'fire' | 'bigfire' | 'dirt' | 'napalm' | 'dig' | 'nuke' | 'laser' | 'quake' | 'blackhole' | 'acid' | 'wall' | 'spark' // v3 (spark: rebotes y mina)
 
 export interface WeaponDef {
   id: WeaponId
   name: string
   radius: number
   damage: number
-  terrain: 'destroy' | 'build' | 'dig'
+  terrain: 'destroy' | 'build' | 'dig' | 'wall' | 'none' // v3: wall (pared vertical), none (no toca el terreno)
   blast: BlastStyle
   ammo: number
   // cluster: se parte en N al llegar al apogeo. roller: rueda cuesta abajo hasta frenar.
   split?: number
   rolls?: boolean
   burn?: number // napalm: segundos de fuego que quema madera y daña por turno
+  // v3 (los valores los balancea sim)
+  guided?: boolean // se dirige en la bajada
+  bounces?: number // rebotadora: rebotes, cada uno con su explosión
+  beam?: boolean // láser
+  mine?: boolean // queda como Hazard 'mine'
+  quake?: number // radio del sacudón
+  pull?: number // agujero negro: radio de atracción
+  acid?: number // turnos que dura el charco de ácido
+  hard?: boolean // ácido: rompe piedra y metal como si fueran tierra
 }
 
 export const WEAPONS: Record<WeaponId, WeaponDef> = {
@@ -211,10 +243,65 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
   digger: { id: 'digger', name: 'Excavadora', radius: 9, damage: 10, terrain: 'dig', blast: 'dig', ammo: 2 },
   roller: { id: 'roller', name: 'Rodadora', radius: 16, damage: 30, terrain: 'destroy', blast: 'fire', ammo: 2, rolls: true },
   nuke: { id: 'nuke', name: 'Nuke', radius: 60, damage: 55, terrain: 'destroy', blast: 'nuke', ammo: 1 },
+  // v3: valores iniciales; el área sim los balancea. ammo 0 = solo se consiguen en la tienda.
+  guided: { id: 'guided', name: 'Teledirigido', radius: 16, damage: 30, terrain: 'destroy', blast: 'fire', ammo: 0, guided: true },
+  bouncer: { id: 'bouncer', name: 'Rebotadora', radius: 10, damage: 14, terrain: 'destroy', blast: 'spark', ammo: 0, bounces: 3 },
+  laser: { id: 'laser', name: 'Láser', radius: 4, damage: 30, terrain: 'destroy', blast: 'laser', ammo: 0, beam: true },
+  mine: { id: 'mine', name: 'Mina', radius: 18, damage: 35, terrain: 'destroy', blast: 'spark', ammo: 0, mine: true },
+  quake: { id: 'quake', name: 'Terremoto', radius: 70, damage: 10, terrain: 'none', blast: 'quake', ammo: 0, quake: 70 },
+  blackhole: { id: 'blackhole', name: 'Agujero negro', radius: 12, damage: 8, terrain: 'destroy', blast: 'blackhole', ammo: 0, pull: 80 },
+  acid: { id: 'acid', name: 'Ácido', radius: 18, damage: 16, terrain: 'destroy', blast: 'acid', ammo: 0, acid: 2, hard: true },
+  wall: { id: 'wall', name: 'Muro', radius: 30, damage: 0, terrain: 'wall', blast: 'wall', ammo: 0 },
 }
 
-// Orden de la barra de armas (teclas 1 a 8).
-export const WEAPON_ORDER: WeaponId[] = ['normal', 'heavy', 'dirt', 'cluster', 'napalm', 'digger', 'roller', 'nuke']
+// Orden de la barra de armas (v3: 16; teclas 1 a 8 para las primeras, rueda/Tab para todas).
+export const WEAPON_ORDER: WeaponId[] = [
+  'normal', 'heavy', 'dirt', 'cluster', 'napalm', 'digger', 'roller', 'nuke',
+  'guided', 'bouncer', 'laser', 'mine', 'quake', 'blackhole', 'acid', 'wall',
+]
+
+// v3 misil teledirigido. Desde el apogeo, el que disparó lo dirige con comandos 'steer': cada tick de
+// STEER_TICK s gira la velocidad a lo sumo STEER_RATE rad/s hacia el lado pedido (-1 antihorario en
+// pantalla, 1 horario, 0 nada). Tiene GUIDE_TIME s de guiado; después cae libre. Cabecea con un temblor
+// determinista (de la seed del tiro) de hasta STEER_WOBBLE rad/s y el viento lo sigue empujando.
+export const STEER_TICK = 0.05
+export const STEER_RATE = 1.6
+export const GUIDE_TIME = 1.5
+export const STEER_WOBBLE = 0.7
+
+// v3 peligros que quedan en el mapa entre turnos (minas, charcos de ácido).
+export interface Hazard {
+  id: number
+  kind: 'mine' | 'acid'
+  ownerId: number
+  x: number
+  y: number
+  radius: number
+  turns: number // turnos que le quedan (la mina explota al vencer)
+}
+
+// v3 misil teledirigido en vuelo (fase 'guiding').
+export interface GuidedState {
+  ownerId: number
+  x: number
+  y: number
+  vx: number
+  vy: number
+  t: number // segundos desde el disparo
+  guide: number // segundos de guiado que le quedan
+  seed: number // temblor determinista
+}
+
+// v3 recompensas en la partida: plata extra al momento (se suma a Player.money y a earnings).
+export type BonusKind =
+  | 'longshot' // impacto a un tanque a más de LONGSHOT_FRAC del ancho del mapa
+  | 'double' // dos o más kills con un tiro
+  | 'abyss' | 'lava' | 'collapse' // kill por abismo, lava o derrumbe
+  | 'firstblood' // primer daño a un rival en la ronda
+  | 'loot' // romper una caja de botín
+  | 'target' // destruir un objetivo pago
+export const BONUS: Record<BonusKind, number> = { longshot: 150, double: 250, abyss: 200, lava: 150, collapse: 150, firstblood: 100, loot: 250, target: 400 }
+export const LONGSHOT_FRAC = 0.5
 
 // ---------- jugadores y estado ----------
 
@@ -222,7 +309,7 @@ export type PlayerKind = 'human' | 'ai'
 export type Difficulty = 'easy' | 'normal' | 'hard'
 // aiming: se juega la ronda. roundover: terminó la ronda, se muestra la tabla.
 // shop: tienda entre rondas. gameover: terminó la partida (todas las rondas).
-export type Phase = 'aiming' | 'roundover' | 'shop' | 'gameover'
+export type Phase = 'aiming' | 'guiding' | 'roundover' | 'shop' | 'gameover' // guiding: v3, misil teledirigido en la bajada
 
 // Tripulantes con cara propia. El renderer mapea crew -> sprite y retrato.
 // v5: cuatro más (comando con boina negra, tanquista con casco de cuero y antiparras, piloto con casco y
@@ -241,8 +328,15 @@ export const MAX_PLAYERS_BY_SIZE: Record<MapSize, number> = { small: 4, medium: 
 // fuel: suma fuelFor(width) al combustible del turno (useItem).
 // repair: cura REPAIR_HP (useItem, no gasta el turno).
 // tracer: el próximo tiro muestra la trayectoria completa al apuntar (useItem).
-export type ItemId = 'shield' | 'parachute' | 'fuel' | 'repair' | 'tracer'
-export const ITEM_ORDER: ItemId[] = ['shield', 'parachute', 'fuel', 'repair', 'tracer']
+// v3 jetpack: salto hasta JETPACK_RANGE px hacia el punto pedido (useItem con target); cruza abismos y lagos.
+// v3 teleport: aparece en el punto pedido (useItem con target), a lo sumo TELEPORT_RANGE px; cae si no hay piso.
+// v3 anchor: inmune al empuje y al patinar hasta su próximo turno (Player.anchored).
+// v3 deflector: desvía el próximo proyectil que lo tocaría (Player.deflector); se consume.
+// jetpack, teleport, anchor y deflector no gastan el turno (como repair).
+export type ItemId = 'shield' | 'parachute' | 'fuel' | 'repair' | 'tracer' | 'jetpack' | 'teleport' | 'anchor' | 'deflector'
+export const ITEM_ORDER: ItemId[] = ['shield', 'parachute', 'fuel', 'repair', 'tracer', 'jetpack', 'teleport', 'anchor', 'deflector']
+export const JETPACK_RANGE = 120
+export const TELEPORT_RANGE = 400
 export const SHIELD_HP = 30
 export const REPAIR_HP = 25
 
@@ -266,11 +360,24 @@ export const SHOP: ShopEntry[] = [
   { id: 'digger', kind: 'weapon', name: 'Excavadora', price: 150, qty: 2, max: 9 },
   { id: 'roller', kind: 'weapon', name: 'Rodadora', price: 220, qty: 2, max: 9 },
   { id: 'nuke', kind: 'weapon', name: 'Nuke', price: 900, qty: 1, max: 2 },
+  // v3 (sim-armas): precios por unidad entre la rodadora (110) y la nuke; las que más rinden, con tope bajo
+  { id: 'guided', kind: 'weapon', name: 'Teledirigido', price: 380, qty: 2, max: 6 },
+  { id: 'bouncer', kind: 'weapon', name: 'Rebotadora', price: 240, qty: 2, max: 9 },
+  { id: 'laser', kind: 'weapon', name: 'Láser', price: 260, qty: 2, max: 6 },
+  { id: 'mine', kind: 'weapon', name: 'Mina', price: 200, qty: 2, max: 6 },
+  { id: 'quake', kind: 'weapon', name: 'Terremoto', price: 320, qty: 1, max: 3 },
+  { id: 'blackhole', kind: 'weapon', name: 'Agujero negro', price: 360, qty: 1, max: 3 },
+  { id: 'acid', kind: 'weapon', name: 'Ácido', price: 260, qty: 2, max: 6 },
+  { id: 'wall', kind: 'weapon', name: 'Muro', price: 120, qty: 2, max: 6 },
   { id: 'shield', kind: 'item', name: 'Escudo', price: 350, qty: 1, max: 3 },
   { id: 'parachute', kind: 'item', name: 'Paracaídas', price: 120, qty: 1, max: 3 },
   { id: 'fuel', kind: 'item', name: 'Combustible', price: 80, qty: 1, max: 5 },
   { id: 'repair', kind: 'item', name: 'Reparación', price: 250, qty: 1, max: 3 },
   { id: 'tracer', kind: 'item', name: 'Trazador', price: 150, qty: 1, max: 5 },
+  { id: 'jetpack', kind: 'item', name: 'Jetpack', price: 200, qty: 1, max: 3 },
+  { id: 'teleport', kind: 'item', name: 'Teletransporte', price: 300, qty: 1, max: 2 },
+  { id: 'anchor', kind: 'item', name: 'Ancla', price: 120, qty: 1, max: 3 },
+  { id: 'deflector', kind: 'item', name: 'Deflector', price: 280, qty: 1, max: 3 },
 ]
 
 // Plata que se gana en la ronda. La reparte sim al cerrar la ronda.
@@ -279,11 +386,18 @@ export const EARN = { perDamage: 4, kill: 300, survive: 150, roundWin: 400, self
 
 // ---------- partida ----------
 
+// v3 personalidades de la IA (cambian a quién le tira, qué arma elige, cuánto se mueve).
+export type Personality = 'aggressive' | 'sniper' | 'digger' | 'opportunist'
+export const PERSONALITIES: Personality[] = ['aggressive', 'sniper', 'digger', 'opportunist']
+
 export interface SlotConfig {
   kind: PlayerKind
-  name?: string // si falta, sim usa el nombre del tripulante
+  name?: string // si falta, sim usa el nombre del tripulante. v3: hasta NAME_MAX letras, lo escribe el jugador
   crew?: CrewId // si falta, sim asigna por índice
+  color?: number // v3: índice en TANK_COLORS; si falta, por índice de casillero. Únicos entre casilleros
+  personality?: Personality // v3: solo IA; si falta, sim sortea con la seed
 }
+export const NAME_MAX = 10
 
 export interface MatchConfig {
   slots: SlotConfig[] // 2 a MAX_PLAYERS_BY_SIZE[size] casilleros ocupados (v5: hasta 8); hot-seat = varios 'human'
@@ -313,6 +427,9 @@ export interface Player {
   items: Record<ItemId, number> // inventario, se conserva entre rondas
   shield: number // HP de escudo activo; 0 = sin escudo. Se pierde al terminar la ronda
   tracer: boolean // el próximo tiro muestra la trayectoria completa
+  anchored: boolean // v3: ancla activa hasta su próximo turno
+  deflector: boolean // v3: desvía el próximo proyectil
+  personality?: Personality // v3: solo IA
   roundsWon: number
   kills: number // en toda la partida
   ready: boolean // en la tienda: terminó de comprar
@@ -341,6 +458,9 @@ export interface GameState {
   earnings: Record<number, number> // plata ganada en la última ronda, por id de jugador
   calm: number // v2: tiros seguidos sin daño a otro tanque en la ronda (v2.2: el daño a otro la reinicia siempre)
   lava: number | null // v2: y de la superficie de la lava de muerte súbita; null = todavía no apareció
+  hazards: Hazard[] // v3: minas y charcos de ácido en el mapa
+  guided: GuidedState | null // v3: misil teledirigido en la bajada (phase 'guiding')
+  bonusFirstBlood: boolean // v3: ya se pagó el primer daño de la ronda
   windLeft: number // v2.2: turnos que faltan para que cambie el viento (cambia por vuelta: una vez por tanque vivo)
 }
 
@@ -349,7 +469,10 @@ export type Command =
   | { type: 'selectWeapon'; playerId: number; weapon: WeaponId }
   | { type: 'move'; playerId: number; dir: -1 | 1 } // F6: un paso de ~1 px gastando combustible
   | { type: 'fire'; playerId: number }
-  | { type: 'useItem'; playerId: number; item: ItemId } // shield, fuel, repair, tracer; en su turno
+  | { type: 'useItem'; playerId: number; item: ItemId; target?: Vec2 } // en su turno; target: v3, destino de jetpack y teleport
+  // v3: correcciones del misil teledirigido, una por tick de STEER_TICK s (-1, 0, 1). Solo en phase 'guiding'.
+  // Cuando se acaba el guiado (o el misil choca) el sim resuelve el resto del vuelo y el turno sigue como un fire.
+  | { type: 'steer'; playerId: number; dirs: (-1 | 0 | 1)[] }
   | { type: 'nextRound' } // roundover → shop (o gameover si era la última)
   | { type: 'buy'; playerId: number; id: ShopId } // shop: compra un paquete
   | { type: 'sell'; playerId: number; id: ShopId } // shop: devuelve un paquete al 50%
@@ -407,7 +530,17 @@ export type GameEvent =
   | { type: 'wind'; value: number }
   // Pulido v2: el tanque se corrió por el piso (empuje de una explosión o pendiente). path: piso del tanque cada
   // PATH_DT segundos desde t. Si termina sin piso, después viene un 'fall'.
-  | { type: 'slide'; playerId: number; cause: 'blast' | 'slope'; path: Vec2[]; t?: number }
+  | { type: 'slide'; playerId: number; cause: 'blast' | 'slope' | 'ice' | 'pull' | 'quake'; path: Vec2[]; t?: number } // v3: ice, pull, quake
+  // v3 armas e ítems
+  | { type: 'beam'; x0: number; y0: number; x1: number; y1: number; t: number } // láser
+  | { type: 'quake'; x: number; y: number; radius: number; t: number } // terremoto
+  | { type: 'pull'; x: number; y: number; radius: number; t: number; duration: number } // agujero negro
+  | { type: 'hazard'; action: 'place' | 'trigger' | 'expire'; hazard: Hazard; t?: number } // mina o ácido
+  | { type: 'deflect'; playerId: number; x: number; y: number; t: number } // el deflector desvió un proyectil
+  | { type: 'jetpack'; playerId: number; path: Vec2[] } // salto: camino del tanque (un punto cada PATH_DT)
+  | { type: 'teleport'; playerId: number; from: Vec2; to: Vec2 }
+  | { type: 'guide'; guided: GuidedState } // v3: el misil llegó al apogeo y empieza el guiado (phase 'guiding')
+  | { type: 'bonus'; playerId: number; kind: BonusKind; amount: number; x: number; y: number; t?: number } // v3 recompensa
   // v4: los líquidos se asentaron. patches[i] se aplica a la grilla en t + i * dt (el último deja el estado final).
   | { type: 'flow'; t: number; dt: number; patches: TerrainPatch[] }
   // v2.4: derrumbe. Terrones sueltos (tierra o piedra sin apoyo tras una explosión) caen y se asientan.

@@ -1,6 +1,6 @@
 // Texturas de material repetibles (tile = x % w, y % h), con el mismo sombreado que look-test.
 // Cada función devuelve un Canvas opaco cuyo borde derecho continúa en el izquierdo y el de abajo en el de arriba.
-import { Canvas, hash, rnd, mix, mul, stoneShade, brickShade, dirtColor, plankColor, slatColor, postColor } from './pixel.mjs'
+import { Canvas, hash, rnd, mix, mul, bayer, stoneShade, brickShade, dirtColor, plankColor, slatColor, postColor } from './pixel.mjs'
 
 const wrap = (v, n) => ((v % n) + n) % n
 
@@ -211,4 +211,95 @@ export function bedrockTexture(w = 256, h = 128) {
 
 export function airTexture() {
   return new Canvas(8, 8)
+}
+
+// ---------- v3: bioma nieve ----------
+
+// Ruido de valor 2D periódico (período pw × ph celdas de `cell` px): para que las texturas de nieve y hielo
+// empalmen en los dos ejes sin costura.
+function noise2Loop(x, y, cell, pw, ph, s) {
+  const tx = x / cell
+  const ty = y / cell
+  const ix = Math.floor(tx)
+  const iy = Math.floor(ty)
+  const fx = tx - ix
+  const fy = ty - iy
+  const ux = fx * fx * (3 - 2 * fx)
+  const uy = fy * fy * (3 - 2 * fy)
+  const v = (i, j) => rnd(wrap(i, pw), wrap(j, ph), s)
+  const a = v(ix, iy) * (1 - ux) + v(ix + 1, iy) * ux
+  const b = v(ix, iy + 1) * (1 - ux) + v(ix + 1, iy + 1) * ux
+  return a * (1 - uy) + b * uy
+}
+
+// Nieve: blanca con sombras azuladas en montículos suaves, capas apenas marcadas (nieve que se fue
+// asentando) y granos: brillitos blancos y puntitos celestes. Bandas cuantizadas con bayer, como el cielo,
+// para que no quede un degradé liso.
+export function snowTexture(w = 128, h = 64) {
+  const tones = [0xf6f9fd, 0xe6eef8, 0xd2deef, 0xbccce4]
+  return paint(w, h, (x, y) => {
+    // montículos grandes + detalle; las capas son ondas horizontales periódicas en w
+    const n = noise2Loop(x, y, 16, w / 16, h / 16, 401) * 0.65 + noise2Loop(x, y, 8, w / 8, h / 8, 402) * 0.35
+    const layer = Math.sin(((y + Math.sin((x / w) * Math.PI * 4) * 2.5) / 10.667) * Math.PI * 2)
+    let t = n * 2.2 + (layer > 0.82 ? 0.55 : 0) - 0.4
+    const k = Math.max(0, Math.min(3, Math.floor(t + bayer(x, y) * 0.9)))
+    let c = tones[k]
+    // granos
+    const g = rnd(x, y, 403)
+    if (g > 0.985) c = 0xffffff
+    else if (g < 0.012) c = 0xa8bcd8
+    // costra de las capas: una fila un poco más azul donde la onda pasa por arriba
+    if (layer > 0.97 && rnd(x >> 1, y, 404) > 0.4) c = mix(c, 0xa4b8d6, 0.35)
+    return c
+  })
+}
+
+// Hielo: celeste translúcido (tonos que se aclaran y oscurecen en manchas, como profundidad), grietas finas
+// en celdas de Voronoi periódicas con canto claro arriba y sombra abajo, y brillos diagonales cortos.
+export function iceTexture(w = 128, h = 64) {
+  const S = 21.333 // 6 × 3 celdas en 128 × 64
+  const gw = 6
+  const gh = 3
+  const pt = (gx, gy) => {
+    const hx = wrap(gx, gw)
+    const hy = wrap(gy, gh)
+    const q = hash(hx, hy, 411)
+    return { x: gx * S + 4 + (q % 13), y: gy * S + 4 + ((q >> 8) % 13), id: hx + hy * gw }
+  }
+  const tones = [0x5e9ccc, 0x74b2dc, 0x8cc6e8, 0xa6d8f2]
+  return paint(w, h, (x, y) => {
+    const n = noise2Loop(x, y, 16, w / 16, h / 16, 412) * 0.7 + noise2Loop(x, y, 4, w / 4, h / 4, 413) * 0.3
+    const k = Math.max(0, Math.min(3, Math.floor(n * 4 + bayer(x, y) * 0.8 - 0.2)))
+    let c = tones[k]
+    // grietas
+    const gx = Math.floor(x / S)
+    const gy = Math.floor(y / S)
+    let d1 = 1e9
+    let d2 = 1e9
+    let best = null
+    for (let j = -1; j <= 1; j++) {
+      for (let i = -1; i <= 1; i++) {
+        const p = pt(gx + i, gy + j)
+        const d = Math.hypot(x - p.x, y - p.y)
+        if (d < d1) {
+          d2 = d1
+          d1 = d
+          best = p
+        } else if (d < d2) d2 = d
+      }
+    }
+    // no todas las aristas son grieta: solo las de celdas "partidas" (así no queda un panal parejo)
+    const cracked = hash(best.id, 0, 414) % 3 !== 0
+    if (cracked && d2 - d1 < 0.9) c = 0xe4f6ff
+    else if (cracked && d2 - d1 < 1.9 && y > best.y) c = mix(c, 0x3e78aa, 0.45)
+    // brillos: trazos diagonales cortos de 4 px. Los períodos (16 en x + y, 8 en y − x) dividen a 128 y a 64,
+    // así el tile empalma también en diagonal
+    const u = wrap(x + y, 16)
+    const v = wrap(y - x, 8)
+    const b = hash(wrap(Math.floor((x + y) / 16), 4), wrap(Math.floor((y - x) / 8), 8), 415)
+    if (b % 5 === 0 && u < 4 && v === 0) c = mix(c, 0xffffff, 0.75)
+    // burbujas atrapadas
+    if (rnd(x, y, 416) > 0.992) c = mix(c, 0xd8f0ff, 0.7)
+    return c
+  })
 }

@@ -1,7 +1,7 @@
 // Contrato del online P2P. El anfitrión es la autoridad: corre la sim (y la IA) y
 // reparte la lista ordenada de comandos aceptados. Cada cliente aplica esa lista sobre
 // su réplica; como la sim es determinista, todos llegan al mismo estado.
-import type { Biome, Command, CrewId, Difficulty, MapSize, MatchConfig, PlayerKind } from '../sim'
+import type { Biome, Command, CrewId, Difficulty, MapSize, MatchConfig, Personality, PlayerKind } from '../sim'
 
 export const NET_VERSION = 1
 
@@ -28,6 +28,8 @@ export interface LobbySlot {
   kind: PlayerKind | 'off'
   name: string
   crew: CrewId
+  color?: number // v3: índice en TANK_COLORS
+  personality?: Personality // v3: solo IA
   owner: 'host' | string | null // quién lo controla: el anfitrión, un peerId o nadie (IA / libre)
   connected: boolean
 }
@@ -49,6 +51,8 @@ export type NetMessage =
   | { t: 'release' }
   | { t: 'input'; command: Command } // pedido; el anfitrión valida que sea del jugador de ese peer
   | { t: 'aimLive'; playerId: number; angle: number; power: number } // vista previa, no entra al log
+  | { t: 'profile'; name: string; crew: CrewId; color: number } // v3: nombre, tripulante y color del casillero que ocupa (solo en el lobby)
+  | { t: 'steerLive'; playerId: number; x: number; y: number } // v3: posición del misil teledirigido en vivo (vista previa, no entra al log)
   // anfitrión → clientes
   | { t: 'welcome'; peerId: string; lobby: LobbyState }
   | { t: 'lobby'; lobby: LobbyState }
@@ -70,3 +74,6 @@ export type NetMessage =
 // - Turno vencido de un humano remoto: el anfitrión despacha 'fire' en su nombre.
 // - Peer desconectado: el anfitrión despacha { type: 'setKind', kind: 'ai' } y la IA juega ese tanque.
 //   Si vuelve con el mismo token, 'setKind' 'human' y recibe un snapshot.
+// - v3 misil teledirigido: el que dispara manda 'steer' por 'input' en tandas (por ejemplo cada 0,1 s = 2 ticks);
+//   el anfitrión las mete en el log en orden. Turno vencido en 'guiding': el anfitrión despacha 'steer' con ceros
+//   hasta que el misil cae.

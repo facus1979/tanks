@@ -83,7 +83,8 @@ function loadCanvas(file: string): Promise<HTMLCanvasElement | null> {
   return p
 }
 
-async function loadTexture(file: string | undefined): Promise<Texture | null> {
+// v3: también la usa loot.ts (botín y objetivos, opcionales en el manifiesto)
+export async function loadTexture(file: string | undefined): Promise<Texture | null> {
   if (!file) return null
   const c = await loadCanvas(file)
   return c ? tex(c) : null
@@ -110,7 +111,7 @@ async function loadStrip(strip: Strip | undefined): Promise<Texture[] | null> {
   return slice(base, strip.cell.w, strip.cell.h, strip.frames)
 }
 
-async function loadManifest(): Promise<Partial<AssetManifest> | null> {
+export async function loadManifest(): Promise<Partial<AssetManifest> | null> {
   try {
     const res = await fetch(DIR + 'manifest.json', { cache: 'no-cache' })
     if (!res.ok) return null
@@ -160,7 +161,9 @@ export async function loadArt(): Promise<Art> {
     Promise.all([0, 1, 2, 3].map(async (i) => (await loadStrip(t?.treadFrames?.[i])) ?? fallbackTreads)),
     Promise.all(CREWS.map(async (c) => [c, (await loadTexture(m.crews?.[c]?.sprite)) ?? tex(fb.crewSprite(c))] as const)),
     Promise.all(
-      Array.from({ length: 10 }, (_, id) => {
+      // v3: 0..9 sólidos de siempre, 12 nieve y 13 hielo (10 y 11, agua y lava, no usan textura)
+      Array.from({ length: 14 }, (_, id) => {
+        if (id === 10 || id === 11) return Promise.resolve(null)
         const entry = (m.materials as Record<string, { file: string }> | undefined)?.[String(id)]
         return loadPixels(entry?.file)
       }),

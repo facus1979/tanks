@@ -3,9 +3,15 @@
 // tomar ni configurar (el anfitrión, en src/net, tampoco deja ocuparlos).
 // v2.3: al achicar el mapa el anfitrión compacta los casilleros con la misma regla que el menú local
 // (compactSlots en ./menu); esta vista solo muestra lo que llega y el cursor sigue al mismo elemento.
-import { CREWS, MAP_SIZE_ORDER, MAX_PLAYERS, MAX_PLAYERS_BY_SIZE, TANK_COLORS, type CrewId, type MapSize } from '../sim/types'
+// v3 perfil: cada casillero muestra su color de tanque (LobbySlot.color) y su nombre. En el casillero propio
+// (mySlot) se editan tripulante, color y nombre (teclado, o teclado del sistema en táctil): la vista avisa con
+// onProfile({ name, crew, color }) y el flujo/red manda el mensaje 'profile'. El anfitrión elige la personalidad
+// de cada IA (onPersonality). Los tripulantes y colores que ya usa otro casillero se saltean; el anfitrión valida.
+import { CREWS, MAP_SIZE_ORDER, MAX_PLAYERS, MAX_PLAYERS_BY_SIZE, NAME_MAX, TANK_COLORS, type CrewId, type MapSize, type Personality } from '../sim/types'
 import type { LobbySlot } from '../net/types'
 import { bindNav, el, label, portrait, screenRoot, setLabel, setPortrait, type Nav } from './kit'
+import { CREW_NAMES, cleanName, nameInput, nextColor, nextCrew, nextPersonality, personalityName, setSwatch, swatch } from './profile'
+import { isTouchDevice } from '../input/touch'
 import { SIZE_NAMES } from './menu'
 import type { LobbyModel, LobbyView } from './types'
 
@@ -15,15 +21,26 @@ type OptionKey = 'rounds' | 'difficulty' | 'biome' | 'size' | 'turnSeconds'
 
 const KIND_CYCLE: SlotKind[] = ['human', 'ai', 'off']
 const KIND_NAMES: Record<SlotKind, string> = { human: 'HUMANO', ai: 'IA', off: 'VACIO' }
-const CREW_NAMES: Record<CrewId, string> = {
-  bandana: 'BANDANA',
-  sarge: 'SARGENTO',
-  rookie: 'NOVATO',
-  desert: 'DESIERTO',
-  commando: 'COMANDO',
-  goggles: 'TANQUISTA',
-  pilot: 'PILOTO',
-  colonel: 'CORONEL',
+
+// v3: perfil propio que la vista pide cambiar (el flujo lo manda como mensaje 'profile').
+export interface LobbyProfile {
+  name: string
+  crew: CrewId
+  color: number // índice en TANK_COLORS
+}
+// v3: lo que la sala expone además de LobbyView (sin tocar src/ui/types.ts).
+export interface LobbyProfileHooks {
+  onProfile(cb: (profile: LobbyProfile) => void): void // casillero propio: nombre, tripulante o color
+  onPersonality(cb: (slot: number, personality: Personality | null) => void): void // anfitrión, IA; null = al azar
+}
+
+// Celdas navegables dentro de un casillero (izquierda/derecha): tripulante, color, nombre/personalidad, tipo.
+type Cell = 'crew' | 'color' | 'name' | 'kind'
+
+// Color de un casillero: el elegido o, si el lobby no lo trae (anfitrión anterior a v3), el de su índice.
+function slotColor(slot: LobbySlot | undefined, i: number): number {
+  const c = slot?.color
+  return c != null && c >= 0 && c < TANK_COLORS.length ? c : i % TANK_COLORS.length
 }
 
 // fallback: el valor que se muestra si el lobby no trae la clave (un anfitrión anterior a v2 no manda size)
@@ -75,7 +92,7 @@ function optionValue(m: LobbyModel, i: number): number | string | undefined {
   return m.lobby[o.key] ?? o.fallback
 }
 
-export function createLobbyView(root?: HTMLElement): LobbyView {
+export function createLobbyView(root?: HTMLElement): LobbyView & LobbyProfileHooks {
   return new LobbyScreen(root ?? screenRoot('lobby-view'))
 }
 
@@ -83,6 +100,11 @@ interface SlotEls {
   root: HTMLElement
   kind: HTMLElement
   kindLabel: HTMLCanvasElement
+  crew: HTMLElement
+  color: HTMLElement
+  swatch: HTMLElement
+  who: HTMLElement
+  input: HTMLInputElement | null
   portrait: HTMLCanvasElement
   numLabel: HTMLCanvasElement
   nameLabel: HTMLCanvasElement
@@ -103,11 +125,16 @@ function pxButton(text: string, onClick: () => void, extra = ''): { btn: HTMLBut
   return { btn, text: text_ }
 }
 
-class LobbyScreen implements LobbyView {
+class LobbyScreen implements LobbyView, LobbyProfileHooks {
   private model: LobbyModel | null = null
   private handlers: Handlers | null = null
   private unbind: (() => void) | null = null
   private cursor = 0
+  private cell: Cell = 'kind' // celda dentro del casillero bajo el cursor
+  private editing = false // escribiendo el nombre propio con el teclado
+  private draft: string | null = null // nombre propio mientras se edita (el modelo llega después)
+  private profileCb: (p: LobbyProfile) => void = () => {}
+  private personalityCb: (slot: number, p: Personality | null) => void = () => {}
   private side = 0 // columna de casilleros en la que estuvo el cursor por última vez
   private slotEls: SlotEls[] = []
   private optEls: { btn: HTMLButtonElement; value: HTMLCanvasElement }[] = []
@@ -130,11 +157,25 @@ class LobbyScreen implements LobbyView {
     this.model = model
     this.handlers = handlers
     this.cursor = 0
+    this.cell = 'kind'
+    this.editing = false
+    this.draft = null
     this.build()
     this.root.hidden = false
     this.unbind?.()
-    this.unbind = bindNav((nav) => this.nav(nav))
+    this.unbind = bindNav(
+      (nav) => this.nav(nav),
+      (e) => this.rawKey(e),
+    )
     this.sync()
+  }
+
+  onProfile(cb: (profile: LobbyProfile) => void): void {
+    this.profileCb = cb
+  }
+
+  onPersonality(cb: (slot: number, personality: Personality | null) => void): void {
+    this.personalityCb = cb
   }
 
   update(model: LobbyModel): void {
@@ -212,11 +253,53 @@ class LobbyScreen implements LobbyView {
     const crew = el('div', 'cell crew')
     const port = portrait(CREWS[i], TANK_COLORS[i] ?? 0xffffff, 1)
     crew.append(port)
+    const color = el('div', 'cell color')
+    const sw = swatch()
+    color.append(sw)
     const who = el('div', 'who')
     const nameLabel = label('')
     const ownerLabel = label('', 0x9a8e80)
     who.append(nameLabel, ownerLabel)
     const dot = el('div', 'dot')
+    // v3: tocar tripulante, color o nombre del casillero propio los cambia; el nombre de una IA (anfitrión),
+    // su personalidad
+    const pickCell = (c: Cell) => {
+      if (this.locked(i)) return
+      const at = this.rows().findIndex((r) => r.t === 'slot' && r.i === i)
+      if (at < 0) return
+      this.cursor = at
+      if (!this.cellsOf(i).includes(c)) return this.sync()
+      this.cell = c
+      this.activateCell(i, c)
+      this.sync()
+    }
+    crew.addEventListener('click', () => pickCell('crew'))
+    color.addEventListener('click', () => pickCell('color'))
+    who.addEventListener('click', () => {
+      if (this.slotEls[i]?.input && !this.slotEls[i].input?.hidden) return // lo atiende el campo táctil
+      pickCell('name')
+    })
+    let input: HTMLInputElement | null = null
+    if (isTouchDevice()) {
+      input = nameInput(
+        () => {
+          const at = this.rows().findIndex((r) => r.t === 'slot' && r.i === i)
+          if (at >= 0) this.cursor = at
+          this.cell = 'name'
+          this.editing = true
+          this.draft = this.myName()
+          this.sync()
+        },
+        (text) => {
+          this.draft = text
+          this.sendProfile({ name: text })
+          this.sync()
+        },
+        () => this.stopEditing(),
+      )
+      who.classList.add('has-input')
+      who.append(input)
+    }
     const kind = el('div', 'cell kind')
     const kindLabel = label('')
     kind.append(kindLabel)
@@ -227,8 +310,8 @@ class LobbyScreen implements LobbyView {
       this.pickSlot(i)
       this.sync()
     })
-    row.append(num, crew, who, dot, kind)
-    this.slotEls.push({ root: row, kind, kindLabel, portrait: port, numLabel, nameLabel, ownerLabel, dot })
+    row.append(num, crew, color, who, dot, kind)
+    this.slotEls.push({ root: row, kind, kindLabel, crew, color, swatch: sw, who, input, portrait: port, numLabel, nameLabel, ownerLabel, dot })
     return row
   }
 
@@ -247,7 +330,7 @@ class LobbyScreen implements LobbyView {
   private owner(slot: LobbySlot, i: number): { text: string; color: number } {
     const m = this.model
     if (slot.kind === 'off') return { text: '', color: 0x6a625a }
-    if (slot.kind === 'ai') return { text: 'IA', color: 0x9ad0ff }
+    if (slot.kind === 'ai') return { text: personalityName(slot.personality), color: 0x9ad0ff } // v3: el tipo ya dice IA
     if (m && m.mySlot === i) return { text: 'VOS', color: 0xffd23a }
     if (slot.owner === 'host') return { text: m?.role === 'host' ? 'VOS' : 'ANFITRION', color: 0xffd23a }
     if (slot.owner == null) return { text: 'LIBRE', color: 0x8a8078 }
@@ -269,13 +352,24 @@ class LobbyScreen implements LobbyView {
       const slot = m.lobby.slots[i]
       const locked = this.locked(i)
       e.root.classList.toggle('locked', locked)
-      e.kind.classList.toggle('sel', !locked && cur?.t === 'slot' && cur.i === i)
+      const here = !locked && cur?.t === 'slot' && cur.i === i
+      e.kind.classList.toggle('sel', here && this.cell === 'kind')
+      e.crew.classList.toggle('sel', here && this.cell === 'crew')
+      e.color.classList.toggle('sel', here && this.cell === 'color')
+      e.who.classList.toggle('sel', here && this.cell === 'name')
+      const mine = !locked && !!slot && m.mySlot === i && slot.kind === 'human'
+      e.root.classList.toggle('editable', mine)
+      if (e.input) {
+        e.input.hidden = !mine
+        if (document.activeElement !== e.input) e.input.value = this.draft ?? slot?.name ?? ''
+      }
       if (locked || !slot) {
         // bloqueado por el tamaño del mapa: dice desde qué mapa se puede usar
         const need = sizeFor(i)
         e.root.classList.remove('empty', 'mine')
         setLabel(e.numLabel, '-', 0x4a4440)
         setPortrait(e.portrait, slot?.crew ?? CREWS[i], 0x3a3430)
+        setSwatch(e.swatch, null)
         setLabel(e.nameLabel, need ? `SOLO MAPA` : '', 0x7a7068)
         setLabel(e.ownerLabel, need ? `${SIZE_NAMES[need]}${need === 'large' ? '' : '+'}` : '', 0x7a7068)
         e.dot.className = 'dot'
@@ -283,8 +377,9 @@ class LobbyScreen implements LobbyView {
         return
       }
       const off = slot.kind === 'off'
-      // como en el menú (y en la sim), número y color siguen el orden de los ocupados
-      const color = off ? 0x4a4440 : (TANK_COLORS[n] ?? 0xffffff)
+      // el número sigue el orden de los ocupados (como en la sim); v3: el color es el elegido
+      const color = off ? 0x4a4440 : (TANK_COLORS[slotColor(slot, i)] ?? 0xffffff)
+      setSwatch(e.swatch, off ? null : color)
       if (!off) n++
       const own = this.owner(slot, i)
       e.root.classList.toggle('empty', off)
@@ -292,7 +387,12 @@ class LobbyScreen implements LobbyView {
       setLabel(e.numLabel, off ? '-' : `P${n}`, color)
       setPortrait(e.portrait, slot.crew, color)
       const same = !slot.name || slot.name.toUpperCase() === own.text
-      setLabel(e.nameLabel, off ? '' : (same ? CREW_NAMES[slot.crew] : slot.name.toUpperCase()), 0xffffff)
+      if (m.mySlot === i && slot.kind === 'human') {
+        // propio: el borrador mientras se escribe, con cursor
+        const name = this.editing ? (this.draft ?? '') : slot.name
+        const caret = this.editing ? '-' : '' // la fuente no tiene '_'
+        setLabel(e.nameLabel, (name ? name.toUpperCase() : this.editing ? '' : CREW_NAMES[slot.crew]) + caret, name || caret ? 0xffffff : 0x9a8e80)
+      } else setLabel(e.nameLabel, off ? '' : slot.kind === 'ai' ? CREW_NAMES[slot.crew] : same ? CREW_NAMES[slot.crew] : slot.name.toUpperCase(), 0xffffff)
       setLabel(e.ownerLabel, own.text, own.color)
       const remote = slot.kind === 'human' && slot.owner != null
       e.dot.className = `dot${remote ? (slot.connected ? ' on' : ' bad') : ''}`
@@ -326,6 +426,96 @@ class LobbyScreen implements LobbyView {
     if (this.isHost()) out.push({ t: 'start' })
     out.push({ t: 'leave' })
     return out
+  }
+
+  // ---------- v3: perfil ----------
+
+  // Celdas de un casillero que se pueden elegir con izquierda/derecha.
+  private cellsOf(i: number): Cell[] {
+    const slot = this.model?.lobby.slots[i]
+    if (!slot || this.locked(i)) return ['kind']
+    if (this.model?.mySlot === i && slot.kind === 'human') return ['crew', 'color', 'name', 'kind']
+    if (this.isHost() && slot.kind === 'ai') return ['name', 'kind']
+    return ['kind']
+  }
+
+  private mine(): LobbySlot | null {
+    const m = this.model
+    return m && m.mySlot != null ? (m.lobby.slots[m.mySlot] ?? null) : null
+  }
+
+  private myName(): string {
+    return cleanName(this.mine()?.name ?? '')
+  }
+
+  // Pide el perfil propio con los cambios dados (el resto, como está en el lobby).
+  private sendProfile(change: Partial<LobbyProfile>): void {
+    const m = this.model
+    const slot = this.mine()
+    if (!m || !slot || m.mySlot == null) return
+    this.profileCb({ name: this.draft ?? slot.name, crew: slot.crew, color: slotColor(slot, m.mySlot), ...change })
+  }
+
+  // Otros casilleros ocupados (sus tripulantes y colores no se pueden repetir).
+  private others(): LobbySlot[] {
+    const m = this.model
+    if (!m) return []
+    return m.lobby.slots.filter((s, j) => j !== m.mySlot && s.kind !== 'off' && !this.locked(j))
+  }
+
+  private activateCell(i: number, c: Cell): void {
+    const m = this.model
+    const slot = m?.lobby.slots[i]
+    if (!m || !slot) return
+    if (c === 'kind') return this.pickSlot(i)
+    if (c === 'name' && slot.kind === 'ai') {
+      if (this.isHost()) this.personalityCb(i, nextPersonality(slot.personality))
+      return
+    }
+    if (m.mySlot !== i) return
+    if (c === 'crew') this.sendProfile({ crew: nextCrew(slot.crew, new Set(this.others().map((o) => o.crew))) })
+    else if (c === 'color') {
+      const taken = new Set(this.others().map((o) => slotColor(o, m.lobby.slots.indexOf(o))))
+      this.sendProfile({ color: nextColor(slotColor(slot, i), taken) })
+    } else if (c === 'name') {
+      const input = this.slotEls[i]?.input
+      if (input && !input.hidden) input.focus()
+      else if (this.editing) this.stopEditing()
+      else {
+        this.editing = true
+        this.draft = this.myName()
+      }
+    }
+  }
+
+  private stopEditing(): void {
+    if (!this.editing) return
+    this.editing = false
+    if (this.draft != null) this.sendProfile({ name: this.draft.trim() })
+    this.draft = null
+    this.sync()
+  }
+
+  // Escritura del nombre propio con el teclado.
+  private rawKey(e: KeyboardEvent): boolean {
+    if (!this.editing) return false
+    const d = this.draft ?? ''
+    if (e.key === 'Enter' || e.key === 'Escape') {
+      this.stopEditing()
+      return true
+    }
+    let next = d
+    if (e.key === 'Backspace') next = d.slice(0, -1)
+    else if (e.key === ' ') next = d.length > 0 && !d.endsWith(' ') ? d + ' ' : d
+    else if (e.key.length === 1 && cleanName(e.key) !== '') next = cleanName(d + e.key)
+    else return true // flechas y demás no mueven el cursor mientras se escribe
+    next = next.slice(0, NAME_MAX)
+    if (next !== d) {
+      this.draft = next
+      this.sendProfile({ name: next })
+    }
+    this.sync()
+    return true
   }
 
   private pickSlot(i: number): void {
@@ -393,7 +583,7 @@ class LobbyScreen implements LobbyView {
   private activate(): void {
     const cur = this.rows()[this.cursor]
     if (!cur) return
-    if (cur.t === 'slot') this.pickSlot(cur.i)
+    if (cur.t === 'slot') this.activateCell(cur.i, this.cellsOf(cur.i).includes(this.cell) ? this.cell : 'kind')
     else if (cur.t === 'opt') this.pickOption(cur.i)
     else if (cur.t === 'copy') this.copy()
     else if (cur.t === 'start') this.start()
@@ -409,6 +599,16 @@ class LobbyScreen implements LobbyView {
     const slotAt = (i: number) => at((x) => x.t === 'slot' && x.i === i)
     const firstOther = at((x) => x.t !== 'slot')
     if (nav === 'ok') return this.activate()
+    if (cur?.t === 'slot' && (nav === 'left' || nav === 'right')) {
+      // v3: primero se recorren las celdas del casillero (tripulante, color, nombre, tipo)
+      const cells = this.cellsOf(cur.i)
+      const at = Math.max(0, cells.indexOf(this.cell))
+      const next = at + (nav === 'left' ? -1 : 1)
+      if (next >= 0 && next < cells.length) {
+        this.cell = cells[next]
+        return this.sync()
+      }
+    }
     if (cur?.t === 'slot') {
       // grilla de dos columnas: arriba/abajo dentro de la columna, izquierda/derecha cambia de columna
       const side = cur.i >= SLOT_ROWS ? 1 : 0
@@ -435,6 +635,12 @@ class LobbyScreen implements LobbyView {
     } else if (nav === 'up') this.cursor = (this.cursor + rows.length - 1) % rows.length
     else if (nav === 'down') this.cursor = (this.cursor + 1) % rows.length
     else if (cur?.t === 'opt') this.pickOption(cur.i, nav === 'left' ? -1 : 1)
+    // al llegar a otro casillero, la celda queda en una válida (el tipo, o la primera si viene de la izquierda)
+    const now = this.rows()[this.cursor]
+    if (now?.t === 'slot') {
+      const cells = this.cellsOf(now.i)
+      if (!cells.includes(this.cell)) this.cell = nav === 'right' ? cells[0] : 'kind'
+    }
     this.sync()
   }
 }

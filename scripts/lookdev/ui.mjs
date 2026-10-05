@@ -317,17 +317,160 @@ const ICONS = [
     '.kkkkkkkkkk.',
     '............',
   ],
+  // ---- v3 (WEAPON_ORDER 9 a 16): guided, bouncer, laser, mine, quake, blackhole, acid, wall ----
+  // guided: misil con la estela celeste que dobla en el aire (se dirige en la bajada)
+  [
+    '...AAAA.....',
+    '..A....A....',
+    '.A......A...',
+    '.A.....AAA..',
+    '........A...',
+    '...kk.......',
+    '...kMkkkkk..',
+    '.kkkLLLLLRk.',
+    'kYOkMMMMMRRk',
+    '.kkkmmmmmrk.',
+    '...kmkkkkk..',
+    '...kk.......',
+  ],
+  // bouncer: bola verde que rebota, con un chispazo en cada pique
+  [
+    '........kkk.',
+    '.......kWGGk',
+    '..ss...kGGgk',
+    '.s..s..kGggk',
+    '.s...s..kkk.',
+    's....s..s...',
+    's.....s.s...',
+    's.....s.s...',
+    's......s....',
+    '.Y.....Y....',
+    'YOY...YOY...',
+    'SSSSSSSSSSSS',
+  ],
+  // laser: emisor con rayo rosa de núcleo blanco que pega del otro lado
+  [
+    '............',
+    '..........Y.',
+    '.kkkk....Y..',
+    'kLMMmk.....Y',
+    'kMkkmkPPPPPY',
+    'kMLMmWWWWWWW',
+    'kMkkmkPPPPPY',
+    'kmmmmk.....Y',
+    '.kkkk....Y..',
+    '..........Y.',
+    '............',
+    '............',
+  ],
+  // mine: mina medio enterrada, con púas y luz roja
+  [
+    '............',
+    '.....kk.....',
+    '....kRWk....',
+    '....kRRk....',
+    '.k..kkkk..k.',
+    '.kkkDDDDkkk.',
+    '..kDWDDDDk..',
+    '.kDDDDDDDdk.',
+    'kDDDDDDDDddk',
+    'kkkkkkkkkkkk',
+    'SbSbbSbbSbbS',
+    'bbbSbbbbSbbb',
+  ],
+  // quake: suelo partido en zigzag, escombros saltando y líneas de temblor
+  [
+    '....cc......',
+    '.s..cC...cc.',
+    's........cCs',
+    '.s........s.',
+    '.kkkkkk.kkkk',
+    'kBBbbbkkBBbk',
+    'kbbbbbbkkbbk',
+    'kbCbbbkkbbek',
+    'kbbbbkkbbCek',
+    'kbbbbbkkbbek',
+    'kbbbbkkbbeek',
+    '.kkkkkkkkkk.',
+  ],
+  // blackhole: se pinta en blackholeIcon (disco negro con anillo violeta inclinado)
+  null,
+  // acid: frasco con líquido verde y burbujas, una gota que cae por afuera
+  [
+    '...kkkkkk...',
+    '....kWsk....',
+    '....kWsk..N.',
+    '....kWsk..n.',
+    '...kWNNsk...',
+    '..kWNWNNnk..',
+    '.kWNNNNWNnk.',
+    '.kNNWNNNNnk.',
+    'kNNNNNNNNNnk',
+    'knNNNNWNNnnk',
+    'knnnnnnnnnnk',
+    '.kkkkkkkkkk.',
+  ],
+  // wall: muro alto de tierra que sube del piso (flecha) y frena un tiro (chispa)
+  [
+    '....kGGk....',
+    '...kGgGgk...',
+    '.Y.kBbbek...',
+    'YYYkbbbekY..',
+    '.Y.kBbbekOY.',
+    '.Y.kbbCekY..',
+    '.Y.kbbbek...',
+    '...kbCbek...',
+    '...kBbbek...',
+    '...kbbbek...',
+    '.kkkbbbekkk.',
+    'SSSSSSSSSSSS',
+  ],
 ]
 const ICON_PAL = {
   k: OUT, W: 0xfffbe2, Y: 0xffe27a, y: 0xd2a238, u: 0x8a6420, R: 0xe0463a, r: 0x8e1e1a,
   L: 0xd0d6de, M: 0x8a929e, m: 0x4e5460, D: 0x50545c, d: 0x30323a,
   G: 0x8ad05a, g: 0x4a8a34, b: 0x5a3e28, B: 0x86603c, e: 0x33241a, c: 0xa89a7a, C: 0x6a604c,
   O: 0xf77a28, o: 0xb8401c, s: 0xd8d0c0, S: 0x4a3e34,
+  // v3
+  A: 0x7ad8f0, P: 0xff5ac8, N: 0x9cf04a, n: 0x4aa02a,
+}
+
+// Agujero negro: anillo de acreción elíptico (violeta, con brillo del lado de arriba) que pasa por detrás y por
+// delante de un disco negro con borde violeta; motitas que caen hacia el centro.
+function blackholeIcon(cv, x0) {
+  const cx = 5.5
+  const cy = 5.5
+  const ring = (front) => {
+    for (let y = 0; y < 12; y++) {
+      for (let x = 0; x < 12; x++) {
+        // elipse apenas inclinada (corrida en y según x)
+        const dx = x - cx
+        const dy = y - cy + dx * 0.22
+        const e = Math.hypot(dx / 6, dy / 2.4)
+        if (e < 0.6 || e > 1.08) continue
+        if (front !== dy > 0) continue
+        cv.put(x0 + x, y, dy < -0.6 ? 0xf0c8ff : dx > 2.5 ? 0x8a4ad0 : 0xb46aee)
+      }
+    }
+  }
+  ring(false)
+  // disco: negro con un halo violeta oscuro y contorno
+  for (let y = 0; y < 12; y++) {
+    for (let x = 0; x < 12; x++) {
+      const d = Math.hypot(x - cx, y - cy)
+      if (d < 2.7) cv.put(x0 + x, y, 0x08060c)
+      else if (d < 3.6) cv.put(x0 + x, y, 0x6a2aa8)
+      else if (d < 4.4) cv.put(x0 + x, y, OUT)
+    }
+  }
+  ring(true)
+  for (const [x, y] of [[1, 1], [10, 10], [11, 2]]) cv.put(x0 + x, y, 0xe6b0ff)
 }
 
 export function weaponIconStrip() {
   const cv = new Canvas(12 * ICONS.length, 12)
   ICONS.forEach((rows, i) => {
+    if (rows === null) return blackholeIcon(cv, i * 12)
     rows.forEach((r) => {
       if (r.length !== 12) throw new Error(`ícono ${i} con fila de ${r.length}`)
     })

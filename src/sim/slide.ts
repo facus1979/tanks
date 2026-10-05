@@ -8,6 +8,7 @@
 import { columnGround, isSolid } from './terrain'
 import { MAX_CLIMB, SLIDE_SLOPE, TANK_H, TANK_HALF_W, TANK_W, type GameEvent, type GameState, type Player, type Vec2 } from './types'
 import { PATH_DT } from './ballistics'
+import { iceSkid } from './snow'
 
 // Pixels por punto del path (cada PATH_DT = 1/60 s): el empuje va a 120 px/s y el deslizamiento a 60 px/s.
 export const BLAST_STEP = 2
@@ -143,13 +144,15 @@ export function knock(
   t: number,
   events: GameEvent[],
   tankFloorFn: (t: GameState['terrain'], x: number, y: number) => number,
+  cause: 'blast' | 'quake' | 'pull' = 'blast', // v3: sacudón del terremoto, atracción del agujero negro
 ): number {
   // sin piso a menos de MAX_CLIMB (le volaron el apoyo): no hay de dónde empujarlo, cae
   if (p.y >= state.terrain.h || tankFloorFn(state.terrain, p.x, p.y - MAX_CLIMB) > p.y + MAX_CLIMB) return t
   const path = travel(state, p, dir, dist, BLAST_STEP, tankFloorFn, false)
   if (!path) return t
-  events.push({ type: 'slide', playerId: p.id, cause: 'blast', path, t })
-  return t + (path.length - 1) * PATH_DT
+  events.push({ type: 'slide', playerId: p.id, cause, path, t })
+  // v3 nieve: si el empujón lo dejó sobre hielo, sigue patinando (ver iceSkid en snow.ts)
+  return iceSkid(state, p, dir, t + (path.length - 1) * PATH_DT, events, tankFloorFn) ?? t
 }
 
 // Deslizamiento: si el piso del tanque es más empinado que SLIDE_SLOPE, baja hasta quedar estable
@@ -162,7 +165,7 @@ export function slideDown(
   events: GameEvent[],
   tankFloorFn: (t: GameState['terrain'], x: number, y: number) => number,
 ): number | null {
-  if (!p.alive || p.y >= state.terrain.h) return null
+  if (!p.alive || p.y >= state.terrain.h || p.anchored) return null // v3: anclado no resbala
   const s = slopeAt(state, p.x, p.y)
   // v2.3: vuelco al abismo (ver tipDir): el tanque se va hacia el vacío hasta quedar sin piso
   const tip = tipDir(state, p)

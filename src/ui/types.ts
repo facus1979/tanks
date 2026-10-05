@@ -104,6 +104,8 @@ export interface HudExtras {
   minimap?: MinimapModel | null // v2; null o ausente en mapas que entran en pantalla (Chico)
   // v2 muerte súbita: calmLeft = tiros sin daño que faltan (se muestra cuando es <= 3); active = la lava ya sube.
   suddenDeath?: { active: boolean; calmLeft: number } | null
+  guide?: { left: number; total: number } | null // v3: segundos de guiado del misil teledirigido (barra)
+  aimItem?: 'jetpack' | 'teleport' | null // v3: eligiendo destino de un ítem (el HUD muestra la ayuda)
 }
 
 // ---------- minimapa (v2) ----------

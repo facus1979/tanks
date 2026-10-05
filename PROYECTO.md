@@ -344,6 +344,97 @@ Rama `v2.4-cierre`. Tres agentes en paralelo (sim, flujo, render); contrato, doc
   - **`Impact.water`** en el vuelo y en el evento `impact` (barriles incluidos) cuando el centro quedó sumergido.
   - `sim-check` 38407/38407 en ~2,6 min (máquina libre; con otros agentes corriendo, 8-15 min y fallan por carga los topes de tiempo de la IA con lava). Balance (tiros por partida, IA normal): Chico 2 / 4: 10,6 / 17,3 (20 partidas); Mediano 11,6 (40) / 26,2 (20); Grande 9,8 (40) / 24,3 (20); Mediano 6: 33,0 (máx. 55, 60 partidas, posiciones 7/7/10/12/8/16); Grande 8: 39,7 (máx. 53). Topes: 2 tanques en Mediano y Grande con 40 partidas (con 20, Grande daba 7,7-11,8 según la tanda y fallaba el piso de 8 por azar); 4 tanques en Mediano y Grande, tope 30 (antes 27: Mediano mide ~26 desde v2.3). Abismo: 26 de 240 muertes (10,8%). IA peor caso 99 ms.
 
+## v3: el mejor vs posible (2026-10-04)
+
+Rama `v3`. Decidido con el usuario el 2026-10-04. Prioridad: el juego versus. Equipos y repeticiones quedan para el final; sin clima, sin desafíos, sin progresión, sin microtransacciones.
+
+### Alcance
+
+1. **Rendimiento en celular**: 60 fps con explosiones en un celular de gama media (`npm run mobile-fps -- --cpu 4 --gpu`, demo de 4 IA). Hoy baja a ~30 fps; el perfil marca `Raster.light` y el dibujo en canvas.
+2. **Relay TURN propio**: el código ya lee `VITE_TURN_*`; falta que el usuario cargue los secrets (ver README).
+3. **Armas nuevas** (8, en la tienda; `WEAPON_ORDER` pasa a 16):
+   - **Teledirigido**: vuelo balístico hasta el apogeo; en la bajada se dirige con ← → (`steer`), con guiado limitado (`GUIDE_TIME`), giro limitado (`STEER_RATE`), temblor determinista (`STEER_WOBBLE`) y viento. Nunca es un tiro seguro.
+   - **Rebotadora**: explota en cada rebote (`bounces` explosiones chicas y una final).
+   - **Láser**: rayo recto sin gravedad ni viento; atraviesa materiales blandos y frena en piedra o metal.
+   - **Mina**: queda clavada (`Hazard`); explota si un tanque pasa cerca o al vencer.
+   - **Terremoto**: sacude y derrumba una zona grande y mueve tanques (usa el derrumbe de v2.4).
+   - **Agujero negro**: atrae tanques y escombros hacia el centro (combo con abismos y lava).
+   - **Ácido**: corroe piedra y metal, hace daño y deja un charco que daña por turno.
+   - **Muro**: pared vertical fina y alta de tierra para cubrirse (la Tierra hace una bola que entierra).
+4. **Ítems nuevos**: jetpack (salto a un destino), teletransporte (a un destino), ancla (inmune al empuje y al hielo hasta su turno), escudo deflector (desvía el próximo proyectil). No gastan el turno.
+5. **Bioma nieve**: nieve blanda que se compacta, hielo resbaloso (el tanque patina, `ICE_SLIDE`), lagos congelados cuya capa se rompe con explosiones, montañas nevadas; fondos periódicos propios.
+6. **IA con personalidades**: agresiva, francotiradora, cavadora, oportunista (`Personality`); el menú elige o sortea.
+7. **Recompensas en la partida** (`BONUS`, evento `bonus`): tiro largo, kill doble, kill por abismo/lava/derrumbe, primera sangre, cajas de botín que caen en paracaídas (`loot`) y objetivos pagos del mapa (`target`).
+8. **Perfil**: nombre editable (hasta `NAME_MAX` letras), tripulante y color de tanque por separado, guardados en el navegador y en el online (`SlotConfig.color`, mensaje `profile`).
+9. Al final: equipos y repeticiones.
+
+### Contratos v3
+
+- `src/sim/types.ts`: `SNOW`, `ICE`, `ICE_SLIDE`, bioma `'snow'`; `WeaponId` con las 8 nuevas y sus campos en `WeaponDef` (`guided`, `bounces`, `beam`, `mine`, `quake`, `pull`, `acid`, `hard`; `terrain` `'wall' | 'none'`), `BlastStyle` nuevos, `WEAPON_ORDER` de 16; `STEER_TICK`, `STEER_RATE`, `GUIDE_TIME`, `STEER_WOBBLE`; `Hazard`, `GuidedState`, `GameState.hazards`, `GameState.guided`, `GameState.bonusFirstBlood`, fase `'guiding'`; comando `steer`, `useItem.target`; ítems `jetpack`, `teleport`, `anchor`, `deflector` (`JETPACK_RANGE`, `TELEPORT_RANGE`, `Player.anchored`, `Player.deflector`); `PropKind` `loot` y `target`; `BonusKind`, `BONUS`, `LONGSHOT_FRAC`; `Personality`, `PERSONALITIES`, `SlotConfig.color`, `SlotConfig.personality`, `Player.personality`, `NAME_MAX`; eventos `beam`, `quake`, `pull`, `hazard`, `deflect`, `jetpack`, `teleport`, `guide`, `bonus`; `slide.cause` con `ice`, `pull`, `quake`.
+- `src/render/types.ts`: `RenderFrame.hazards`, `RenderFrame.guided`.
+- `src/ui/types.ts`: `HudExtras.guide`, `HudExtras.aimItem`.
+- `src/net/types.ts`: `LobbySlot.color`, `LobbySlot.personality`, mensajes `profile` y `steerLive`, reglas del `steer` en el log.
+- `src/render/manifest.ts`: `weaponIcons` de 16 frames, `itemIcons` de 9, `props.loot`, `props.target` por bioma, `props.mine`, `props.missile` (opcionales hasta que estén pintados); el manifiesto de materiales suma `SNOW` e `ICE` y los fondos y la paleta de `snow`.
+- Los valores numéricos de las armas, ítems, bonos y nieve son iniciales: los balancea sim.
+
+### Reparto (9 agentes en paralelo)
+
+| Agente | Qué | Archivos |
+|---|---|---|
+| sim-armas | 8 armas, teledirigido (`fire` → `guiding` → `steer`), 4 ítems, minas y ácido, tienda, IA usando todo (incluido `ShotPlan.steer`) | `src/sim/**` (armas, ítems, IA de tiro), `scripts/sim-check.ts` |
+| sim-mundo | Bioma nieve (generador, hielo, nieve, lagos congelados), recompensas (bonos, botín, objetivos), personalidades de la IA | `src/sim/**` (gen, física del hielo, bonos, `ai-personality`), `scripts/sim-check.ts` |
+| render-armas | Efectos de las 8 armas, misil y su guiado, minas y ácido, ítems, carteles de bonos | `src/render/**` (archivos nuevos + ganchos) |
+| render-nieve | Nieve e hielo en el terreno, nevada, lagos congelados, botín y objetivos | `src/render/**` (archivos nuevos + ganchos) |
+| render-perf | 60 fps con explosiones en celular | `src/render/pixi/raster.ts`, `fx.ts` (internos), `terrain.ts` |
+| arte | Fondos y materiales de nieve, íconos de 16 armas y 9 ítems, botín, objetivos, mina, misil | `scripts/paint-assets.mjs`, `scripts/lookdev/**`, `public/assets/**` |
+| vistas | Barra de 16 armas y 9 ítems, tienda, perfil en menú y sala, barra de guiado, ayuda de destino | `src/ui/**` |
+| flujo | Guiado con ← → y táctil, destino de jetpack y teletransporte, cámara, sonidos, perfil guardado | `src/main.ts`, `src/game/**`, `src/input/**`, `src/audio/**` |
+| red | `steer` en el online con predicción del que dispara, `profile`, `net-test` con teledirigido | `src/net/**`, `scripts/net-test.mjs` |
+
+### Estado red v3 (2026-10-04)
+
+Sin cambios de contrato en `src/net/types.ts`. Archivos nuevos: `src/net/profile.ts` (reglas del perfil) y `src/net/steer.ts` (constantes del guiado).
+
+- **Steer online**: el anfitrión acepta `steer` solo del peer dueño del misil en vuelo (`hooks.guided()`) con tandas de 1 a 64 direcciones válidas; la sim decide la fase. Si lo rechaza, responde `reject` con `STEER_REJECT` ('Guiado rechazado'). Lo completa con ceros (`completeGuide`) si el turno vence en 'guiding' (o vence y el tiro forzado es un teledirigido), si el dueño se desconecta, o si el guiado se cuelga: plazo fijo de `guided.t + guided.guide + GUIDE_SLACK` (4 s) desde que entra en 'guiding'. El cliente que dirige (`room.steer(id, dir)` por tick, tandas de `STEER_BATCH` = 2 o a los 100 ms) predice con `réplica + room.pendingSteers()`; la tanda que vuelve en el log y coincide sale de lo pendiente en el mismo paso en que entra a la réplica (nada que corregir); si no coincide, es rechazada o llega un snapshot, se vacía lo pendiente y `hooks.onSteerCorrect(reason)` avisa (la vista vuelve a ser el log). `steerLive` del que dirige (hasta 20/s) lo reenvía el anfitrión a los demás (`hooks.onSteerLive`); el anfitrión manda el suyo con `room.steerLive`. Requisito a sim-armas: aplicar `steer` [a] y luego [b] tiene que dar lo mismo que [a, b].
+- **Latencia medida** (misma PC, Chrome headless, `net-test --layer`): ida y vuelta de una tanda local (BroadcastChannel) 3,5 ms (máx 5,5), PeerJS/WebRTC 2,0 ms (máx 2,4). El que dirige ve su misil sin demora (predicción); los demás lo ven con el llenado de la tanda (≤ 100 ms) + un viaje, o antes con `steerLive`.
+- **Perfil**: nombre sin tildes, solo caracteres de la fuente (letras, dígitos, espacio y `.,:!?-/%+`), recortado a `NAME_MAX` (`cleanName`, exportada para el flujo). Color y tripulante únicos (pedido de vistas), con la misma regla: los 8 casilleros llevan siempre una permutación de los 8 colores y otra de los 8 tripulantes; si el pedido lo tiene un 'off' se intercambian, si lo tiene un ocupado (humano, con o sin dueño, o IA) **se asigna el siguiente libre** en el orden de `TANK_COLORS` / `CREWS` (sin `reject`): el cliente ve en el lobby lo que le quedó. El perfil del peer viaja con él si cambia de casillero y se reenvía solo al reconectar en el lobby. El anfitrión: `setProfile`, `setPersonality(slot, p | null)` (solo IA). `start` pone `color` y `personality` en cada `SlotConfig`.
+- **Para el flujo** (`online.ts`): `HostHooks.guided = () => authState.guided`, `onSteerLive`; `ClientHooks.onSteerCorrect`, `onSteerLive`; cliente `steer` / `flushSteer` / `pendingSteers` / `steerVersion` (cache) / `steerLive` / `steerStats`; anfitrión `dispatch(steer)`, `steerLive`, `setProfile` (alias `profile`), `setPersonality`; cliente `profile({ name, crew, color })` (como lo llama el flujo; también acepta los tres argumentos sueltos) y `steerLive(id, x, y)`. `session.applyNet` acepta las tandas también durante el ascenso (hecho por flujo). Para `net-test` de la partida real: con `?autotest=1` mandar perfiles y publicar `names`, `colors`, `guided` y `steer` en `window.__tanksNet` (`NetDebug`), y `&weapon=guided`.
+- **net-test**: `--layer` prueba perfil (saneado, color tomado → siguiente libre, intercambio con un 'off', `start` con color y personalidad) y el guiado con una sim de juguete (tandas confirmadas, `steerLive`, tanda perdida + ceros del anfitrión → corrección, tanda rechazada, guiado colgado completado a los ~5 s); `NET_TEST_TRANSPORT=peer` lo corre por PeerJS. Con la máquina cargada (varios agentes) la latencia medida sube a segundos y vite/Chrome pueden no arrancar: es el entorno, no la red. `--guided` (corre también antes de los otros modos salvo `--snapshot`) usa la sim real: perfiles iguales en las dos réplicas y, cuando la sim tenga el guiado, un teledirigido de cada uno; mientras tanto avisa y lo saltea (`NET_TEST_FAKE_GUIDED=1` lo prueba con un guiado simulado: 30 ticks en 15 tandas, 0 correcciones). `--weapon guided` pasa `&weapon=guided` a la partida real.
+
+### Estado de v3 (2026-10-05)
+
+Integrada en la rama `v3` (9 agentes; varios cortes por límite de uso, retomados con commits WIP). `sim-check` 51873/51873 con la máquina libre (IA peor caso por tamaño 86 / 114 / 108 ms).
+
+- **sim-armas** (`src/sim/guided.ts`, `hazards.ts`, `terrain-fx.ts`, `ai-arsenal.ts`): teledirigido (balístico hasta el apogeo, 30 ticks de 0,05 s, giro 1,6 rad/s, temblor de hasta 0,7 rad/s que cambia cada 5 ticks; `dir = 1` gira en sentido horario: con el misil bajando lo lleva a la izquierda, así que ← manda 1; `steer` partible: [a] y después [b] = [a, b]); rebotadora (explota en cada rebote, conserva 0,62, final ×1,4 radio y ×1,5 daño); láser (380 px, perfora hasta 44 px de material blando, frena en piedra, ladrillo, metal, hielo y roca madre); mina (explota a ≤ 14 px de un tanque que se movió, si la alcanza otra explosión o al vencer: 3 vueltas); terremoto (columnas que se desmoronan, tanques hasta 26 px cuesta abajo); agujero negro (arrastra hasta 56 px hacia el centro, se abre en la lava o en la boca del abismo); ácido (rompe piedra y metal, charco de 10 por turno durante 2 vueltas); muro (60 × 8 de tierra, sube con un `flow` de 13 parches). Ítems: jetpack (120 px en arco), teletransporte (400 px), ancla (sin empuje, sacudón, atracción ni resbalón; **anclado tampoco camina ni salta**), deflector (desvía 60° hacia arriba y atrás con 0,6 de la velocidad; refleja el láser). Tienda: teledirigido 380/2/6, rebotadora 240/2/9, láser 260/2/6, mina 200/2/6, terremoto 320/1/3, agujero negro 360/1/3, ácido 260/2/6, muro 120/2/6; jetpack 200/1/3, teletransporte 300/1/2, ancla 120/1/3, deflector 280/1/3. Precisión del teledirigido (24 tiros): sin guiar 6, IA difícil 16, guiado perfecto 23.
+- **sim-mundo** (`src/sim/snow.ts`, `bonus.ts`, `ai-personality.ts`): nieve (`SNOW` toughness 1,3, `ICE` 0,8), Chico con cabaña, lago congelado, glaciar, cueva de hielo y estación; tramos propios en Mediano y Grande; compactación `SNOW_SINK` 3 px; patinar `ICE_SLIDE` 24 px (también tras empujones, terremoto y agujero negro). Bonos al momento (`bonusPaid` interno, viaja en el snapshot): ~26% de la plata ganada. Botín: primera caja al empezar la segunda vuelta, después cada dos, hasta 2 por ronda (evento `prop` con `destroyed: false`). Objetivos: 0–1 / 1 / 1–2 según tamaño. Personalidades (48 partidas): agresiva 11, francotiradora 11, cavadora 18, oportunista 8 victorias. `SlotConfig.color` se aplica en `createMatch` (`slotColors`).
+- **render-armas** (`armas.ts`, `pixels.ts`, `fxkit.ts`, `weapons-fx.ts`, `items-fx.ts`, `hazards.ts`, `bonus.ts`): efectos de las 8 armas y 4 ítems por GPU con topes; `?fxtest=` acepta las armas e ítems nuevos y `bonus`.
+- **render-nieve** (`snow.ts`, `loot.ts`): nieve, hielo, carámbanos, nevada en tres planos, niebla fría, patinazo, botín con paracaídas y objetivos con "$".
+- **render-perf** (`lights.ts`, `gpu.ts`, `quality.ts`): luces como sprites aditivos, subida a la GPU por rectángulo, trozos del terreno sobre los bytes del mundo, calidad automática (`?quality=low|high`). Celular emulado (CPU ×4, GPU real): Chico de 44–50 ms a 27–33 ms de frame medio, Grande de 62–65 a 52–55 ms; escritorio sin empeorar.
+- **arte**: bioma nieve (5 capas, cielo en 'mirror'), texturas `SNOW` e `ICE`, íconos de 16 armas y 9 ítems, botín, objetivo por bioma, mina y misil.
+- **vistas** (`src/ui/arsenal.ts`): barra de armas en dos filas de 8, ítems en una o dos filas, tienda en tres columnas con ficha de descripción, perfil (nombre, tripulante, color; personalidad en las IA) en menú y sala, barra de guiado y ayuda de destino.
+- **flujo** (`src/game/profile.ts`, `src/input/target.ts`): guiado con predicción local, destino de jetpack y teletransporte (SVG encima del juego), sonidos de todo lo nuevo, perfil en localStorage, la sesión ahora aplica `ShotPlan.items` (antes no lo hacía).
+- **red** (`src/net/profile.ts`, `src/net/steer.ts`): `steer` online con validación del dueño, ceros si vence, predicción y reconciliación (ida y vuelta 2–3,5 ms en la misma PC); perfil saneado con colores y tripulantes únicos; `net-test --guided`.
+
+Controles nuevos:
+
+| Entrada | Acción |
+|---|---|
+| ← → (o A / D) mientras se guía | Dirigir el teledirigido |
+| 1–8 | Elegir la columna de la barra; repetir alterna con la de abajo |
+| Shift + 1–8 | Elegir directo la de abajo |
+| Tab / Shift+Tab, rueda | Arma siguiente / anterior entre las 16 |
+| J / K / N / E | Jetpack / teletransporte / ancla / deflector |
+| Destino (teclado) | Flechas mueven el cursor, Espacio o Enter confirman, Esc cancela |
+| Destino (mouse / táctil / gamepad) | Click o toque confirma, botón derecho o B cancela; el stick mueve |
+| Guiado (gamepad / táctil) | Stick o cruceta / botones ◀ ▶ grandes o arrastrar el dedo |
+
+Pendientes de v3:
+- Rendimiento en celular: no se llega a 18 ms. Lo que más cuesta ahora es el HUD (`src/ui/hud.ts`: redibuja el canvas entero casi cada frame y el minimapa recorre la grilla en cada flujo) y el `fire` de la sim en el hilo principal (tirones de 200–500 ms con los líquidos). Siguiente paso: HUD en capas y minimapa incremental; mover la resolución del tiro al worker.
+- `net-test --guided`: la prueba con la sim real se saltea porque las armas nuevas arrancan sin munición; falta darle munición en el test.
+- Relay TURN propio: falta que el usuario cargue los secrets (README).
+- El ícono de la rebotadora es el menos claro a escala 1 (engrosar el trazo).
+- Equipos y repeticiones (al final, por decisión del usuario).
+
 ## Cómo se agrega algo
 
 - Arma nueva: un registro en `WEAPONS` y, si el efecto es nuevo, un modo de terreno en `sim` y un `BlastStyle` en el renderer.

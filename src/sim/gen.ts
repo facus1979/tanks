@@ -7,17 +7,20 @@
 // espeja según la seed.
 import { Rng, hash2, noise1 } from './rng'
 import { flowLiquids } from './flow'
-import { LIQUID, columnGround, createTerrain, fillRect } from './terrain'
+import { LIQUID, columnGround, columnTop, createTerrain, fillRect } from './terrain'
+import { sinkIntoSnow } from './snow'
 import {
   AIR,
   BEAM,
   BEDROCK,
   BRICK,
   DIRT,
+  ICE,
   LAVA,
   METAL,
   POST,
   SLAT,
+  SNOW,
   STONE,
   TANK_H,
   TANK_HALF_W,
@@ -26,6 +29,7 @@ import {
   WORLD_H,
   WORLD_W,
   type Biome,
+  type MapSize,
   type Prop,
   type PropKind,
   type Terrain,
@@ -40,6 +44,8 @@ export const PROP_SIZE: Record<PropKind, { w: number; h: number }> = {
   lamp: { w: 5, h: 7 },
   flag: { w: 20, h: 36 }, // el mástil está en x; la tela va a la derecha
   windsock: { w: 2, h: 28 }, // solo el mástil; la manga la dibuja el renderer según el viento
+  loot: { w: 14, h: 12 }, // v3 caja de botín
+  target: { w: 32, h: 20 }, // v3 objetivo pago
 }
 
 export interface Generated {
@@ -140,7 +146,7 @@ interface Tramo {
 // v2.4: safe = cuántos de los lugares tienen que ser seguros para un humano (ver humanSafe): uno por jugador
 // humano. Solo cambia el mapa si sin esa condición no alcanzaban (ver spreadSpawns).
 export function generate(biome: Biome, rng: Rng, count: number, width = WORLD_W, height = WORLD_H, safe = 0): Generated {
-  if (width === W && height === H) return single(biome, rng, count)
+  if (width === W && height === H) return biome === 'snow' ? singleSnow(rng, count) : single(biome, rng, count)
   return chain(biome, rng, count, width, height, safe)
 }
 
@@ -737,6 +743,8 @@ const SEG_WEIGHT: Record<Biome, Partial<Record<SegKind, number>>> = {
   forest: { valley: 2, hill: 2, mountain: 3, lake: 2.6, hills: 1.2, mesa: 1, plat: 1, abyss: 0.5 },
   jungle: { valley: 1.4, hill: 1.5, mountain: 1.5, lake: 2, hills: 3, mesa: 1, plat: 1, abyss: 2.6 },
   industrial: { valley: 2, hill: 1, mountain: 0.6, lake: 0.3, hills: 1.5, mesa: 1.6, plat: 1.5, abyss: 2, lavapit: 2.6 },
+  // v3 nieve: montañas nevadas con glaciares, lagos congelados y grietas (abismos con paredes de hielo)
+  snow: { valley: 1.8, hill: 1.6, mountain: 3.2, lake: 2.4, hills: 1, mesa: 1, plat: 1, abyss: 1.8 },
 }
 
 // Lo que queda después de un tramo que no es el último: lo justo para que entre un tramo final.
@@ -1062,6 +1070,10 @@ interface Build {
   // borde) y las cornisas y puentes que arma el tallado
   mouth: Uint8Array
   ledges: LedgeInfo[]
+  // v3 nieve: cabañas (x izquierda, ancho) que arma la pasada de adelante y tramos de hielo en la
+  // superficie (glaciares y pistas)
+  cabins: { x: number; w: number }[]
+  ice: { x0: number; x1: number; depth: number }[]
 }
 
 function chain(biome: Biome, rng: Rng, count: number, width: number, height: number, safeCount = 0): Generated {
@@ -1074,12 +1086,13 @@ function chain(biome: Biome, rng: Rng, count: number, width: number, height: num
     for (let x = seg.x0; x < seg.x1; x++) surf[x] = Math.round(clampN(segSurface(seg, biome, x, noiseSeed), 100, height - 40))
   }
   for (let x = 0; x < width; x++) fillRect(t, x, surf[x], x, height - 1, DIRT)
-  const b: Build = { t, biome, rng, surf, specs: [], slots: [], socks: [], pits: new Uint8Array(width), bowls: [], mouth: new Uint8Array(width), ledges: [], brinks: [] }
+  const b: Build = { t, biome, rng, surf, specs: [], slots: [], socks: [], pits: new Uint8Array(width), bowls: [], mouth: new Uint8Array(width), ledges: [], brinks: [], cabins: [], ice: [] }
 
   for (const seg of segs) solids(b, seg)
   t.back.set(t.front) // la pared de fondo es lo que había
   for (const seg of segs) carve(b, seg)
   for (const seg of segs) front(b, seg)
+  for (const c of b.cabins) cabin(t, c.x, c.w, surf)
   for (let x = 0; x < width; x++) if (!b.pits[x]) fillRect(t, x, height - BEDROCK_ROWS, x, height - 1, BEDROCK, 'both')
   t.pits = b.pits
 
@@ -1120,6 +1133,8 @@ function chain(biome: Biome, rng: Rng, count: number, width: number, height: num
   ramps(t, spawnXs, targets, { stop: (x) => nearCols(b.mouth, x, 3) || basins.some((q) => x >= q.x0 - 2 && x < q.x1 + 2), long: true })
   // v4: las cuencas se llenan con su líquido hasta level y el flujo asienta lo que haya quedado suelto
   fillBasins(t, basins)
+  // v3 nieve: capa de nieve, hielo (glaciares, pistas, lagos congelados) y los tanques hundidos en la nieve
+  if (biome === 'snow') snowFinish(t, b.ice, basins, spawnXs, noiseSeed)
 
   // una manga de viento cada 800 px
   for (let w0 = 0; w0 < width; w0 += TRAMO_W) {
@@ -1287,6 +1302,10 @@ function solids(b: Build, seg: Seg): void {
         }
         const s0 = rng.int(a + 20, Math.max(a + 20, z - 40))
         stoneSlab(t, s0, y + 30, s0 + 22, y + 36)
+      } else if (biome === 'snow') {
+        // v3 nieve: losa enterrada bajo la nieve y una cabaña de madera en la punta de afuera
+        stoneSlab(t, a + (seg.first ? 10 : 0), y + 9, z, y + 15)
+        b.cabins.push({ x: a + 1, w: 28 })
       } else {
         fillRect(t, a, y, z, y + 16, BRICK)
         fillRect(t, a, y, z, y + 2, METAL)
@@ -1294,7 +1313,7 @@ function solids(b: Build, seg: Seg): void {
       // bandera en la punta (la primera, como en v1), barril del otro lado
       specs.push({ kind: 'flag', x: seg.first ? 20 : a + 8, y })
       specs.push({ kind: 'barrel', x: z - 16, y: y - 12, ground: true })
-      const lo = seg.first ? 60 : a + 40
+      const lo = seg.first ? 60 : a + (biome === 'snow' ? 62 : 40) // v3 nieve: lejos de la cabaña
       const hi = z - 40
       b.slots.push(hi > lo ? rng.int(lo, hi) : Math.round((a + z) / 2))
       b.socks.push(z - 30)
@@ -1302,6 +1321,12 @@ function solids(b: Build, seg: Seg): void {
     }
     case 'valley': {
       b.slots.push(mid + rng.int(-10, 10))
+      // v3 nieve: la mitad de los valles tiene una pista de hielo a ras del suelo
+      if (biome === 'snow' && hash2(x0, x1, 0x1ce) < 0.5) {
+        const iw = 50 + Math.round(hash2(x0, 7, 0x1ce) * 40)
+        const ic = Math.round(x0 + (x1 - x0) * (0.3 + 0.4 * hash2(x1, 9, 0x1ce)))
+        b.ice.push({ x0: ic - (iw >> 1), x1: ic + (iw >> 1), depth: 5 })
+      }
       if (biome !== 'industrial') {
         // losa de piedra medio enterrada
         if (rng.chance(0.5)) {
@@ -1315,6 +1340,13 @@ function solids(b: Build, seg: Seg): void {
     case 'hill': {
       const c = Math.round(p.c + (p.kind === 1 ? -20 : 0))
       b.slots.push(c)
+      // v3 nieve: lengua de glaciar en una falda (lejos de la cima, donde puede nacer un tanque)
+      if (biome === 'snow' && hash2(x0, 3, 0x91ac) < 0.6) {
+        const side = hash2(x0, 5, 0x91ac) < 0.5 ? -1 : 1
+        const a = c + side * 26
+        const z = c + side * (26 + 30 + Math.round(hash2(x0, 6, 0x91ac) * 24))
+        b.ice.push({ x0: Math.min(a, z), x1: Math.max(a, z), depth: 7 })
+      }
       if (biome !== 'industrial' || rng.chance(0.4)) {
         const hs = surf[c]
         stoneSlab(t, c - 12, hs + 20, c + 6, hs + 26)
@@ -1336,12 +1368,23 @@ function solids(b: Build, seg: Seg): void {
         const ry = rng.chance(0.5) && steep ? lo - rh + rng.int(1, 3) : surf[rx] + rng.int(8, 26)
         stoneSlab(t, rx, ry, rx + rw, ry + rh)
       }
+      if (biome === 'snow') {
+        // v3 nieve: glaciar en una o las dos faldas del pico mayor (hielo a la vista bajo la cima)
+        for (const side of [-1, 1]) {
+          if (side === 1 && hash2(x0, 11, 0x61ac) < 0.4) continue
+          const a = Math.round(p.c1 + side * p.w1 * 0.35)
+          const z = Math.round(p.c1 + side * p.w1 * (1.3 + hash2(x0, side + 12, 0x61ac) * 0.6))
+          b.ice.push({ x0: Math.max(x0 + 10, Math.min(a, z)), x1: Math.min(x1 - 10, Math.max(a, z)), depth: 9 })
+        }
+      }
       break
     }
     case 'mesa': {
       const { tx0, tx1, py } = p
       if (biome === 'forest') stoneSlab(t, tx0, py, tx1, py + 7)
-      else if (biome === 'jungle') {
+      else if (biome === 'snow') {
+        // v3 nieve: la meseta queda de tierra (la nieve la cubre); la estación va en el búnker
+      } else if (biome === 'jungle') {
         for (let x = tx0; x < tx1; x += 24) if (rng.chance(0.6)) stoneSlab(t, x, py, Math.min(tx1, x + 21), py + 5)
       } else {
         fillRect(t, tx0, py, tx1, py + 3, METAL)
@@ -1366,9 +1409,14 @@ function solids(b: Build, seg: Seg): void {
       // ruinas en los bajos entre lomas
       for (let i = 0; i + 1 < p.n; i++) {
         const rx = Math.round((p['c' + i] + p['c' + (i + 1)]) / 2) + rng.int(-6, 6)
-        ruin(b, rx)
+        // v3 nieve: en vez de ruinas, cabañas de madera en los bajos
+        if (biome === 'snow') b.cabins.push({ x: rx, w: 26 })
+        else ruin(b, rx)
       }
-      if (p.n === 2 || rng.chance(0.5)) ruin(b, Math.round(p.c0) - rng.int(30, 40))
+      if (p.n === 2 || rng.chance(0.5)) {
+        const rx = Math.round(p.c0) - rng.int(30, 40)
+        if (biome !== 'snow') ruin(b, rx)
+      }
       b.socks.push(Math.round((p.c0 + p.c1) / 2) + 14)
       break
     }
@@ -1460,7 +1508,10 @@ function carve(b: Build, seg: Seg): void {
         let deepest = 0
         for (let x = cx - hw - 8; x <= cx + hw + 8; x++) deepest = Math.max(deepest, surf[x])
         const cy = Math.min(t.h - BEDROCK_ROWS - hh - 12, Math.max(rng.int(300, 340), deepest + hh + 18))
-        if (cy - hh - 4 > deepest + 12) blob(t, cx, cy, hw, hh, rng.int(1, 99))
+        if (cy - hh - 4 > deepest + 12) {
+          blob(t, cx, cy, hw, hh, rng.int(1, 99))
+          if (biome === 'snow') iceCave(t, cx - hw - 8, cy - hh - 6, cx + hw + 8, cy + hh + 6)
+        }
       }
       break
     case 'valley':
@@ -1470,7 +1521,11 @@ function carve(b: Build, seg: Seg): void {
       if (seg.kind === 'hill' && rng.chance(0.35)) {
         // cueva chica bajo el cerro
         const cx = Math.round(p.c)
-        blob(t, cx, Math.max(surf[cx] + 40, rng.int(380, 400)), rng.int(26, 40), rng.int(8, 11), rng.int(1, 99))
+        const cy = Math.max(surf[cx] + 40, rng.int(380, 400))
+        const hw = rng.int(26, 40)
+        const hh = rng.int(8, 11)
+        blob(t, cx, cy, hw, hh, rng.int(1, 99))
+        if (biome === 'snow') iceCave(t, cx - hw - 8, cy - hh - 6, cx + hw + 8, cy + hh + 6)
       }
       break
     case 'abyss': {
@@ -1511,6 +1566,8 @@ function carve(b: Build, seg: Seg): void {
       // un lugar para un tanque a cada lado de la boca, a SPAWN_PIT_GAP del borde (sobre la cornisa o el
       // labio, si spawnOk lo acepta); spreadSpawns los prefiere
       b.brinks.push({ x: ma - SPAWN_PIT_GAP - TANK_HALF_W - 2, dir: -1 }, { x: mz + SPAWN_PIT_GAP + TANK_HALF_W + 2, dir: 1 })
+      // v3 nieve: la grieta tiene las paredes de hielo (debajo de la costra de la boca)
+      if (biome === 'snow') iceWalls(t, b.pits, pa - 8, pz + 8, (x) => surf[Math.max(x0, Math.min(x1 - 1, x))] + 14)
       if (cornL) b.ledges.push({ kind: 'cornice', x0: pa, x1: ma, thick: crust })
       if (cornR) b.ledges.push({ kind: 'cornice', x0: mz + 1, x1: pz + 1, thick: crust })
       if (p.bridge) b.ledges.push({ kind: 'bridge', x0: ma, x1: mz + 1, thick: p.bridgeT })
@@ -1578,7 +1635,11 @@ function front(b: Build, seg: Seg): void {
   switch (seg.kind) {
     case 'mesa': {
       const { py } = p
-      if (p.towerX !== undefined) tower(t, { towerX: p.towerX, py } as Layout, biome === 'industrial' ? METAL : SLAT, specs)
+      if (p.towerX !== undefined) {
+        // v3 nieve: en vez de la torre, el observatorio de la estación
+        if (biome === 'snow') observatory(t, p.towerX, py)
+        else tower(t, { towerX: p.towerX, py } as Layout, biome === 'industrial' ? METAL : SLAT, specs)
+      }
       // utilería arriba de la meseta
       if (p.bx !== undefined) specs.push({ kind: biome === 'jungle' ? 'crate' : 'barrel', x: p.bx + 35, y: py - 12, ground: true })
       if (p.towerX !== undefined) specs.push({ kind: biome === 'jungle' ? 'barrel' : 'crate', x: p.towerX + 64, y: py - 12, ground: true })
@@ -1620,7 +1681,7 @@ function front(b: Build, seg: Seg): void {
         const xz = z + 10
         const ya = surf[xa]
         const yz = surf[xz]
-        const m = biome === 'industrial' ? BEAM : biome === 'jungle' ? STONE : DIRT
+        const m = biome === 'industrial' ? BEAM : biome === 'jungle' ? STONE : biome === 'snow' ? ICE : DIRT // v3: puente de hielo
         for (let x = xa; x <= xz; x++) {
           const y0 = Math.round(ya + ((yz - ya) * (x - xa)) / (xz - xa))
           for (let y = y0; y < y0 + p.bridgeT; y++) {
@@ -1659,4 +1720,400 @@ function beamDeck(b: Build, cx: number): void {
     fillRect(t, px, cy + 4, px + 2, gy - 1, POST)
   }
   specs.push({ kind: 'barrel', x: cx - 5, y: cy - 12 })
+}
+
+// =====================================================================================
+// v3: bioma nieve
+// =====================================================================================
+//
+// Materiales: SNOW (nieve blanda, se rompe más fácil que la tierra y se compacta bajo los tanques: ver
+// snow.ts) e ICE (hielo resbaloso). El terreno se arma como en los otros biomas (tierra, piedra y
+// estructuras) y al final una nevada cubre la tierra de la superficie con SNOW_DEPTH px de nieve; el hielo
+// va en glaciares (faldas de montañas y cerros), pistas en los valles, las paredes de las grietas y las
+// cuevas, los puentes de las grietas y la capa de los lagos congelados (agua de V4 con ICE_CRUST px de
+// hielo encima: se pisa; una explosión rompe el hielo y deja el agua a la vista).
+// Estructuras: cabañas de madera con techo nevado (plataformas y lomas) y la estación de la meseta: el
+// búnker de siempre como sótano y un observatorio con cúpula de chapa en vez de la torre.
+// Chico: una pantalla con plataforma y cabaña, lago congelado en el primer valle, cerro nevado más alto
+// con glaciar y cueva de hielo, una grieta (sin fondo de abismo: Chico no tiene pits) y la estación.
+// Los tanques nacen ya hundidos en la nieve (sinkIntoSnow).
+
+export const SNOW_DEPTH: [number, number] = [5, 9]
+export const ICE_CRUST = 5
+// Chico: cuánto más alto es el cerro nevado que el de v1 (con más, las faldas pasan los 75° junto a la rampa
+// del tanque de la cima y caminando desde el pad resbala)
+const SNOW_HILL = 10
+
+// Cabaña de madera con techo de vigas y nieve encima, apoyada en la fila más alta de su ancho (cimiento
+// de piedra hasta el suelo). x: columna izquierda, w: ancho. Va después de copiar la pared de fondo.
+function cabin(t: Terrain, x: number, w: number, surf: (number | undefined)[]): void {
+  if (x < 2 || x + w >= t.w - 2) return
+  const h = 22
+  let g = t.h
+  for (let i = x; i <= x + w; i++) g = Math.min(g, surf[i] ?? columnGround(t, i))
+  for (let i = x; i <= x + w; i++) {
+    const s = surf[i] ?? columnGround(t, i)
+    if (s > g) fillRect(t, i, g, i, s, STONE, 'both')
+  }
+  fillRect(t, x, g - h, x + w, g - 1, WOOD)
+  // adentro: aire con la pared de fondo de madera; ventana
+  fillRect(t, x + 3, g - h + 4, x + w - 3, g - 1, AIR)
+  fillRect(t, x + 3, g - h + 4, x + w - 3, g - 1, WOOD, 'back')
+  fillRect(t, x + 6, g - h + 7, x + 11, g - h + 11, SLAT)
+  fillRect(t, x + 7, g - h + 8, x + 10, g - h + 10, AIR)
+  // techo a dos aguas de vigas con nieve encima
+  for (let k = 0; k <= 6; k++) {
+    const a = x - 3 + k * 2
+    const z = x + w + 3 - k * 2
+    if (a > z) break
+    fillRect(t, a, g - h - 1 - k, z, g - h - 1 - k, BEAM)
+    if (a + 1 <= z - 1) fillRect(t, a + 1, g - h - 3 - k, z - 1, g - h - 2 - k, SNOW)
+  }
+}
+
+// Observatorio de la estación sobre la meseta (en el lugar de la torre): base de ladrillo, cúpula de chapa
+// con la ranura del telescopio y una antena. g: y del piso de la meseta.
+function observatory(t: Terrain, x: number, g: number): void {
+  fillRect(t, x, g - 30, x + 58, g - 1, BRICK)
+  fillRect(t, x + 4, g - 26, x + 54, g - 1, AIR)
+  fillRect(t, x + 4, g - 26, x + 54, g - 1, BRICK, 'back')
+  fillRect(t, x, g - 33, x + 58, g - 31, METAL)
+  const cx = x + 29
+  const cy = g - 33
+  const R = 22
+  for (let y = cy - R - 3; y < cy; y++) {
+    for (let xx = cx - R - 3; xx <= cx + R + 3; xx++) {
+      if (y < 0 || xx < 0 || xx >= t.w) continue
+      const d = Math.hypot(xx - cx, y - cy)
+      const i = y * t.w + xx
+      if (d <= R - 3) {
+        t.front[i] = AIR
+        t.back[i] = METAL
+      } else if (d <= R) t.front[i] = METAL
+      else if (d <= R + 2 && y < cy - R + 8) t.front[i] = SNOW // nieve en lo alto de la cúpula
+    }
+  }
+  // ranura del telescopio (diagonal) y el telescopio adentro
+  for (let k = 0; k < 12; k++) {
+    const sx = cx + 8 + k
+    const sy = cy - 8 - k
+    for (let j = -1; j <= 1; j++) {
+      const i = (sy + j) * t.w + sx
+      if (t.front[i] === METAL || t.front[i] === SNOW) {
+        t.front[i] = AIR
+        t.back[i] = METAL
+      }
+    }
+  }
+  for (let k = 0; k < 14; k++) fillRect(t, cx - 2 + k, cy - 2 - k, cx - 1 + k, cy - 1 - k, POST)
+  // antena del lado de afuera
+  fillRect(t, x + 2, g - 58, x + 3, g - 34, POST)
+  fillRect(t, x - 2, g - 52, x + 7, g - 51, POST)
+}
+
+// Cueva de hielo: en el rectángulo, la tierra, la nieve y la piedra que tocan (a 2 px) el aire de la cueva
+// (aire por debajo de la superficie de su columna) pasan a hielo, el fondo de la cueva también, y del techo
+// cuelgan algunas estalactitas.
+function iceCave(t: Terrain, x0: number, y0: number, x1: number, y1: number): void {
+  const ax = Math.max(2, x0)
+  const bx = Math.min(t.w - 3, x1)
+  const ay = Math.max(2, y0)
+  const by = Math.min(t.h - BEDROCK_ROWS - 1, y1)
+  const top: number[] = []
+  for (let x = ax - 2; x <= bx + 2; x++) top[x] = columnTop(t, x)
+  const cave = (x: number, y: number) => t.front[y * t.w + x] === AIR && y > (top[x] ?? t.h)
+  iceAround(t, ax, ay, bx, by, cave)
+  for (let x = ax; x <= bx; x++) {
+    for (let y = ay; y <= by; y++) {
+      if (!cave(x, y)) continue
+      const i = y * t.w + x
+      if (t.back[i] === DIRT || t.back[i] === STONE) t.back[i] = ICE
+      // estalactita: desde el techo, 2 a 5 px de hielo
+      if (t.front[i - t.w] === ICE && hash2(x, y, 0x1c1c) < 0.1) {
+        const n = 2 + Math.floor(hash2(x, y, 0x1c1d) * 4)
+        for (let k = 0; k < n && y + k <= by && t.front[(y + k) * t.w + x] === AIR; k++) t.front[(y + k) * t.w + x] = ICE
+      }
+    }
+  }
+}
+
+// Paredes de hielo de una grieta (columnas [x0, x1]): lo sólido junto al aire de las columnas de abismo, por
+// debajo de from(x) (la costra de la boca y las cornisas quedan de nieve).
+function iceWalls(t: Terrain, pits: Uint8Array, x0: number, x1: number, from: (x: number) => number): void {
+  const ax = Math.max(2, x0)
+  const bx = Math.min(t.w - 3, x1)
+  const open = (x: number, y: number) => t.front[y * t.w + x] === AIR && pits[x] === 1 && y > from(x)
+  iceAround(t, ax, 0, bx, t.h - BEDROCK_ROWS - 1, open)
+  // la pared de fondo de la grieta también es de hielo
+  for (let x = ax; x <= bx; x++) for (let y = 0; y < t.h; y++) if (open(x, y) && t.back[y * t.w + x] === DIRT) t.back[y * t.w + x] = ICE
+}
+
+// Lo sólido blando (tierra, nieve, piedra) a 2 px o menos de una celda `open` pasa a hielo.
+function iceAround(t: Terrain, x0: number, y0: number, x1: number, y1: number, open: (x: number, y: number) => boolean): void {
+  const hits: number[] = []
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const m = t.front[y * t.w + x]
+      if (m !== DIRT && m !== SNOW && m !== STONE) continue
+      let near = false
+      for (let dy = -2; dy <= 2 && !near; dy++) {
+        for (let dx = -2; dx <= 2 && !near; dx++) {
+          const xx = x + dx
+          const yy = y + dy
+          if (xx >= 0 && xx < t.w && yy >= 0 && yy < t.h && open(xx, yy)) near = true
+        }
+      }
+      if (near) hits.push(y * t.w + x)
+    }
+  }
+  for (const i of hits) t.front[i] = ICE
+}
+
+// Nevada: en cada columna, la tierra de la superficie (la primera celda que no es aire, si es tierra) pasa a
+// nieve SNOW_DEPTH px (varía con un ruido suave); la pared de fondo de esas filas también.
+function snowfall(t: Terrain, seed: number): void {
+  for (let x = 0; x < t.w; x++) {
+    const y0 = columnTop(t, x)
+    if (y0 >= t.h || t.front[y0 * t.w + x] !== DIRT) continue
+    const depth = SNOW_DEPTH[0] + Math.floor(noise1(x, 23, seed) * (SNOW_DEPTH[1] - SNOW_DEPTH[0] + 1))
+    for (let y = y0; y < Math.min(t.h, y0 + depth); y++) {
+      const i = y * t.w + x
+      if (t.front[i] !== DIRT) break
+      t.front[i] = SNOW
+      if (t.back[i] === DIRT) t.back[i] = SNOW
+    }
+  }
+}
+
+// Hielo a la vista en [x0, x1): la nieve o tierra de la superficie pasa a hielo `depth` px. No toca las
+// columnas de la caja de un tanque (ni 6 px al lado): un glaciar o una pista no arrancan bajo un spawn.
+function iceSheet(t: Terrain, x0: number, x1: number, depth: number, spawns: number[]): void {
+  for (let x = Math.max(0, x0); x < Math.min(t.w, x1); x++) {
+    if (spawns.some((s) => x >= s - TANK_HALF_W - 6 && x < s + TANK_HALF_W + 6)) continue
+    const y0 = columnTop(t, x)
+    if (y0 >= t.h) continue
+    for (let y = y0; y < Math.min(t.h, y0 + depth); y++) {
+      const i = y * t.w + x
+      const m = t.front[i]
+      if (m !== SNOW && m !== DIRT) break
+      t.front[i] = ICE
+      if (t.back[i] === SNOW || t.back[i] === DIRT) t.back[i] = ICE
+    }
+  }
+}
+
+// Lago congelado: en cada columna de la cuenca, las ICE_CRUST primeras filas de agua desde su superficie
+// (después del flujo que asienta la cuenca) pasan a hielo.
+function freeze(t: Terrain, x0: number, x1: number): void {
+  for (let x = Math.max(0, x0); x < Math.min(t.w, x1); x++) {
+    const top = columnTop(t, x)
+    if (top >= t.h || t.front[top * t.w + x] !== WATER) continue
+    for (let y = top; y < Math.min(t.h, top + ICE_CRUST); y++) {
+      const i = y * t.w + x
+      if (t.front[i] === WATER) t.front[i] = ICE
+    }
+  }
+}
+
+// Terminación de un mapa de nieve (cualquier tamaño, antes de espejar): nevada, hielo, lagos congelados y
+// los tanques hundidos en la nieve (como si ya se hubieran apoyado).
+function snowFinish(t: Terrain, ice: { x0: number; x1: number; depth: number }[], basins: Basin[], spawnXs: number[], seed: number): void {
+  snowfall(t, seed)
+  for (const q of ice) iceSheet(t, q.x0, q.x1, q.depth, spawnXs)
+  // todo el agua del mapa de nieve está congelada (las cuencas y lo que el flujo haya corrido al asentarlas)
+  if (basins.length > 0) freeze(t, 0, t.w)
+  for (const x of spawnXs) sinkIntoSnow(t, x, tankFloorAt(t, x))
+}
+
+// Piso de un tanque en x (como tankFloor de physics, sin importarlo).
+function tankFloorAt(t: Terrain, x: number): number {
+  const cx = Math.round(x)
+  for (let y = 0; y < t.h; y++) {
+    let n = 0
+    for (let ix = cx - TANK_HALF_W; ix < cx + TANK_HALF_W; ix++) {
+      if (ix < 0 || ix >= t.w) continue
+      const m = t.front[y * t.w + ix]
+      if (m !== AIR && !LIQUID[m]) n++
+    }
+    if (n >= 3) return y
+  }
+  return t.h
+}
+
+// Mapa Chico de nieve (ver arriba). Usa layout y surface de v1 con el cerro más alto.
+function singleSnow(rng: Rng, count: number): Generated {
+  const L = layout('snow', rng)
+  L.hillH += SNOW_HILL // cerro nevado: más alto que el de los otros biomas
+  const t = createTerrain(W, H)
+  const surf: number[] = []
+  for (let x = 0; x < W; x++) surf[x] = surface(L, 'snow', x)
+  for (let x = 0; x < W; x++) fillRect(t, x, surf[x], x, H - 1, DIRT)
+  const specs: PropSpec[] = []
+  const { platX1, platY, py } = L
+  // losas enterradas bajo la nieve (plataforma y la ladera del cerro)
+  stoneSlab(t, 14, platY + 9, platX1 - 1, platY + 16)
+  const hs = columnGround(t, L.hillX)
+  stoneSlab(t, L.hillX - 12, hs + 24, L.hillX + 6, hs + 30)
+  // estación: el búnker es el sótano (piedra, piso de chapa) y el observatorio va donde iba la torre
+  bunker(t, L, STONE, METAL, specs, rng)
+  cave(t, L.caveX, L.caveY, 46, 12, 9)
+  iceCave(t, L.caveX - 60, L.caveY - 30, L.caveX + 60, L.caveY + 30)
+  observatory(t, L.towerX, py)
+  cabin(t, 5, 28, surf)
+  specs.push({ kind: 'barrel', x: L.bx + 35, y: py - 12 })
+  specs.push({ kind: 'crate', x: L.towerX + 64, y: py - 12 })
+  specs.push({ kind: 'barrel', x: platX1 - 16, y: platY - 12 })
+  craters(t, L, rng, surf)
+  fillRect(t, 0, H - BEDROCK_ROWS, W - 1, H - 1, BEDROCK, 'both')
+
+  const spawnXs = pickSnowSpawns(L, rng, count)
+  const targets = spawnXs.map((x) => flatten(t, x))
+  ramps(t, spawnXs, targets)
+  const lake = frozenLake(t, L, rng, spawnXs)
+  crevasse(t, L, rng, spawnXs, lake)
+  // glaciar en la falda del cerro que mira a la meseta
+  const hx = L.hillX + (L.hillKind === 1 ? -20 : 0)
+  const ice = [{ x0: hx + 24, x1: hx + 24 + rng.int(28, 46), depth: 8 }]
+  snowFinish(t, ice, lake ? [lake] : [], spawnXs, L.noiseSeed)
+  specs.push(...tramoSpecs(L, 0))
+  return finish(t, specs, spawnXs, rng)
+}
+
+// Lugares de Chico en la nieve: plataforma, cima del cerro, segundo valle y meseta (el primer valle es el lago).
+function pickSnowSpawns(L: Layout, rng: Rng, count: number): number[] {
+  const plat = rng.int(60, Math.max(62, L.platX1 - 64))
+  const plateau = Math.min(L.plateauX0 + 28, L.bx - 16)
+  const hill = L.hillX + (L.hillKind === 1 ? -20 : 0)
+  let slots: number[]
+  if (count <= 1) slots = [plat]
+  else if (count === 2) slots = [plat, plateau]
+  else if (count === 3) slots = [plat, rng.chance(0.5) ? hill : L.v2, plateau]
+  else slots = [plat, hill, L.v2, plateau]
+  const bots = slots.slice(1)
+  for (let i = bots.length - 1; i > 0; i--) {
+    const j = rng.int(0, i)
+    const tmp = bots[i]
+    bots[i] = bots[j]
+    bots[j] = tmp
+  }
+  return [slots[0], ...bots].slice(0, Math.max(1, count))
+}
+
+// Lago congelado de Chico en el primer valle (entre la rampa de la plataforma y el pie del cerro, a 22 px o
+// más de la caja de cualquier tanque). Devuelve la cuenca (null si no entra).
+function frozenLake(t: Terrain, L: Layout, rng: Rng, spawns: number[]): Basin | null {
+  let b0 = Math.max(L.platX1 + 54, L.v1 - 46)
+  let b1 = L.v1 + 46
+  for (const s of spawns) {
+    if (s > L.v1) b1 = Math.min(b1, s - TANK_HALF_W - 4 - 22)
+    else b0 = Math.max(b0, s + TANK_HALF_W + 4 + 22)
+  }
+  const depth = rng.int(18, 26)
+  if (b1 - b0 < 44) return null
+  const mid = (b0 + b1) / 2
+  const half = (b1 - b0) / 2
+  for (let x = b0; x < b1; x++) {
+    const g = columnGround(t, x)
+    const v = Math.abs(x + 0.5 - mid) / half
+    const bottom = g + Math.round(depth * (1 - v * v * v))
+    for (let y = g; y < bottom; y++) if (t.front[y * t.w + x] === DIRT) t.front[y * t.w + x] = AIR
+  }
+  const level = Math.max(columnGround(t, b0 - 1), columnGround(t, b1))
+  for (let x = b0; x < b1; x++) {
+    for (let y = level; y < t.h && t.front[y * t.w + x] === AIR; y++) t.front[y * t.w + x] = WATER
+  }
+  return { kind: 'water', x0: b0, x1: b1, level }
+}
+
+// Distancia de la grieta a la caja de los tanques y al lago. Con menos, caminar 30 px desde el pad de la cima
+// del cerro llega a la pared de la grieta y resbala adentro. Con 4 tanques en Chico no queda lugar: sin grieta.
+const CREVASSE_GAP = 32
+// Grieta de Chico: un tajo de 32-40 px (más ancho que un tanque: el que cae no se engancha) hasta cerca del
+// fondo, con paredes de hielo, a CREVASSE_GAP px o más de la caja de los tanques y del lago. Sin lugar, no hay grieta.
+function crevasse(t: Terrain, L: Layout, rng: Rng, spawns: number[], lake: Basin | null): void {
+  const cw = rng.int(32, 40)
+  const seed = rng.int(1, 100000)
+  // todas las x que sirven (de a 4 px) y una sorteada
+  const opts: number[] = []
+  for (let x0 = L.platX1 + 40; x0 <= L.plateauX0 - 30 - cw; x0 += 4) {
+    const x1 = x0 + cw
+    if (spawns.some((s) => x1 > s - TANK_HALF_W - CREVASSE_GAP && x0 < s + TANK_HALF_W + CREVASSE_GAP)) continue
+    if (lake && x1 > lake.x0 - CREVASSE_GAP && x0 < lake.x1 + CREVASSE_GAP) continue
+    opts.push(x0)
+  }
+  for (let k = 0; k < 4 && opts.length > 0; k++) {
+    const x0 = opts.splice(rng.int(0, opts.length - 1), 1)[0]
+    const x1 = x0 + cw
+    let top = t.h
+    for (let x = x0 - 8; x <= x1 + 8; x++) top = Math.min(top, columnGround(t, x))
+    const bottom = H - BEDROCK_ROWS - 8 - rng.int(0, 24)
+    if (bottom - top < 70) continue
+    const wob = (y: number, s: number) => Math.round((noise1(y, 17, seed + s) - 0.5) * 8)
+    for (let y = top; y < bottom; y++) {
+      // se angosta en las últimas 14 filas (fondo en V)
+      const narrow = Math.max(0, y - (bottom - 14)) * 1.2
+      const xl = Math.round(x0 + wob(y, 0) + narrow)
+      const xr = Math.round(x1 + wob(y, 5) - narrow)
+      for (let x = xl; x <= xr; x++) {
+        const i = y * t.w + x
+        const m = t.front[i]
+        if (m !== DIRT && m !== STONE && m !== AIR) continue
+        if (m !== AIR) t.back[i] = ICE
+        t.front[i] = AIR
+      }
+    }
+    iceAround(t, x0 - 10, top + 10, x1 + 10, bottom + 2, (x, y) => t.front[y * t.w + x] === AIR && y > top + 12 && x >= x0 - 6 && x <= x1 + 6)
+    return
+  }
+}
+
+// ---------- v3: objetivos pagos ----------
+
+// Objetivos pagos (PropKind 'target', 32×20): 0 o 1 en Chico, 1 en Mediano, 1 o 2 en Grande. Sobre piso
+// firme y parejo (sin líquido, lejos de abismos), a TARGET_SPAWN_GAP px o más de los tanques y sin pisar otra
+// utilería ni estructuras. Los ubica createMatch con un rng propio después de generate (así generate y los
+// mapas de los otros biomas no cambian). Devuelve la utilería con los objetivos agregados.
+export const TARGET_SPAWN_GAP = 100
+export const TARGET_SPAWN_GAP_SMALL = 70 // Chico: hay poco piso parejo lejos de los tanques
+// Hay líquido hasta 40 px debajo del piso de la columna (un lago congelado: el hielo no es piso firme).
+export function liquidBelow(t: Terrain, x: number, g: number): boolean {
+  for (let y = g; y < Math.min(t.h, g + 40); y++) if (LIQUID[t.front[y * t.w + x]]) return true
+  return false
+}
+const TARGET_TRIES = 80
+const TARGET_FLAT = 4 // diferencia de piso tolerada bajo el objetivo
+export function placeTargets(t: Terrain, props: Prop[], spawns: number[], rng: Rng, size: MapSize): Prop[] {
+  const n = size === 'small' ? (rng.chance(0.5) ? 1 : 0) : size === 'medium' ? 1 : rng.chance(0.5) ? 2 : 1
+  const out = props.slice()
+  const { w, h } = PROP_SIZE.target
+  for (let k = 0, placed = 0; k < TARGET_TRIES && placed < n; k++) {
+    const x = rng.int(30, t.w - 30 - w)
+    let lo = t.h
+    let hi = -1
+    let ok = true
+    for (let ix = x - 2; ix < x + w + 2 && ok; ix++) {
+      const g = columnGround(t, ix)
+      if (t.pits?.[ix] || columnTop(t, ix) < g || g >= t.h - BEDROCK_ROWS - 4 || liquidBelow(t, ix, g)) ok = false
+      // apoyo: el piso más alto bajo la caja (no el de los costados)
+      if (ix >= x && ix < x + w) lo = Math.min(lo, g)
+      hi = Math.max(hi, g)
+    }
+    if (!ok || hi - lo > TARGET_FLAT || nearPit(t, Math.round(x + w / 2), w / 2 + 40)) continue
+    const y = lo - h
+    if (y < 10) continue
+    // caja libre, sin estructuras alrededor
+    let clearBox = true
+    for (let yy = y - 6; yy < lo && clearBox; yy++) {
+      for (let xx = x - 4; xx < x + w + 4 && clearBox; xx++) {
+        const i = yy * t.w + xx
+        if (t.front[i] !== AIR || STRUCTURE.has(t.back[i])) clearBox = false
+      }
+    }
+    if (!clearBox) continue
+    if (spawns.some((s) => Math.abs(s - (x + w / 2)) < (size === 'small' ? TARGET_SPAWN_GAP_SMALL : TARGET_SPAWN_GAP))) continue
+    if (out.some((q) => x + w + 8 > q.x && x - 8 < q.x + q.w && y - 8 < q.y + q.h && lo + 8 > q.y)) continue
+    out.push({ id: out.length, kind: 'target', x, y, w, h, alive: true })
+    placed++
+  }
+  return out
 }

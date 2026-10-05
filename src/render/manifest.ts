@@ -53,6 +53,11 @@ export interface AssetManifest {
     flag: Strip // bandera flameando
     parachute: string // paracaídas abierto, ~20×16, el tanque cuelga del centro de abajo
     windsock: Strip // 7 frames: viento -10..10 en pasos, el del medio es sin viento
+    // v3 (opcionales hasta que el arte los pinte; sin ellos el renderer usa su respaldo)
+    loot?: string // caja de botín ~14×12 (cae con el paracaídas de arriba)
+    target?: Record<Biome, string> // objetivo pago por bioma (camión, depósito, tanque de combustible), ~32×20
+    mine?: Strip // mina clavada, 2 frames (luz apagada / prendida), ~10×6
+    missile?: string // misil teledirigido, ~10×4 mirando a la derecha
   }
 
   ui: {
@@ -62,8 +67,8 @@ export interface AssetManifest {
     font: { file: string; glyphW: number; glyphH: number; chars: string } // fuente pixel en una fila
     arrow: string // flecha para proyectil fuera de pantalla
     pip: Strip // ícono de munición/vida: frame 0 lleno, 1 vacío
-    weaponIcons: Strip // 8 frames de 12×12 en el orden de WeaponId de types.ts
-    itemIcons: Strip // 5 frames de 12×12 en el orden de ITEM_ORDER de types.ts
+    weaponIcons: Strip // v3: 16 frames de 12×12 en el orden de WEAPON_ORDER de types.ts
+    itemIcons: Strip // v3: 9 frames de 12×12 en el orden de ITEM_ORDER de types.ts
     logo: string // logo del título en pixel art, ~320×96
   }
 }

@@ -50,10 +50,11 @@ export function sellEntry(player: Player, entry: ShopEntry): boolean {
 }
 
 // Peso de cada artículo para la IA y cuántas unidades quiere tener como máximo.
+// v3: también las armas y los ítems nuevos (la fácil compra pocas: no sabe usar la mina, el muro ni los saltos).
 const WANT: Record<Difficulty, Partial<Record<ShopId, [number, number]>>> = {
-  easy: { heavy: [3, 4], cluster: [2, 4], napalm: [2, 4], roller: [2, 4], dirt: [1, 3], nuke: [1, 1], shield: [2, 1], repair: [2, 1], parachute: [1, 1], fuel: [1, 1], tracer: [1, 1] },
-  normal: { heavy: [4, 6], cluster: [2, 4], napalm: [3, 4], roller: [3, 4], digger: [1, 2], nuke: [2, 1], shield: [3, 2], repair: [3, 2], parachute: [2, 1] },
-  hard: { heavy: [5, 6], cluster: [2, 4], napalm: [3, 4], roller: [3, 4], digger: [1, 2], nuke: [4, 2], shield: [4, 2], repair: [4, 2], parachute: [2, 1] },
+  easy: { heavy: [3, 4], cluster: [2, 4], napalm: [2, 4], roller: [2, 4], dirt: [1, 3], nuke: [1, 1], shield: [2, 1], repair: [2, 1], parachute: [1, 1], fuel: [1, 1], tracer: [1, 1], bouncer: [1, 2], guided: [1, 2], deflector: [1, 1] },
+  normal: { heavy: [4, 6], cluster: [2, 4], napalm: [3, 4], roller: [3, 4], digger: [1, 2], nuke: [2, 1], shield: [3, 2], repair: [3, 2], parachute: [2, 1], guided: [3, 2], bouncer: [2, 2], laser: [2, 2], mine: [1, 2], quake: [1, 1], blackhole: [1, 1], acid: [2, 2], wall: [1, 2], jetpack: [1, 1], teleport: [1, 1], anchor: [1, 1], deflector: [2, 1] },
+  hard: { heavy: [5, 6], cluster: [2, 4], napalm: [3, 4], roller: [3, 4], digger: [1, 2], nuke: [4, 2], shield: [4, 2], repair: [4, 2], parachute: [2, 1], guided: [4, 4], bouncer: [2, 2], laser: [2, 2], mine: [1, 2], quake: [2, 1], blackhole: [2, 1], acid: [2, 2], wall: [1, 2], jetpack: [1, 1], teleport: [1, 1], anchor: [2, 1], deflector: [3, 1] },
 }
 const STOP: Record<Difficulty, number> = { easy: 0.3, normal: 0.12, hard: 0.05 }
 
